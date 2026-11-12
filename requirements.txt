@@ -12,3 +12,4 @@ winrt-Windows.Foundation.Collections
 Pillow
 pillow-heif
 pywin32
+openpyxl

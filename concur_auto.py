@@ -45,7 +45,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-12 로그인 보강"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-12 병원 찾기"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORIES = ("주차", "카페", "식대")
@@ -124,6 +124,14 @@ def default_settings():
         "분류_우선순위": ["식대", "카페", "주차"],
         "_영수증_판별_설명": "폴더에 일반 사진이 섞여 있어도 됩니다. 금액이 보이고 아래 글자·OCR 날짜·분류 키워드 중 하나가 있으면 영수증으로 봅니다. 아니면 영수증 목록 맨 아래에 '사용 X'로 넣습니다.",
         "영수증_판별_단어": ["합계", "결제", "승인", "카드", "영수증", "금액", "부가세", "사업자", "매출", "가맹점", "거래", "주차"],
+        "_병원_엑셀_설명": "병원 정보 엑셀(MR System Information 탭)을 고르면 실행할 때마다 새 병원을 병원목록.csv에 더합니다. 영문 이름은 한글을 자동으로 바꾼 것이라 확인이 필요합니다. 열을 비워 두면 병원 이름처럼 보이는 열을 자동으로 고르고, 열 제목(예: 병원명)이나 열 문자(예: C)를 적어도 됩니다.",
+        "병원_엑셀_파일": "",
+        "병원_엑셀_탭": "MR System Information",
+        "병원_엑셀_열": "",
+        "_가게_이름_설명": "Concur 경비의 가게(공급업체) 이름을 읽어 병원을 찾을 때 쓰는 칸. 영수증 글자에서 병원을 못 찾았을 때만 씁니다.",
+        "가게_이름_칸": ["#vendorDescription", "[name=vendorDescription]", "#vendor", "[name=vendor]",
+                      "#vendorName", "[name=vendorName]", "#merchantName", "[name=merchantName]"],
+        "가게_이름_라벨": "공급업체|가맹점|판매처|상호|Vendor|Merchant",
         "_입력_문구_설명": "{hospital} 자리에 병원 영문명. 병원을 못 찾으면 ' in {hospital}' 부분은 빠집니다.",
         "입력_문구": {
             "주차": {"Comment": "Parking fee for service in {hospital}", "Business Purpose": "For service"},
@@ -255,15 +263,239 @@ def save_settings(path: Path, cfg: dict):
     path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+HOSPITAL_HEADER = ["OCR에서 찾을 글자", "Concur에 쓸 영문명", "비고"]
+
+
+def load_hospital_rows(path: Path) -> list:
+    """[[찾을 글자, 영문명, 비고], ...]"""
+    if not path.exists():
+        write_csv(path, HOSPITAL_HEADER, [pair + ["기본 목록(동료분 흐름)"] for pair in DEFAULT_HOSPITALS])
+    rows = []
+    for row in read_csv_dicts(path):
+        vals = [str(v or "").strip() for v in row.values()] + ["", ""]
+        if vals[0] and vals[1]:
+            rows.append(vals[:3])
+    return rows
+
+
 def load_hospitals(path: Path) -> list:
     if not path.exists():
-        write_csv(path, ["OCR에서 찾을 글자", "Concur에 쓸 영문명"], DEFAULT_HOSPITALS)
+        load_hospital_rows(path)
     pairs = []
     for row in read_csv_dicts(path):
         vals = [str(v or "").strip() for v in row.values()]
         if len(vals) >= 2 and vals[0] and vals[1]:
             pairs.append([vals[0], vals[1]])
     return pairs
+
+
+# ---------- 한글 → 영문 ----------
+
+_CHO = ["g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "", "j", "jj", "ch", "k", "t", "p", "h"]
+_JUNG = ["a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae", "oe", "yo", "u", "wo", "we", "wi",
+         "yu", "eu", "ui", "i"]
+_JONG = ["", "k", "k", "k", "n", "n", "n", "t", "l", "k", "m", "l", "l", "l", "p", "l", "m", "p", "p", "t", "t",
+         "ng", "t", "t", "k", "t", "p", "t"]
+_JONG_LINK = {1: "g", 2: "kk", 4: "n", 7: "d", 8: "r", 16: "m", 17: "b", 19: "s", 20: "ss", 22: "j", 23: "ch",
+              24: "k", 25: "t", 26: "p", 27: ""}     # 받침이 다음 글자 'ㅇ'으로 넘어갈 때 소리(연음)
+
+
+def romanize_korean(text: str) -> str:
+    """국어의 로마자 표기법(간단판). 예: 원광 → wongwang, 한림 → hallim"""
+    out, carry = [], None
+    codes = [ord(c) - 0xAC00 for c in text]
+    for i, ch in enumerate(text):
+        code = codes[i]
+        if not 0 <= code < 11172:
+            out.append(ch)
+            carry = None
+            continue
+        cho, jung, jong = code // 588, (code % 588) // 28, code % 28
+        nxt = codes[i + 1] if i + 1 < len(text) else -1
+        nxt_cho = nxt // 588 if 0 <= nxt < 11172 else None
+        initial = carry if carry is not None else _CHO[cho]
+        carry, final = None, _JONG[jong]
+        if jong and nxt_cho is not None:
+            if nxt_cho == 11 and jong in _JONG_LINK:          # 받침 + ㅇ → 연음
+                carry, final = _JONG_LINK[jong], ""
+            elif (nxt_cho == 5 and jong in (4, 8)) or (nxt_cho == 2 and jong == 8):   # ㄴ/ㄹ + ㄹ, ㄹ + ㄴ → ll
+                carry, final = "l", "l"
+        out.append(initial + _JUNG[jung] + final)
+    return "".join(out)
+
+
+HOSPITAL_SUFFIX_RE = r"(병원|의료원|의료센터|메디컬센터|의원)"
+_PREFIX_EN = [("국립", "National"), ("도립", "Provincial"), ("시립", "Municipal")]
+_SUFFIX_EN = [("대학교병원", "University Hospital"), ("대학병원", "University Hospital"),
+              ("대학교의료원", "University Medical Center"), ("성모병원", "St. Mary's Hospital"),
+              ("기독병원", "Christian Hospital"), ("한방병원", "Korean Medicine Hospital"),
+              ("요양병원", "Care Hospital"), ("메디컬센터", "Medical Center"), ("의료센터", "Medical Center"),
+              ("의료원", "Medical Center"), ("병원", "Hospital"), ("의원", "Clinic"), ("센터", "Center")]
+_HEADER_WORDS = {"병원", "병원명", "병원이름", "고객", "고객명", "기관", "기관명", "사이트", "site", "customer", "hospital"}
+
+
+def clean_hospital_name(raw) -> str:
+    """'원광대학교병원 1.5T (익산)' → '원광대학교병원'"""
+    t = re.sub(r"\(.*?\)|\[.*?\]", " ", str(raw or "")).strip()
+    t = t.splitlines()[0].strip() if t else ""
+    m = re.match(r"^(.*?" + HOSPITAL_SUFFIX_RE + ")", t)
+    return re.sub(r"\s+", " ", (m.group(1) if m else t)).strip()
+
+
+def looks_like_hospital(value) -> bool:
+    t = compact(clean_hospital_name(value))
+    return len(t) >= 4 and bool(re.search(HOSPITAL_SUFFIX_RE + "$", t))
+
+
+def hospital_key(name) -> str:
+    """영수증에서 찾을 글자: '원광대학교병원' → '원광대', 너무 짧으면(지역 이름 등) 전체 이름"""
+    n = compact(clean_hospital_name(name))
+    short = re.sub(r"(학교)?" + HOSPITAL_SUFFIX_RE + "$", "", n)
+    return short if len(short) >= 3 else n
+
+
+def hospital_english_name(name) -> str:
+    """'원광대학교병원' → 'Wongwang University Hospital' (자동 변환이라 공식 영문명과 다를 수 있음)"""
+    n = compact(clean_hospital_name(name))
+    head = tail = ""
+    for ko, en in _PREFIX_EN:
+        if n.startswith(ko) and len(n) > len(ko) + 1:
+            head, n = en, n[len(ko):]
+            break
+    for ko, en in _SUFFIX_EN:
+        if n.endswith(ko) and len(n) > len(ko):
+            tail, n = en, n[:-len(ko)]
+            break
+    words = [head] if head else []
+    for part in re.split(r"(대학교|대학)", n):
+        if part in ("대학교", "대학"):
+            words.append("University")
+        elif part:
+            r = romanize_korean(part)
+            words.append(r[:1].upper() + r[1:])
+    if tail:
+        words.append(tail)
+    return " ".join(w for w in words if w)
+
+
+# ---------- 병원 정보 엑셀 (MR System Information 탭) ----------
+
+def _column_index(letters: str) -> int:
+    idx = 0
+    for ch in letters.upper():
+        idx = idx * 26 + (ord(ch) - 64)
+    return idx - 1
+
+
+def _pick_hospital_column(rows: list, column: str) -> tuple:
+    """(열 번호, 데이터 시작 행). column: 열 제목, 열 문자(C), 또는 빈칸(자동)"""
+    column = (column or "").strip()
+    if column and re.fullmatch(r"[A-Za-z]{1,3}", column):
+        return _column_index(column), 0
+    if column:
+        want = compact(column).lower()
+        for ri, row in enumerate(rows[:30]):
+            for ci, v in enumerate(row):
+                if compact(str(v or "")).lower() == want:
+                    return ci, ri + 1
+        raise RuntimeError(f"엑셀에서 '{column}' 열 제목을 찾지 못했습니다.")
+    scores = {}
+    for row in rows[:3000]:
+        for ci, v in enumerate(row):
+            if v is not None and looks_like_hospital(v):
+                scores[ci] = scores.get(ci, 0) + 1
+    if not scores:
+        raise RuntimeError("엑셀에서 병원 이름 열을 찾지 못했습니다. 설정 '병원_엑셀_열'에 열 제목이나 열 문자를 적어 주세요.")
+    ci = max(scores, key=scores.get)
+    start = next(ri for ri, row in enumerate(rows) if ci < len(row) and row[ci] is not None and looks_like_hospital(row[ci]))
+    return ci, start
+
+
+def read_hospital_names_from_excel(path: Path, sheet: str, column: str = "") -> list:
+    try:
+        import openpyxl
+    except ImportError:
+        raise RuntimeError("병원 엑셀을 읽으려면 openpyxl 이 필요합니다:  pip install -r requirements.txt")
+    try:
+        wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    except Exception as e:
+        raise RuntimeError(f"병원 엑셀을 열지 못했습니다(.xlsx 파일인지 확인): {path.name} ({e})")
+    try:
+        names = {compact(n).lower(): n for n in wb.sheetnames}
+        want = compact(sheet).lower()
+        real = names.get(want) or next((n for k, n in names.items() if want and want in k), None)
+        if not real:
+            raise RuntimeError(f"엑셀에 '{sheet}' 탭이 없습니다. 있는 탭: {', '.join(wb.sheetnames)}")
+        rows = [list(r) for r in wb[real].iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    ci, start = _pick_hospital_column(rows, column)
+    out, seen = [], set()
+    for row in rows[start:]:
+        if ci >= len(row) or row[ci] is None:
+            continue
+        name = clean_hospital_name(row[ci])
+        key = compact(name).lower()
+        if len(re.findall(r"[가-힣]", name)) < 2 or key in _HEADER_WORDS or key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def import_hospitals_from_excel(cfg: dict, csv_path: Path, log=print) -> tuple:
+    """병원 엑셀의 병원 중 병원목록.csv에 없는 것을 더합니다. → (읽은 수, 더한 수)"""
+    path = str(cfg.get("병원_엑셀_파일") or "").strip()
+    if not path:
+        return 0, 0
+    p = Path(path)
+    if not p.exists():
+        log(f"병원 엑셀 파일이 없습니다: {p}")
+        return 0, 0
+    names = read_hospital_names_from_excel(p, str(cfg.get("병원_엑셀_탭") or "MR System Information"),
+                                           str(cfg.get("병원_엑셀_열") or ""))
+    rows = load_hospital_rows(csv_path)
+    keys = {compact(r[0]) for r in rows}
+    added = []
+    for name in names:
+        key = hospital_key(name)
+        if compact(key) in keys:
+            continue
+        keys.add(compact(key))
+        added.append([key, hospital_english_name(name), f"엑셀에서 자동 변환: {name} (영문 이름 확인)"])
+    if added:
+        write_csv(csv_path, HOSPITAL_HEADER, rows + added)
+    log(f"병원 엑셀: {len(names)}곳 읽음, 병원 목록에 새로 {len(added)}곳 추가"
+        + (" (영문 이름은 자동 변환이니 [병원 목록 편집]에서 확인하세요)" if added else ""))
+    return len(names), len(added)
+
+
+# ---------- Concur 가게 이름(영문)으로 병원 찾기 ----------
+
+def normalize_roman(text: str) -> str:
+    """카드 가게 이름(WON GWANG DAE HAK GYO)과 로마자 표기의 차이를 줄여 비교용으로 바꿉니다."""
+    t = re.sub(r"[^a-z]", "", (text or "").lower())
+    # 옛 표기(CHONBUK: ㅓ를 o로)도 맞도록 o·eo·u를 같게 봅니다
+    for a, b in (("yeo", "yu"), ("eo", "u"), ("eu", "u"), ("ae", "e"), ("oe", "e"), ("oo", "u"), ("o", "u"),
+                 ("ee", "i"), ("sh", "s"), ("ch", "j"), ("k", "g"), ("t", "d"), ("p", "b"), ("r", "l")):
+        t = t.replace(a, b)
+    return t
+
+
+def hospital_from_merchant(text: str, hospitals: list) -> tuple:
+    """가게 이름에 병원 찾을 글자의 로마자가 들어 있으면 (찾을 글자, 영문명). 6글자 이상 맞아야 인정."""
+    t = normalize_roman(text)
+    best, best_len = ("", ""), 0
+    if not t:
+        return best
+    for pair in hospitals:
+        if len(pair) < 2:
+            continue
+        key, en = str(pair[0]).strip(), str(pair[1]).strip()
+        k = normalize_roman(romanize_korean(compact(key)))
+        if len(k) >= 6 and k in t and len(k) > best_len:
+            best, best_len = (key, en), len(k)
+    return best
 
 
 # ============================================================
@@ -600,6 +832,7 @@ class Receipt:
     is_receipt: bool = True                         # 영수증으로 보이는지(자동 판단)
     ocr_dates: list = field(default_factory=list)   # 영수증 글자에서 읽은 날짜
     skip_reason: str = ""                           # 이 달 목록에서 자동으로 뺀 이유
+    hospital_src: str = ""                          # 병원을 어디서 찾았는지
 
     @property
     def main_date(self) -> str:
@@ -691,6 +924,29 @@ def looks_like_receipt(text_compact: str, amounts: list, has_ocr_date: bool, cat
     return hits >= 2
 
 
+HOSP_FROM_OCR, HOSP_FROM_DAY, HOSP_FROM_VENDOR, HOSP_FROM_USER = "영수증 글자", "같은 날 영수증", "Concur 가게 이름", "직접 고침"
+
+
+def fill_same_day_hospitals(receipts: list) -> int:
+    """병원을 못 찾은 영수증에 같은 날 다른 영수증(주차 등)의 병원을 채웁니다. 같은 날 병원이 여러 곳이면 주차 영수증 것만."""
+    by_day = {}
+    for r in receipts:
+        if r.use and r.hospital_en and r.hospital_src in (HOSP_FROM_OCR, HOSP_FROM_USER):
+            by_day.setdefault(r.main_date, []).append(r)
+    filled = 0
+    for r in receipts:
+        if not r.use or r.hospital_en or not r.main_date or "병원" in r.edited:
+            continue
+        cands = by_day.get(r.main_date, [])
+        names = {c.hospital_en for c in cands}
+        if len(names) > 1:
+            names = {c.hospital_en for c in cands if c.category == "주차"}
+        if len(names) == 1:
+            r.hospital_en, r.hospital_src = names.pop(), HOSP_FROM_DAY
+            filled += 1
+    return filled
+
+
 def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, hospitals: list,
                     taken=None) -> Receipt:
     rec = Receipt(original=original, ocr_file=ocr_file, ocr_text=ocr_text, taken=taken)
@@ -705,6 +961,7 @@ def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, ho
     text_c = compact(ocr_text)
     rec.category = detect_category(text_c, cfg["키워드"], cfg.get("분류_우선순위"))
     rec.hospital_key, rec.hospital_en = detect_hospital(text_c, hospitals)
+    rec.hospital_src = HOSP_FROM_OCR if rec.hospital_en else ""
     rec.is_receipt = looks_like_receipt(text_c, rec.amounts, rec.date_from_ocr, rec.category,
                                         cfg.get("영수증_판별_단어"))
     rec.use = rec.is_receipt
@@ -734,7 +991,7 @@ def duplicate_count(rec: Receipt, receipts: list) -> int:
 
 # ---------- 영수증 목록 (엑셀로 고치면 다음 실행에도 유지) ----------
 
-LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "확인 필요", "OCR 앞부분",
+LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "병원 근거", "확인 필요", "OCR 앞부분",
                "[자동] 사용", "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문",
                "날짜 후보", "금액 후보", "찾은 병원 글자"]
 NOT_RECEIPT_NOTE = "영수증 아닌 것 같음(자동 제외)"
@@ -792,6 +1049,7 @@ def apply_user_edits(rec: Receipt, row: dict, tm=None):
         rec.edited.append("분류")
     if g("병원 영문") != g("[자동] 병원 영문"):
         rec.hospital_en = g("병원 영문")
+        rec.hospital_src = HOSP_FROM_USER if rec.hospital_en else ""
         rec.edited.append("병원")
     if tm is not None and "날짜" in rec.edited:
         place_in_month(rec, tm)          # 고친 날짜로 이 달 영수증인지 다시 정함
@@ -825,7 +1083,7 @@ def save_receipt_list(receipts: list, auto: dict, path: Path):
         issues = receipt_issues(r, receipts) or ([r.skip_reason] if is_auto_excluded(r) else [])
         rows.append([
             r.original.name, f"{r.taken:%Y-%m-%d %H:%M}" if r.taken else "",
-            "O" if r.use else "X", r.main_date, r.total or "", r.category, r.hospital_en,
+            "O" if r.use else "X", r.main_date, r.total or "", r.category, r.hospital_en, r.hospital_src,
             ", ".join(issues), compact(r.ocr_text)[:100],
             "O" if a.use else "X", a.main_date, a.total or "", a.category, a.hospital_en,
             " ".join(a.dates), " ".join(str(x) for x in a.amounts), a.hospital_key,
@@ -906,6 +1164,8 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
     if counts["made"] or counts["failed"]:
         log(f"   보정: 새로 {counts['made']}장 / 실패 {counts['failed']}장")
 
+    fill_same_day_hospitals(list(auto.values()))
+    fill_same_day_hospitals(receipts)
     list_path = list_csv_path(results_dir, tm)
     if list_path.exists():
         try:
@@ -915,6 +1175,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         for rec in receipts:
             if rec.original.name in rows:
                 apply_user_edits(rec, rows[rec.original.name], tm)
+        fill_same_day_hospitals(receipts)
     try:
         save_receipt_list(receipts, auto, list_path)
     except PermissionError:
@@ -1013,6 +1274,61 @@ def prepare_upload_file(rec: Receipt, cfg: dict, work_dir: Path) -> Path:
 # ============================================================
 # 5. Concur 자동화 (Playwright + PC에 설치된 Edge)
 # ============================================================
+
+JS_READ_ROWS = r"""
+() => {
+  const root = document.querySelector('.entries-list') || document;
+  const boxes = Array.from(root.querySelectorAll('input[type="checkbox"]'));
+  const seen = new Set();
+  const out = [];
+  for (const cb of boxes) {
+    let row = cb.closest('[role="row"], tr, .sapcnqr-data-grid-list__row');
+    if (!row) {
+      let c = cb.parentElement;
+      for (let i = 0; i < 12 && c; i++, c = c.parentElement) {
+        if (c.querySelectorAll('input[type="checkbox"]').length > 1) break;
+        row = c;
+      }
+    }
+    if (!row || seen.has(row)) continue;
+    seen.add(row);
+    out.push(Array.from(row.querySelectorAll('*')).filter(e => e.children.length === 0)
+      .map(e => (e.textContent || '').trim()).filter(t => t));
+  }
+  return out;
+}
+"""
+
+
+def _amount_in_cell(text: str):
+    t = (text or "").strip()
+    m = re.fullmatch(r"(?:([A-Z]{3}|₩)\s*)?(\d[\d,]*(?:\.\d+)?)", t)
+    if not m or not (m.group(1) or "," in m.group(2) or len(re.sub(r"\D", "", m.group(2).split(".")[0])) >= 3):
+        return None
+    return concur_amount_to_int(m.group(2))
+
+
+def parse_entry_rows(rows: list) -> list:
+    """리포트 경비 목록의 줄 글자들 → [(날짜, 금액, 줄 글자)]"""
+    out = []
+    for texts in rows or []:
+        iso = next((d for d in (concur_date_to_iso(t) for t in texts) if d), None)
+        amount = next((a for a in (_amount_in_cell(t) for t in texts) if a is not None), None)
+        if iso and amount is not None:
+            out.append((iso, amount, " ".join(t for t in texts if t)[:200]))
+    return out
+
+
+def apply_vendor_hospital(rec, vendor: str, hospitals: list) -> bool:
+    """영수증 글자나 직접 입력으로 병원을 못 정한 영수증에 Concur 가게 이름의 병원을 씁니다(같은 날 추정보다 우선)."""
+    if rec is None or not vendor or rec.hospital_src in (HOSP_FROM_OCR, HOSP_FROM_USER) or "병원" in rec.edited:
+        return False
+    _, en = hospital_from_merchant(vendor, hospitals)
+    if not en:
+        return False
+    rec.hospital_en, rec.hospital_src = en, HOSP_FROM_VENDOR
+    return True
+
 
 JS_SELECT_MONTH = r"""
 ({month, year}) => {
@@ -1139,6 +1455,8 @@ class ConcurBot:
         self.login_timeout_s = 600
         self.diagnose_after_s = 15
         self.find_mail_link = find_login_link_in_outlook
+        self.hospitals = []          # 가게 이름으로 병원을 찾을 때 씀
+        self.entries = []            # 리포트 경비 목록 [(날짜, 금액, 줄 글자)]
 
     def _check_stop(self):
         if self.stop_flag is not None and self.stop_flag.is_set():
@@ -1451,9 +1769,46 @@ class ConcurBot:
         time.sleep(3)
 
     # ---------- 경비 편집 화면 열기 ----------
+    def read_vendor(self) -> str:
+        """경비 편집 화면의 가게(공급업체) 이름"""
+        page = self.page
+        locs = [page.locator(f"{sel}:visible") for sel in (self.cfg.get("가게_이름_칸") or [])]
+        label = str(self.cfg.get("가게_이름_라벨") or "").strip()
+        if label:
+            locs.append(page.get_by_label(re.compile(label, re.I)))
+        for loc in locs:
+            try:
+                if loc.count() == 0:
+                    continue
+                el = loc.first
+                try:
+                    value = el.input_value(timeout=1000)
+                except Exception:
+                    value = el.text_content(timeout=1000) or ""
+                value = " ".join(value.split())
+                if value:
+                    return value
+            except Exception:
+                continue
+        return ""
+
+    def vendor_text(self, iso, amount) -> str:
+        """가게 이름. 편집 화면에서 못 읽으면 리포트 경비 목록에서 같은 날짜·금액 줄의 글자"""
+        value = self.read_vendor()
+        if value:
+            return value
+        for e_iso, e_amount, text in self.entries:
+            if e_iso == iso and e_amount == amount:
+                return text
+        return ""
+
     def open_first_expense(self):
         page = self.page
         page.locator(".entries-list").first.wait_for(state="visible")
+        try:
+            self.entries = parse_entry_rows(page.evaluate(JS_READ_ROWS))
+        except Exception:
+            self.entries = []
         boxes = page.locator(".entries-list .sapcnqr-dropzone input.sapcnqr-checkbox__input")
         try:
             boxes.first.wait_for(state="attached", timeout=10000)
@@ -1562,7 +1917,8 @@ class ConcurBot:
                 except Exception:
                     self.log("   저장 버튼을 누르지 못했습니다. Concur 화면에서 직접 저장하세요.")
                 break
-            row = {"순번": i, "Concur 날짜": "", "Concur 금액": "", "영수증": "", "분류": "", "처리": "", "확인 필요": "", "오류": ""}
+            row = {"순번": i, "Concur 날짜": "", "Concur 금액": "", "가게 이름": "", "영수증": "", "분류": "",
+                   "병원": "", "병원 근거": "", "처리": "", "확인 필요": "", "오류": ""}
             checks = []
             try:
                 self.wait_progress(i)
@@ -1571,12 +1927,18 @@ class ConcurBot:
                 row["Concur 날짜"], row["Concur 금액"] = date_text, amount_text
                 iso, amount = concur_date_to_iso(date_text), concur_amount_to_int(amount_text)
                 rec = find_receipt(receipts, iso, amount) if iso and amount is not None else None
+                try:
+                    row["가게 이름"] = self.vendor_text(iso, amount)
+                except Exception:
+                    pass
                 upload = None
                 if rec is None:
                     checks.append("영수증 없음")
                 else:
                     rec.used_for = f"{i}번 {date_text} {amount_text}"
+                    apply_vendor_hospital(rec, row["가게 이름"], self.hospitals)
                     row["영수증"], row["분류"] = rec.original.name, rec.category
+                    row["병원"], row["병원 근거"] = rec.hospital_en, rec.hospital_src
                     if not rec.category:
                         checks.append("분류 없음(영수증만 첨부)")
                     elif not rec.hospital_en:
@@ -1649,7 +2011,6 @@ def unfinished_month_note(tm: TargetMonth) -> str:
 def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
     """mode: ocr(영수증 분석만) / full(전체) / edit(만든 리포트에 입력만)"""
     cfg, _ = load_settings(base / SETTINGS_FILE_NAME)
-    hospitals = load_hospitals(base / HOSPITAL_FILE_NAME)
     tm = resolve_target_month(month_text)
     results_dir = base / "결과"
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -1661,6 +2022,11 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         log(f"===== {title} | {tm.prefix} ({tm.month_name}) | 프로그램 {APP_VERSION} =====")
         if is_unfinished_month(tm):
             log(unfinished_month_note(tm))
+        try:
+            import_hospitals_from_excel(cfg, base / HOSPITAL_FILE_NAME, log)
+        except Exception as e:
+            log(f"병원 엑셀을 읽지 못해 지금 병원 목록으로 진행합니다: {e}")
+        hospitals = load_hospitals(base / HOSPITAL_FILE_NAME)
         receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log)
         list_path = list_csv_path(results_dir, tm)
         need = [r for r in receipts if receipt_issues(r, receipts) or r.skip_reason == UNDATED_NOTE]
@@ -1700,6 +2066,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
                 receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log)
 
         bot = ConcurBot(cfg, log, ui, stop_flag)
+        bot.hospitals = hospitals
         bot.start()
         if mode == "edit":
             bot.wait_login(need_home=False)
@@ -1816,6 +2183,7 @@ class GuiApp:
         sf = ttk.Frame(f)
         sf.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(2, 6))
         for text, cmd in (("영수증 목록 열기", self.open_list), ("병원 목록 편집", self.open_hospitals),
+                          ("병원 엑셀 가져오기", self.import_hospital_excel),
                           ("결과 폴더 열기", lambda: open_path(self.base / "결과")),
                           ("설정 파일 열기", lambda: open_path(self.base / SETTINGS_FILE_NAME, notepad=True))):
             ttk.Button(sf, text=text, command=cmd).pack(side="left", padx=3)
@@ -1860,6 +2228,30 @@ class GuiApp:
     def open_hospitals(self):
         load_hospitals(self.base / HOSPITAL_FILE_NAME)
         open_path(self.base / HOSPITAL_FILE_NAME)
+
+    def import_hospital_excel(self):
+        cfg, _ = load_settings(self.base / SETTINGS_FILE_NAME)
+        current = str(cfg.get("병원_엑셀_파일") or "")
+        picked = self.fd.askopenfilename(
+            title="병원 정보 엑셀 고르기 (MR System Information 탭이 있는 파일)",
+            initialdir=str(Path(current).parent) if current else str(Path.home()),
+            filetypes=[("Excel 파일", "*.xlsx *.xlsm"), ("모든 파일", "*.*")])
+        if not picked:
+            return
+        cfg["병원_엑셀_파일"] = str(Path(picked))
+        save_settings(self.base / SETTINGS_FILE_NAME, cfg)
+        try:
+            read, added = import_hospitals_from_excel(cfg, self.base / HOSPITAL_FILE_NAME, self.append)
+        except Exception as e:
+            self.mb.showerror("병원 엑셀 가져오기", str(e))
+            return
+        self.mb.showinfo("병원 엑셀 가져오기",
+                         f"병원 {read}곳을 읽었고, 병원 목록에 새로 {added}곳을 넣었습니다.\n\n"
+                         "영문 이름은 한글을 자동으로 바꾼 것이라 공식 영문명과 다를 수 있습니다. "
+                         "이어서 열리는 병원 목록에서 확인하고 고쳐 주세요.\n"
+                         "앞으로는 실행할 때마다 이 엑셀에서 새 병원을 자동으로 더합니다.")
+        if added:
+            open_path(self.base / HOSPITAL_FILE_NAME)
 
     def save_form(self):
         cfg, _ = load_settings(self.base / SETTINGS_FILE_NAME)
