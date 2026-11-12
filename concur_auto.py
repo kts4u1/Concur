@@ -46,7 +46,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 리포트 이름·한글 항목 이름"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 Concur 항목 목록 추가"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -120,8 +120,19 @@ DEFAULT_ELEMENT_LABELS = {
     "Business Purpose": "Business Purpose|비즈니스 목적|업무 목적",
 }
 
-# 사용자 Concur의 Expense Type(화면에서 확인한 것). [화면 조사]가 Concur에서 전체 목록을 읽어 설정에 더합니다.
-KNOWN_EXPENSE_TYPES = ["Car mileage", "Meals & Drinks", "Other", "Other Staff Expenses", "Parking & Toll", "Training"]
+# 사용자 Concur의 Expense Type(사용자가 화면을 캡처해 보내 준 것, 글자 그대로). Concur에서 고를 때는 이름이 완전히 같은
+# 항목만 고르므로 띄어쓰기·대소문자까지 같아야 합니다. [화면 조사]가 Concur에서 전체 목록을 읽어 설정에 더하기도 합니다.
+KNOWN_EXPENSE_TYPES = [
+    "Accommodation", "M card accommodation",
+    "Accommodation Covered Recipient", "Airfare Covered Recipient",
+    "M card accommodation - Covered recipient", "M card airfare - Covered recipient",
+    "M card business meals & drinks - Covered recipient", "M card entertainment - Covered recipient",
+    "M card gifts - Covered recipient", "M card taxi - Covered recipient",
+    "Entertainment", "M card entertainment", "M card gifts",
+    "Business Meal & Drinks (with clients)", "M card business meals and drinks (with clients)",
+    "M card meals and drinks", "Meals & Drinks",
+    "Car mileage", "Other", "Other Staff Expenses", "Parking & Toll", "Training",
+]
 
 OLD_DEFAULT_CITY = "Daejeon (ex Taejon), KOREA, REPUBLIC OF"
 DEFAULT_CITIES = {
@@ -378,6 +389,9 @@ def load_settings(path: Path) -> tuple:
         merged["병원_엑셀_탭"] = defaults["병원_엑셀_탭"]
     if user.get("리포트_이름_형식") in OLD_REPORT_NAME_FORMATS:       # 예전 기본값 → Monthly Expense for Nov
         merged["리포트_이름_형식"] = defaults["리포트_이름_형식"]
+    saved_types = user.get("Concur_경비_유형")                     # 저장된 목록에 새로 알게 된 항목을 더함
+    if isinstance(saved_types, list):
+        merged["Concur_경비_유형"] = saved_types + [t for t in KNOWN_EXPENSE_TYPES if t not in saved_types]
     screen, old_screen = merged.get("화면_문구"), user.get("화면_문구")
     if isinstance(screen, dict) and isinstance(old_screen, dict):
         for k, v in old_screen.items():

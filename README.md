@@ -92,7 +92,7 @@ iPhone 카메라로 찍으면 iCloud 사진으로 올라가고 PC로도 자동�
 - `{hospital}`(또는 `{병원}`) 자리에 병원 영문명이 들어갑니다. 병원을 못 찾으면 ` in {hospital}`/` at {hospital}` 부분은 빠집니다.
 - 맨 아래 `(분류 없음)` 줄은 어느 항목에도 안 맞는 영수증과 영수증 없는 경비의 Expense Type입니다.
 - 이미 Concur에 들어간 경비는 ③ **만든 리포트에 입력만**을 다시 누르면 새 문구로 다시 입력됩니다(이미 첨부된 영수증은 다시 올리지 않음).
-- **Concur 항목 목록 늘리기:** 처음 목록에는 화면에서 확인한 Car mileage, Meals & Drinks, Other, Other Staff Expenses, Parking & Toll, Training이 들어 있습니다. Concur의 경비 편집 화면을 열고 창의 **[화면 조사]**를 누르면 Expense Type 전체 목록을 읽어 이 목록에 더합니다.
+- **Concur 항목 목록 늘리기:** 처음 목록에는 화면에서 확인한 항목(Accommodation, Entertainment, Meals & Drinks, Business Meal & Drinks (with clients), M card … 항목들, Car mileage, Other, Other Staff Expenses, Parking & Toll, Training 등)이 들어 있습니다. Concur에서는 이름이 **완전히 같은** 항목만 고르므로 비슷한 이름(예: `Accommodation`과 `M card accommodation`)이 헷갈리지 않습니다. Concur의 경비 편집 화면을 열고 창의 **[화면 조사]**를 누르면 Expense Type 전체 목록을 읽어 이 목록에 더합니다.
 
 ## Concur 화면이 바뀌었을 때
 

@@ -131,3 +131,38 @@ def test_remember_expense_types_in_settings(tmp_path):
     assert ca.remember_expense_types(s, ["Car mileage", "Taxi", "Hotel", "Undefined"]) == 2
     assert ca.load_settings(s)[0]["Concur_경비_유형"][-2:] == ["Taxi", "Hotel"]
     assert ca.remember_expense_types(s, ["Taxi"]) == 0
+
+
+def test_known_types_added_to_old_settings_file(tmp_path):
+    s = tmp_path / ca.SETTINGS_FILE_NAME
+    old = ["Car mileage", "Meals & Drinks", "Other", "Other Staff Expenses", "Parking & Toll", "Training", "Taxi"]
+    s.write_text(__import__("json").dumps({"Concur_경비_유형": old}), encoding="utf-8")
+    types = ca.load_settings(s)[0]["Concur_경비_유형"]
+    assert types[:7] == old                                           # 예전 목록(직접 읽어 온 Taxi 포함)은 그대로
+    for t in ("Accommodation", "M card taxi - Covered recipient", "Business Meal & Drinks (with clients)"):
+        assert types.count(t) == 1                                    # 사용자가 보내 준 항목이 더해짐
+    assert types.count("Meals & Drinks") == 1
+
+
+SIMILAR = """<!doctype html><meta charset="utf-8"><p>Expense Type</p>
+<span name="expenseType" onclick="document.getElementById('pop').style.display='block'">Undefined</span>
+<div id="pop" style="display:none">%s</div>
+<script>document.querySelectorAll('.sapcnqr-listbox-item__wrapper').forEach(el => el.onclick = () => {
+  document.querySelector('[name=expenseType]').textContent = el.textContent;
+  document.getElementById('pop').style.display = 'none'; });</script>""" % "".join(
+    f'<div class="sapcnqr-listbox-item__wrapper">{t}</div>' for t in (
+        "Accommodation Covered Recipient", "M card accommodation", "M card accommodation - Covered recipient",
+        "Accommodation", "M card business meals and drinks (with clients)", "M card business meals & drinks - Covered recipient",
+        "M card meals and drinks", "Meals & Drinks"))
+
+
+@pytest.mark.parametrize("name", ["Accommodation", "Meals & Drinks", "M card business meals & drinks - Covered recipient"])
+def test_similar_expense_type_names_chosen_exactly(browser, name):
+    page = browser.new_page()
+    page.set_default_timeout(3000)
+    page.set_content(SIMILAR)
+    bot = make_bot(page)
+    trigger, value = bot.find_select(bot.sel("Expense Type"))
+    assert value == "Undefined"
+    bot.choose_option(trigger, name)
+    assert page.inner_text("[name=expenseType]") == name               # 이름이 비슷한 다른 항목을 고르지 않음
