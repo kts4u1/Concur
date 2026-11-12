@@ -45,9 +45,10 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 병원 목록 정리"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 자동 입력표"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
+CATEGORY_FILE_NAME = "자동입력표.csv"
 CATEGORIES = ("주차", "카페", "식대")
 
 # 기본 병원 목록: 사용자 영수증에서 확인한 병원만 (2026-11-13 사용자 요청. 나머지는 영수증·회사 엑셀에서 더해짐)
@@ -151,7 +152,7 @@ def default_settings():
         "_영수증_병원_설명": "병원 목록에 없어도 영수증에 'OO병원'이 보이면 그 이름을 쓰고 병원 목록에 더합니다(영문 이름은 자동 변환).",
         "영수증에서_병원_찾기": True,
         "리포트_이름_형식": "{month_name} Expenses",
-        "_키워드_설명": "OCR 결과(띄어쓰기 무시)에 이 글자가 있으면 해당 분류. 여러 분류가 맞으면 분류_우선순위 앞쪽이 이깁니다.",
+        "_키워드_설명": "아래 키워드·분류_우선순위·입력_문구·Undefined일_때_선택할_유형은 자동입력표.csv를 처음 만들 때만 씁니다. 그 뒤로는 자동입력표.csv(창의 [자동 입력표 편집])에서 고치세요.",
         "키워드": {
             "주차": ["주차", "입차", "출차", "주자"],
             "카페": ["메리카", "리카노", "테이크", "카페"],
@@ -168,13 +169,13 @@ def default_settings():
         "가게_이름_칸": ["#vendorDescription", "[name=vendorDescription]", "#vendor", "[name=vendor]",
                       "#vendorName", "[name=vendorName]", "#merchantName", "[name=merchantName]"],
         "가게_이름_라벨": "공급업체|가맹점|판매처|상호|Vendor|Merchant",
-        "_입력_문구_설명": "{hospital} 자리에 병원 영문명. 병원을 못 찾으면 ' in {hospital}' 부분은 빠집니다.",
+        "_입력_문구_설명": "자동입력표.csv를 처음 만들 때만 씁니다. {hospital} 자리에 병원 영문명. 병원을 못 찾으면 ' in {hospital}' 부분은 빠집니다.",
         "입력_문구": {
             "주차": {"Comment": "Parking fee for service in {hospital}", "Business Purpose": "For service"},
             "카페": {"Comment": "Cafe for wifi in {hospital}", "Business Purpose": "For wifi"},
             "식대": {"Comment": "Overtime meal fee for service in {hospital}", "Business Purpose": "For Overtime meal"},
         },
-        "_Undefined_설명": "Expense Type이 Undefined인 경비에 고를 유형. 결과 파일에 '확인 필요'로 표시됩니다.",
+        "_Undefined_설명": "자동입력표.csv를 처음 만들 때만 씁니다. Expense Type이 Undefined인 경비에 고를 유형. 결과 파일에 '확인 필요'로 표시됩니다.",
         "Undefined일_때_선택할_유형": {
             "주차": "Parking & Toll",
             "카페": "Other Staff Expenses",
@@ -645,6 +646,63 @@ def hospital_from_merchant(text: str, hospitals: list) -> tuple:
         if len(k) >= 6 and k in t and len(k) > best_len:
             best, best_len = (key, en), len(k)
     return best
+
+
+# ---------- 자동 입력표 (분류마다 찾을 글자·Comment·Business Purpose·Expense Type) ----------
+
+CATEGORY_HEADER = ["분류", "영수증에서 찾을 글자(쉼표로 구분)", "Comment", "Business Purpose",
+                   "Expense Type이 Undefined일 때", "설명"]
+NO_CATEGORY = "(분류 없음)"
+
+
+def category_rows_from_cfg(cfg: dict) -> list:
+    """설정 파일의 키워드·입력 문구로 처음 자동입력표를 만듭니다. 위에 있는 분류가 먼저 맞춰집니다."""
+    priority = list(cfg.get("분류_우선순위") or [])
+    order = priority + [c for c in (cfg.get("입력_문구") or {}) if c not in priority]
+    types = cfg.get("Undefined일_때_선택할_유형") or {}
+    rows = []
+    for cat in order:
+        t = (cfg.get("입력_문구") or {}).get(cat, {})
+        rows.append([cat, ", ".join((cfg.get("키워드") or {}).get(cat, [])), t.get("Comment", ""),
+                     t.get("Business Purpose", ""), types.get(cat, ""), ""])
+    if rows:
+        rows[0][5] = "위에 있는 분류가 먼저 맞춰집니다. {hospital}(또는 {병원}) 자리에 병원 영문명이 들어가고, 병원을 못 찾으면 ' in {hospital}'은 빠집니다."
+    rows.append([NO_CATEGORY, "", "", "", types.get("분류없음", "Other Staff Expenses"),
+                 "어느 분류에도 맞지 않는 영수증과 영수증 없는 경비의 Expense Type"])
+    return rows
+
+
+def apply_category_table(cfg: dict, path: Path, log=None) -> list:
+    """자동입력표.csv(없으면 설정으로 만듦)를 읽어 분류·찾을 글자·입력 문구·Expense Type을 설정에 반영합니다. → 분류 목록"""
+    if not path.exists():
+        write_csv(path, CATEGORY_HEADER, category_rows_from_cfg(cfg))
+    order, keywords, texts = [], {}, {}
+    types = {"분류없음": (cfg.get("Undefined일_때_선택할_유형") or {}).get("분류없음", "Other Staff Expenses")}
+    for row in read_csv_dicts(path):
+        vals = [str(v or "").strip() for v in row.values()] + [""] * 6
+        cat, kw, comment, purpose, etype = vals[:5]
+        if not cat:
+            continue
+        if compact(cat) in ("(분류없음)", "분류없음"):
+            if etype:
+                types["분류없음"] = etype
+            continue
+        if cat in order:
+            continue
+        order.append(cat)
+        keywords[cat] = [compact(k) for k in re.split(r"[,，/]", kw) if compact(k)]
+        texts[cat] = {name: value.replace("{병원}", "{hospital}")
+                      for name, value in (("Comment", comment), ("Business Purpose", purpose)) if value}
+        if etype:
+            types[cat] = etype
+    if not order:
+        if log:
+            log(f"자동 입력표에 분류가 없어 설정 파일의 값을 씁니다: {path.name}")
+        return list(cfg.get("분류_우선순위") or CATEGORIES)
+    cfg["분류_우선순위"], cfg["키워드"], cfg["입력_문구"], cfg["Undefined일_때_선택할_유형"] = order, keywords, texts, types
+    if log:
+        log(f"자동 입력표: 분류 {len(order)}개 ({', '.join(order)})")
+    return order
 
 
 # ============================================================
@@ -1282,7 +1340,7 @@ def parse_use_cell(text: str, default: bool) -> bool:
     return default
 
 
-def apply_user_edits(rec: Receipt, row: dict, tm=None, cities=None):
+def apply_user_edits(rec: Receipt, row: dict, tm=None, cities=None, categories=None):
     """'[자동]' 칸과 다르게 바뀐 칸만 사용자가 고친 것으로 보고 반영합니다."""
     g = lambda k: str(row.get(k) or "").strip()
     user_use = parse_use_cell(g("사용(O/X)"), rec.use)
@@ -1294,7 +1352,7 @@ def apply_user_edits(rec: Receipt, row: dict, tm=None, cities=None):
     if user_amt is not None and user_amt != auto_amt:
         rec.total, rec.amounts, rec.edited = user_amt, [user_amt], rec.edited + ["금액"]
     if g("분류") != g("[자동] 분류"):
-        rec.category = g("분류") if g("분류") in CATEGORIES else ""
+        rec.category = g("분류") if g("분류") in (categories or CATEGORIES) else ""
         rec.edited.append("분류")
     if g("병원 영문") != g("[자동] 병원 영문"):
         rec.hospital_en = g("병원 영문")
@@ -1444,7 +1502,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             raise RuntimeError(f"영수증 목록 파일이 열려 있어 읽을 수 없습니다. 엑셀을 닫고 다시 실행하세요.\n{list_path}")
         for rec in receipts:
             if rec.original.name in rows:
-                apply_user_edits(rec, rows[rec.original.name], tm, cfg.get("도시_목록"))
+                apply_user_edits(rec, rows[rec.original.name], tm, cfg.get("도시_목록"), cfg.get("분류_우선순위"))
         fill_same_day_hospitals(receipts)
         fill_same_day_cities(receipts)
     if hospital_csv is not None:
@@ -1528,8 +1586,9 @@ def texts_for(rec: Receipt, cfg: dict) -> dict:
         return {}
     out = {}
     for name, t in tmpl.items():
+        t = t.replace("{병원}", "{hospital}")
         if not rec.hospital_en:
-            t = t.replace(" in {hospital}", "")
+            t = re.sub(r"\s+(?:in|at|@)\s+\{hospital\}|\{hospital\}", "", t)
         out[name] = t.replace("{hospital}", rec.hospital_en).strip()
     return out
 
@@ -2431,6 +2490,13 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         if is_unfinished_month(tm):
             log(unfinished_month_note(tm))
         try:
+            apply_category_table(cfg, base / CATEGORY_FILE_NAME, log)
+        except PermissionError:
+            log("자동 입력표가 엑셀에 열려 있어 읽지 못했습니다. 엑셀을 닫고 다시 실행하세요.")
+            raise Cancelled()
+        except Exception as e:
+            log(f"자동 입력표를 읽지 못해 설정 파일의 값으로 진행합니다: {e}")
+        try:
             import_hospitals_from_excel(cfg, base / HOSPITAL_FILE_NAME, log)
         except Exception as e:
             log(f"병원 엑셀을 읽지 못해 지금 병원 목록으로 진행합니다: {e}")
@@ -2592,6 +2658,7 @@ class GuiApp:
         sf.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(2, 6))
         for text, cmd in (("영수증 목록 열기", self.open_list), ("병원 목록 편집", self.open_hospitals),
                           ("병원 엑셀 가져오기", self.import_hospital_excel),
+                          ("자동 입력표 편집", self.open_category_table),
                           ("결과 폴더 열기", lambda: open_path(self.base / "결과")),
                           ("설정 파일 열기", lambda: open_path(self.base / SETTINGS_FILE_NAME, notepad=True))):
             ttk.Button(sf, text=text, command=cmd).pack(side="left", padx=3)
@@ -2633,6 +2700,12 @@ class GuiApp:
             open_path(path)
         else:
             self.mb.showinfo("영수증 목록", "아직 이 달의 영수증 목록이 없습니다. ①을 먼저 실행하세요.")
+
+    def open_category_table(self):
+        path = self.base / CATEGORY_FILE_NAME
+        if not path.exists():
+            apply_category_table(load_settings(self.base / SETTINGS_FILE_NAME)[0], path)
+        open_path(path)
 
     def open_hospitals(self):
         load_hospitals(self.base / HOSPITAL_FILE_NAME)
