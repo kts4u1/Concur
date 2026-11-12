@@ -298,9 +298,17 @@ def resolve_target_month(text=None, today=None) -> TargetMonth:
     return TargetMonth(today.year - 1, 12) if today.month == 1 else TargetMonth(today.year, today.month - 1)
 
 
-def recent_months(count: int = 12, today=None) -> list:
+def is_unfinished_month(tm: TargetMonth, today=None) -> bool:
+    """이번 달처럼 아직 끝나지 않은 달인지"""
+    today = today or date.today()
+    return (tm.year, tm.month) >= (today.year, today.month)
+
+
+def recent_months(count: int = 12, today=None, include_current: bool = False) -> list:
+    """지난달부터 거꾸로 count개. include_current면 맨 앞에 이번 달을 넣습니다."""
+    today = today or date.today()
     tm = resolve_target_month(None, today)
-    out = []
+    out = [f"{today.year}-{today.month:02d}"] if include_current else []
     y, m = tm.year, tm.month
     for _ in range(count):
         out.append(f"{y}-{m:02d}")
@@ -1361,6 +1369,12 @@ class ConsoleUI:
         open_path(path)
 
 
+def unfinished_month_note(tm: TargetMonth) -> str:
+    return (f"{tm.prefix}: 아직 끝나지 않은 달입니다. "
+            f"Concur에 아직 들어오지 않은 경비와 앞으로 받을 영수증은 빠집니다. "
+            f"달이 끝난 뒤 남은 경비를 Concur에서 리포트에 추가하고 ③으로 이어서 넣으면 됩니다.")
+
+
 def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
     """mode: ocr(영수증 분석만) / full(전체) / edit(만든 리포트에 입력만)"""
     cfg, _ = load_settings(base / SETTINGS_FILE_NAME)
@@ -1374,6 +1388,8 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
     title = {"ocr": "영수증 분석", "full": "전체 실행", "edit": "리포트에 입력"}[mode]
     try:
         log(f"===== {title} | {tm.prefix} ({tm.month_name}) =====")
+        if is_unfinished_month(tm):
+            log(unfinished_month_note(tm))
         receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log)
         list_path = list_csv_path(results_dir, tm)
         need = [r for r in receipts if receipt_issues(r, receipts) or r.skip_reason == UNDATED_NOTE]
@@ -1485,9 +1501,12 @@ class GuiApp:
         f.columnconfigure(1, weight=1)
 
         ttk.Label(f, text="처리할 달").grid(row=0, column=0, sticky="w", pady=3)
-        months = recent_months()
-        self.month = tk.StringVar(value=months[0])
-        ttk.Combobox(f, textvariable=self.month, values=months, width=10, state="readonly").grid(row=0, column=1, sticky="w")
+        months = recent_months(include_current=True)                     # 맨 위가 이번 달
+        self.month = tk.StringVar(value=resolve_target_month(None).prefix)  # 처음 선택은 지난달
+        mf = ttk.Frame(f)
+        mf.grid(row=0, column=1, columnspan=2, sticky="w")
+        ttk.Combobox(mf, textvariable=self.month, values=months, width=10, state="readonly").pack(side="left")
+        ttk.Label(mf, foreground="#555", text="  처음에는 지난달이 골라져 있습니다. 맨 위의 이번 달도 고를 수 있습니다.").pack(side="left")
 
         ttk.Label(f, text="영수증 폴더").grid(row=1, column=0, sticky="w", pady=3)
         self.folder = tk.StringVar(value=self.cfg["영수증_원본_폴더"])
@@ -1580,8 +1599,13 @@ class GuiApp:
     def start(self, mode):
         if self.worker and self.worker.is_alive():
             return
+        tm = resolve_target_month(self.month.get())
+        note = unfinished_month_note(tm) if is_unfinished_month(tm) else ""
         if mode == "full" and not self.mb.askokcancel(
-                "전체 실행", f"{self.month.get()} 리포트를 새로 만듭니다.\n이미 만들었다면 ③을 쓰세요. 계속할까요?"):
+                "전체 실행", f"{self.month.get()} 리포트를 새로 만듭니다.\n이미 만들었다면 ③을 쓰세요."
+                + (f"\n\n{note}" if note else "") + "\n\n계속할까요?"):
+            return
+        if mode == "edit" and note and not self.mb.askokcancel("리포트에 입력", f"{note}\n\n계속할까요?"):
             return
         try:
             self.save_form()
@@ -1676,7 +1700,7 @@ class GuiBridge:
 def main():
     parser = argparse.ArgumentParser(description="Concur 경비 자동 입력")
     parser.add_argument("--cli", action="store_true", help="창 대신 명령 프롬프트로 실행")
-    parser.add_argument("--month", help="처리할 달 (예: 2026-10). 없으면 지난달")
+    parser.add_argument("--month", help="처리할 달 (예: 2026-10, 이번 달도 됨). 없으면 지난달")
     parser.add_argument("--ocr-only", action="store_true", help="영수증 분석만")
     parser.add_argument("--edit-only", action="store_true", help="이미 만든 리포트에 입력만")
     parser.add_argument("--full", action="store_true", help="전체 실행")
@@ -1708,6 +1732,9 @@ def main():
         mode = {"1": "ocr", "2": "full", "3": "edit"}.get(input("번호: ").strip(), "")
         if not mode:
             return
+        if not args.month:
+            last, this = resolve_target_month(None).prefix, recent_months(1, include_current=True)[0]
+            args.month = input(f"처리할 달 (Enter={last} 지난달, 이번 달은 {this}): ").strip() or None
     run_job(mode, args.month, ConsoleUI(), base)
 
 
