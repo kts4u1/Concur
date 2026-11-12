@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# exe 빌드 결과
+build/
+dist/
+*.spec
+
+# 실행하면 프로그램 옆에 생기는 개인 파일 (공개 저장소이므로 올리지 않음)
+concur_settings.json
+병원목록.csv
+결과/
+실행기록/

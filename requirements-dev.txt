@@ -1,0 +1,3 @@
+# 테스트용 (Linux/Windows 공통). requirements.txt의 winrt 패키지는 Windows에서만 설치됩니다.
+pytest
+playwright
