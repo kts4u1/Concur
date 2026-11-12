@@ -46,7 +46,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 경비 없음 처리"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 도시 찾기 보강"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -139,6 +139,18 @@ DEFAULT_CITIES = {
     "천안": "Cheonan, KOREA, REPUBLIC OF", "세종": "Sejong, KOREA, REPUBLIC OF",
     "부산": "Busan, KOREA, REPUBLIC OF", "대구": "Daegu, KOREA, REPUBLIC OF",
     "인천": "Incheon, KOREA, REPUBLIC OF",
+    # 광주·전라 시·군 (Concur 이름은 확인 못 함 → 정확히 안 맞으면 앞 단어로 검색)
+    "완주": "Wanju, KOREA, REPUBLIC OF", "진안": "Jinan, KOREA, REPUBLIC OF", "무주": "Muju, KOREA, REPUBLIC OF",
+    "장수": "Jangsu, KOREA, REPUBLIC OF", "임실": "Imsil, KOREA, REPUBLIC OF", "순창": "Sunchang, KOREA, REPUBLIC OF",
+    "고창": "Gochang, KOREA, REPUBLIC OF", "부안": "Buan, KOREA, REPUBLIC OF", "담양": "Damyang, KOREA, REPUBLIC OF",
+    "곡성": "Gokseong, KOREA, REPUBLIC OF", "구례": "Gurye, KOREA, REPUBLIC OF", "고흥": "Goheung, KOREA, REPUBLIC OF",
+    "보성": "Boseong, KOREA, REPUBLIC OF", "장흥": "Jangheung, KOREA, REPUBLIC OF", "강진": "Gangjin, KOREA, REPUBLIC OF",
+    "영암": "Yeongam, KOREA, REPUBLIC OF", "함평": "Hampyeong, KOREA, REPUBLIC OF", "장성": "Jangseong, KOREA, REPUBLIC OF",
+    "완도": "Wando, KOREA, REPUBLIC OF", "진도": "Jindo, KOREA, REPUBLIC OF", "신안": "Sinan, KOREA, REPUBLIC OF",
+    # 그 밖의 주요 도시
+    "울산": "Ulsan, KOREA, REPUBLIC OF", "제주": "Jeju, KOREA, REPUBLIC OF", "수원": "Suwon, KOREA, REPUBLIC OF",
+    "창원": "Changwon, KOREA, REPUBLIC OF", "포항": "Pohang, KOREA, REPUBLIC OF", "원주": "Wonju, KOREA, REPUBLIC OF",
+    "춘천": "Chuncheon, KOREA, REPUBLIC OF", "강릉": "Gangneung, KOREA, REPUBLIC OF", "김해": "Gimhae, KOREA, REPUBLIC OF",
 }
 
 
@@ -1323,16 +1335,39 @@ def resolve_city(text: str, cities: dict) -> str:
     return t if "KOREA" in t.upper() else f"{t}, KOREA, REPUBLIC OF"
 
 
+PROVINCES = ("서울특별시|부산광역시|대구광역시|인천광역시|광주광역시|대전광역시|울산광역시|세종특별자치시|경기도|"
+             "강원특별자치도|강원도|충청북도|충청남도|전북특별자치도|전라북도|전라남도|경상북도|경상남도|제주특별자치도|"
+             "서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주")
+METRO_CITIES = ("서울", "부산", "대구", "인천", "광주", "대전", "울산")
+
+
 def detect_city(text_compact: str, cities: dict, hospital_key: str = "", low_priority=("서울",)) -> str:
-    """영수증 주소의 'OO시/OO광역시/OO군' → 병원 이름 앞의 도시 이름 순서로 찾습니다. 못 찾으면 빈칸.
+    """영수증 주소에서 도시를 찾습니다. 못 찾으면 빈칸(→ 기본 도시).
+    'OO시/OO광역시/OO군' → '전북 익산…'처럼 도 이름 뒤의 도시 → '광주 북구…'처럼 광역시 뒤의 구 → 병원 이름 앞의 도시.
     서울처럼 본사 주소로 자주 찍히는 도시(low_priority)는 다른 도시가 없을 때만 씁니다."""
+    text = text_compact or ""
     found = []                                                        # (낮은 우선순위인지, 위치, 도시)
-    for ko, full in (cities or {}).items():
-        for m in re.finditer(re.escape(ko) + r"(?:광역시|특별시|특별자치시|시|군)", text_compact or ""):
-            if ko == "광주" and "경기" in text_compact[max(0, m.start() - 4):m.start()]:
+    names = sorted(cities or {}, key=len, reverse=True)
+
+    def add(ko, pos):
+        found.append((ko in (low_priority or ()), pos, cities[ko]))
+
+    for ko in names:
+        for m in re.finditer(re.escape(ko) + r"(?:광역시|특별시|특별자치시|시|군)", text):
+            if ko == "광주" and "경기" in text[max(0, m.start() - 4):m.start()]:
                 continue                                              # 경기도 광주시
-            found.append((ko in (low_priority or ()), m.start(), full))
+            add(ko, m.start())
             break
+        if ko in METRO_CITIES:
+            m = re.search(re.escape(ko) + r"[가-힣]{1,3}구", text)
+            if m and not (ko == "광주" and "경기" in text[max(0, m.start() - 4):m.start()]):
+                add(ko, m.start())
+    if names:
+        for m in re.finditer(r"(" + PROVINCES + r")(" + "|".join(re.escape(n) for n in names) + r")", text):
+            prov, ko = m.group(1), m.group(2)
+            if prov.startswith(ko) or (ko == "광주" and prov.startswith("경기")):
+                continue
+            add(ko, m.start(2))
     if found:
         return min(found)[2]
     key = compact(hospital_key)
@@ -2134,6 +2169,18 @@ class ConcurBot:
                 continue
         return None, ""
 
+    def _try_choose_city(self, trigger, city_text: str) -> bool:
+        try:
+            self.choose_city(trigger, city_text)
+            return True
+        except Exception as e:
+            self.log(f"   도시 '{city_name(city_text)}'를 고르지 못했습니다: {str(e).splitlines()[0][:80]}")
+            try:
+                self.page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return False
+
     def choose_city(self, trigger, city_text: str):
         """도시 드롭다운: 정확한 이름이 보이면 고르고, 없으면 앞 단어(예: Mokpo)로 검색해 그 단어와 KOREA가 든 항목을 고릅니다."""
         page = self.page
@@ -2593,32 +2640,50 @@ class ConcurBot:
                 self.type_text(self.field(field_name), text)
                 done.append(f"{field_name} 입력")
 
+        def safely(step: str, action) -> bool:
+            """드롭다운 하나를 못 골라도 다음 칸과 영수증 첨부는 계속합니다(결과 파일 '확인 필요'에 남김)."""
+            try:
+                action()
+                return True
+            except Exception as e:
+                msg = str(e).splitlines()[0][:80] if str(e) else type(e).__name__
+                self.log(f"   {step}을(를) 고르지 못했습니다: {msg}")
+                checks.append(f"{step} 확인")
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                return False
+
         if rec:
             trigger, value = self.find_select(self.sel("Receipt Status"))
-            if trigger is not None and value == t["No Receipt"]:
-                self.choose_option(trigger, t["Receipt"])
+            if trigger is not None and value == t["No Receipt"] and safely("Receipt Status", lambda: self.choose_option(trigger, t["Receipt"])):
                 done.append("Receipt 선택")
 
         trigger, _ = self.find_select(self.sel("LCRT"))
-        if trigger is not None:
-            self.choose_option(trigger, t["NA"])
+        if trigger is not None and safely("LCRT", lambda: self.choose_option(trigger, t["NA"])):
             done.append("LCRT=NA")
 
         trigger, value = self.find_select(self.sel("Expense Type"))
         if trigger is not None and value == t["Undefined"]:
             types = self.cfg["Undefined일_때_선택할_유형"]
             new_type = types.get((rec.category if rec else "") or "분류없음") or types.get("분류없음")
-            if new_type:
-                self.choose_option(trigger, new_type)
+            if new_type and safely(f"Expense Type({new_type})", lambda: self.choose_option(trigger, new_type)):
                 done.append(f"Expense Type={new_type}")
                 checks.append(f"Expense Type 자동 선택({new_type})")
 
         trigger, value = self.find_select(self.sel("도시"))
         if trigger is not None:
             city = city_to_choose(rec, value, self.cfg["기본_도시"])
+            default = self.cfg["기본_도시"]
             if city:
-                self.choose_city(trigger, city)
-                done.append(f"도시={city_name(city)}")
+                if self._try_choose_city(trigger, city):
+                    done.append(f"도시={city_name(city)}")
+                elif city != default and self._try_choose_city(trigger, default):
+                    done.append(f"도시={city_name(default)}(기본)")
+                    checks.append(f"도시 '{city_name(city)}'를 Concur 목록에서 못 찾아 기본 도시로")
+                else:
+                    checks.append("도시 확인")
 
         if rec and upload:
             self.attach_receipt(upload, done, checks)
