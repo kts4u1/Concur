@@ -3,8 +3,9 @@
 Concur 경비 자동 입력 (Power Automate Desktop 흐름의 Python 버전)
 
   영수증 사진(iPhone으로 찍기만 하면 됨. iCloud 사진 폴더 또는 iCloud Drive 폴더, 파일 이름·jpg/heic 상관없음)
-   → 지난달에 찍은 사진만 고름(파일 이름 날짜 → 사진 속 촬영 날짜 → 파일 날짜 순)
-   → Windows OCR → 영수증이 아닌 사진은 뺌 → (선택) 이미지 보정 → 날짜·금액·분류·병원 추출
+   → 지난달 1일 이후에 찍은 사진을 읽음(Windows OCR) → 영수증이 아닌 사진은 뺌 → (선택) 이미지 보정
+   → 영수증에 적힌 날짜로 지난달 영수증만 고름(날짜를 못 읽은 영수증만 촬영 날짜 참고)
+   → 날짜·금액·분류·병원 추출
    → 영수증 목록(엑셀로 열어 고칠 수 있음, 고친 내용은 다음 실행에도 유지)
    → Concur: 지난달 리포트 생성 → 지난달 경비 추가 → 경비마다 영수증 첨부·필드 입력 → 저장
    제출은 하지 않습니다. 결과를 확인한 뒤 직접 제출하세요.
@@ -71,13 +72,28 @@ DEFAULT_HOSPITALS = [
 ]
 
 
+def default_receipt_folder(home: Path) -> Path:
+    """기본 영수증 폴더 iCloudDrive\\Concur_Expenses. 없으면 iCloudDrive 안에서 Concur로 시작하는 폴더 하나를 씁니다."""
+    drive = home / "iCloudDrive"
+    preferred = drive / "Concur_Expenses"
+    if preferred.is_dir():
+        return preferred
+    try:
+        similar = sorted(p for p in drive.iterdir() if p.is_dir() and p.name.lower().startswith("concur"))
+    except OSError:
+        similar = []
+    return similar[0] if len(similar) == 1 else preferred
+
+
 def default_settings():
     home = Path.home()
-    source = home / "iCloudDrive" / "Concur_Expenses"
+    source = default_receipt_folder(home)
     return {
         "_안내": "메모장으로 고칠 수 있습니다. 경로의 \\ 는 \\\\ 처럼 두 번 씁니다. 병원 목록은 병원목록.csv 에서 고칩니다.",
         "_영수증_폴더_설명": "iPhone으로 찍기만 한다면 iCloud 사진 폴더(보통 사진\\iCloud Photos\\Photos)를 고릅니다. 파일 이름·형식은 상관없습니다.",
         "영수증_원본_폴더": str(source),
+        "_영수증_날짜_설명": "어느 달 영수증인지는 영수증에 적힌 날짜로 정하고, 날짜를 못 읽은 영수증만 촬영 날짜를 참고합니다. 처리할 달이 끝나고 아래 일수 안에 찍은 사진까지 봅니다.",
+        "영수증_촬영_허용_일수": 60,
         "보정본_폴더": str(source / "Concur_Expenses_Processed"),
         "Concur_주소": "https://us2.concursolutions.com",
         "브라우저_프로필_폴더": str(home / "AppData" / "Local" / "ConcurAuto" / "edge-profile"),
@@ -424,14 +440,28 @@ def photo_taken_at(path: Path, st, cache: dict) -> datetime:
     return taken
 
 
+def photo_window(cfg: dict, tm: TargetMonth) -> tuple:
+    """(처리할 달 1일, 그 달이 끝나고 허용 일수가 지난 날) — 이 사이에 찍은 사진을 봅니다."""
+    start = datetime(tm.year, tm.month, 1)
+    month_end = datetime(tm.year + 1, 1, 1) if tm.month == 12 else datetime(tm.year, tm.month + 1, 1)
+    return start, month_end + timedelta(days=int(cfg.get("영수증_촬영_허용_일수", 60)))
+
+
 def list_originals(cfg: dict, tm: TargetMonth, cache=None) -> list:
-    """처리할 달에 찍은 사진 [(경로, 촬영 시각), ...] — 촬영 순서대로"""
+    """처리할 달 영수증일 수 있는 사진 [(경로, 촬영 시각), ...] — 촬영 순서대로.
+    영수증을 나중에 찍을 수도 있으므로 처리할 달 1일부터, 그 달이 끝나고 허용 일수 안에 찍은 사진까지."""
     source = Path(cfg["영수증_원본_폴더"])
     if not source.is_dir():
-        raise RuntimeError(f"영수증 폴더가 없습니다: {source}")
+        try:
+            similar = [d.name for d in source.parent.iterdir()
+                       if d.is_dir() and d.name.lower().startswith(source.name.lower()[:6])]
+        except OSError:
+            similar = []
+        hint = (f"\n같은 위치에 비슷한 폴더가 있습니다: {', '.join(similar[:5])}\n"
+                f"프로그램 창의 [찾기]로 영수증 폴더를 다시 고르세요.") if similar else ""
+        raise RuntimeError(f"영수증 폴더가 없습니다: {source}{hint}")
     cache = {} if cache is None else cache
-    start = datetime(tm.year, tm.month, 1)
-    end = datetime(tm.year + 1, 1, 1) if tm.month == 12 else datetime(tm.year, tm.month + 1, 1)
+    start, end = photo_window(cfg, tm)
     too_old = start - timedelta(days=2)
     found = []
     for p in source.iterdir():
@@ -549,6 +579,8 @@ class Receipt:
     used_for: str = ""
     taken: object = None                            # 촬영 시각(datetime)
     is_receipt: bool = True                         # 영수증으로 보이는지(자동 판단)
+    ocr_dates: list = field(default_factory=list)   # 영수증 글자에서 읽은 날짜
+    skip_reason: str = ""                           # 이 달 목록에서 자동으로 뺀 이유
 
     @property
     def main_date(self) -> str:
@@ -643,11 +675,12 @@ def looks_like_receipt(text_compact: str, amounts: list, has_ocr_date: bool, cat
 def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, hospitals: list,
                     taken=None) -> Receipt:
     rec = Receipt(original=original, ocr_file=ocr_file, ocr_text=ocr_text, taken=taken)
-    rec.dates = find_ocr_dates(ocr_text)
+    rec.ocr_dates = find_ocr_dates(ocr_text)
+    rec.dates = list(rec.ocr_dates)
     rec.date_from_ocr = bool(rec.dates)
     fdate = taken.date().isoformat() if taken else file_name_date(original.name)
     if fdate and fdate not in rec.dates:
-        rec.dates.append(fdate)          # OCR이 날짜를 못 읽으면 촬영 날짜 사용
+        rec.dates.append(fdate)          # 촬영 날짜는 참고용 후보(영수증 날짜를 못 읽으면 대신 씀)
     rec.amounts = find_amounts(ocr_text)
     rec.total = max(rec.amounts) if rec.amounts else 0
     text_c = compact(ocr_text)
@@ -686,6 +719,29 @@ LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "�
                "[자동] 사용", "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문",
                "날짜 후보", "금액 후보", "찾은 병원 글자"]
 NOT_RECEIPT_NOTE = "영수증 아닌 것 같음(자동 제외)"
+UNDATED_NOTE = "날짜 못 읽음: 영수증 날짜를 적어 주세요(자동 제외)"
+OTHER_MONTH_NOTE = "다른 달 영수증({date})(자동 제외)"
+
+
+def place_in_month(rec: Receipt, tm: TargetMonth):
+    """영수증에 적힌 날짜를 최우선으로 처리할 달 영수증인지 정합니다.
+    촬영 날짜는 영수증 날짜를 못 읽었을 때만 참고합니다. → rec.skip_reason, rec.use"""
+    prefix = tm.prefix + "-"
+    date_edited = "날짜" in rec.edited
+    rec.skip_reason = ""
+    if not rec.is_receipt and not date_edited:      # 날짜를 직접 적었으면 영수증으로 봄
+        rec.skip_reason = NOT_RECEIPT_NOTE
+    else:
+        receipt_dates = rec.dates if date_edited else rec.ocr_dates
+        if receipt_dates:
+            mine = [d for d in receipt_dates if d.startswith(prefix)]
+            if mine:
+                rec.dates = [mine[0]] + [d for d in rec.dates if d != mine[0]]
+            else:
+                rec.skip_reason = OTHER_MONTH_NOTE.format(date=receipt_dates[0])
+        elif not rec.main_date.startswith(prefix):
+            rec.skip_reason = UNDATED_NOTE
+    rec.use = not rec.skip_reason
 
 
 def list_csv_path(results_dir: Path, tm: TargetMonth) -> Path:
@@ -701,14 +757,11 @@ def parse_use_cell(text: str, default: bool) -> bool:
     return default
 
 
-def apply_user_edits(rec: Receipt, row: dict):
+def apply_user_edits(rec: Receipt, row: dict, tm=None):
     """'[자동]' 칸과 다르게 바뀐 칸만 사용자가 고친 것으로 보고 반영합니다."""
     g = lambda k: str(row.get(k) or "").strip()
     user_use = parse_use_cell(g("사용(O/X)"), rec.use)
     auto_use = parse_use_cell(g("[자동] 사용"), True)     # 예전 목록에는 이 칸이 없음 → O로 봄
-    if user_use != auto_use:
-        rec.use = user_use
-        rec.edited.append("사용")
     user_date, auto_date = parse_date_cell(g("날짜")), parse_date_cell(g("[자동] 날짜"))
     if user_date and user_date != auto_date:
         rec.dates, rec.edited = [user_date], rec.edited + ["날짜"]
@@ -721,18 +774,36 @@ def apply_user_edits(rec: Receipt, row: dict):
     if g("병원 영문") != g("[자동] 병원 영문"):
         rec.hospital_en = g("병원 영문")
         rec.edited.append("병원")
+    if tm is not None and "날짜" in rec.edited:
+        place_in_month(rec, tm)          # 고친 날짜로 이 달 영수증인지 다시 정함
+    if user_use != auto_use:
+        rec.use = user_use
+        rec.edited.append("사용")
 
 
 def is_auto_excluded(rec: Receipt) -> bool:
-    return not rec.is_receipt and not rec.use
+    return not rec.use and bool(rec.skip_reason)
+
+
+def _list_order(r: Receipt):
+    """이 달 영수증(영수증 날짜 순) → 날짜 적어야 할 것 → 다른 달 영수증 → 영수증 아님"""
+    if not is_auto_excluded(r):
+        rank = 0
+    elif r.skip_reason == NOT_RECEIPT_NOTE:
+        rank = 3
+    elif r.skip_reason == UNDATED_NOTE:
+        rank = 1
+    else:
+        rank = 2
+    return (rank, r.main_date, r.taken or datetime.min, r.original.name.lower())
 
 
 def save_receipt_list(receipts: list, auto: dict, path: Path):
     rows = []
-    order = sorted(receipts, key=lambda r: (is_auto_excluded(r), r.taken or datetime.min, r.original.name.lower()))
+    order = sorted(receipts, key=_list_order)
     for r in order:
         a = auto[r.original.name]
-        issues = receipt_issues(r, receipts) or ([NOT_RECEIPT_NOTE] if is_auto_excluded(r) else [])
+        issues = receipt_issues(r, receipts) or ([r.skip_reason] if is_auto_excluded(r) else [])
         rows.append([
             r.original.name, f"{r.taken:%Y-%m-%d %H:%M}" if r.taken else "",
             "O" if r.use else "X", r.main_date, r.total or "", r.category, r.hospital_en,
@@ -759,7 +830,9 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
     date_cache = _load_json(date_cache_path)
     originals = list_originals(cfg, tm, date_cache)
     _save_json(date_cache_path, date_cache)
-    log(f"{tm.prefix}에 찍은 사진: {len(originals)}장")
+    start, end = photo_window(cfg, tm)
+    log(f"{tm.prefix} 영수증을 찾을 사진: {len(originals)}장 "
+        f"({start:%Y-%m-%d} ~ {end - timedelta(days=1):%Y-%m-%d} 촬영. 어느 달인지는 영수증 날짜로 정함)")
     if not originals:
         return []
     use_pre = bool(cfg.get("영수증_보정_사용", True))
@@ -803,7 +876,8 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             def analyze():
                 r = analyze_receipt(orig, ocr_file, text, cfg, hospitals, taken)
                 if first_is_receipt and not r.is_receipt:
-                    r.is_receipt = r.use = True
+                    r.is_receipt = True
+                place_in_month(r, tm)
                 return r
 
             auto[orig.name] = analyze()
@@ -821,13 +895,12 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             raise RuntimeError(f"영수증 목록 파일이 열려 있어 읽을 수 없습니다. 엑셀을 닫고 다시 실행하세요.\n{list_path}")
         for rec in receipts:
             if rec.original.name in rows:
-                apply_user_edits(rec, rows[rec.original.name])
+                apply_user_edits(rec, rows[rec.original.name], tm)
     try:
         save_receipt_list(receipts, auto, list_path)
     except PermissionError:
         raise RuntimeError(f"영수증 목록 파일이 엑셀에 열려 있습니다. 엑셀을 닫고 다시 실행하세요.\n{list_path}")
 
-    excluded = sum(1 for r in receipts if is_auto_excluded(r))
     for rec in receipts:
         if is_auto_excluded(rec):
             continue
@@ -835,8 +908,14 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         edited = f"  (고침: {', '.join(rec.edited)})" if rec.edited else ""
         log(f"   {rec.original.name} | {rec.main_date or '-'} | {rec.total:,}원 | {rec.category or '분류없음'} | "
             f"{rec.hospital_en or '병원없음'}{edited}{flag}")
+    excluded = [r for r in receipts if is_auto_excluded(r)]
     if excluded:
-        log(f"   영수증이 아닌 것 같은 사진 {excluded}장은 뺐습니다. (영수증 목록 맨 아래에 '사용 X'로 있음)")
+        other = sum(1 for r in excluded if r.skip_reason.startswith("다른 달"))
+        undated = sum(1 for r in excluded if r.skip_reason == UNDATED_NOTE)
+        log(f"   목록 맨 아래로 뺀 사진 {len(excluded)}장: 날짜 못 읽음 {undated}장 / 다른 달 영수증 {other}장 / "
+            f"영수증 아님 {len(excluded) - other - undated}장")
+        if undated:
+            log("   날짜를 못 읽은 영수증은 영수증 목록에 날짜를 적어 주면 다음 실행부터 씁니다.")
     return receipts
 
 
@@ -858,13 +937,16 @@ def concur_amount_to_int(text: str):
 
 
 def find_receipt(receipts: list, iso_date: str, amount: int):
-    candidates = [r for r in receipts if r.use and not r.used_for and iso_date in r.dates]
-    for r in candidates:
-        if r.total == amount:
-            return r
-    for r in candidates:
-        if amount in r.amounts:
-            return r
+    """날짜·금액이 맞는 영수증. 영수증 날짜(대표 날짜)가 같은 것을 먼저 보고, 촬영 날짜 등 다른 후보는 나중에 봅니다."""
+    pool = [r for r in receipts if r.use and not r.used_for and iso_date in r.dates]
+    for main_first in (True, False):
+        candidates = [r for r in pool if (r.main_date == iso_date) == main_first]
+        for r in candidates:
+            if r.total == amount:
+                return r
+        for r in candidates:
+            if amount in r.amounts:
+                return r
     return None
 
 
@@ -1294,17 +1376,19 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         log(f"===== {title} | {tm.prefix} ({tm.month_name}) =====")
         receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log)
         list_path = list_csv_path(results_dir, tm)
-        need = [r for r in receipts if receipt_issues(r, receipts)]
+        need = [r for r in receipts if receipt_issues(r, receipts) or r.skip_reason == UNDATED_NOTE]
         used = [r for r in receipts if r.use]
         skipped = [r for r in receipts if is_auto_excluded(r)]
-        log(f"영수증 {len(used)}장 분석 완료(영수증이 아니라서 뺀 사진 {len(skipped)}장), 확인 필요 {len(need)}장 → {list_path.name}")
+        log(f"{tm.prefix} 영수증 {len(used)}장 분석 완료(목록 맨 아래로 뺀 사진 {len(skipped)}장), "
+            f"확인 필요 {len(need)}장 → {list_path.name}")
 
         if mode == "ocr":
             if receipts and cfg.get("결과_자동_열기", True):
                 ui.open(list_path)
             ui.info("영수증 분석 완료",
                     f"영수증 {len(used)}장 중 확인 필요 {len(need)}장입니다.\n"
-                    + (f"영수증이 아닌 것 같아 뺀 사진 {len(skipped)}장은 목록 맨 아래에 있습니다.\n" if skipped else "")
+                    + (f"이 달 영수증이 아니라서 뺀 사진 {len(skipped)}장(날짜 못 읽음·다른 달·영수증 아님)은 목록 맨 아래에 있습니다.\n"
+                       if skipped else "")
                     + "\n"
                     + "영수증 목록 파일에서 날짜·금액·분류·병원을 고치거나 '사용'을 O/X로 바꿀 수 있습니다.\n"
                     "저장하면 다음 실행 때 고친 내용이 그대로 쓰입니다.")
@@ -1316,7 +1400,8 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
             ans = ui.yes_no_cancel(
                 "입력 전 확인",
                 f"확인이 필요한 영수증이 {len(need)}장 있습니다.\n"
-                + "\n".join(f"· {r.original.name}: {', '.join(receipt_issues(r, receipts))}" for r in need[:8])
+                + "\n".join(f"· {r.original.name}: {', '.join(receipt_issues(r, receipts) or [r.skip_reason])}"
+                            for r in need[:8])
                 + ("\n..." if len(need) > 8 else "")
                 + "\n\n[예] 영수증 목록을 열어 고치기\n[아니오] 그대로 진행\n[취소] 중단")
             if ans is None:
@@ -1437,6 +1522,7 @@ class GuiApp:
 
         ttk.Label(f, foreground="#555", wraplength=760, justify="left", text=(
             "영수증 폴더는 iCloud 사진 폴더나 iCloud Drive 폴더 모두 됩니다. 파일 이름·형식은 상관없고, 영수증이 아닌 사진은 자동으로 뺍니다.\n"
+            "어느 달 영수증인지는 영수증에 적힌 날짜로 정하므로 늦게 찍어도 됩니다.\n"
             "처음에는 ①로 OCR 결과를 확인하세요. 영수증 목록(엑셀)에서 고친 내용은 다음 실행에도 그대로 쓰입니다.\n"
             "②③ 실행 중에는 열린 Edge 창을 클릭하지 마세요. 다른 프로그램은 써도 됩니다. 제출은 직접 하세요."
         )).grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 6))

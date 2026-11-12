@@ -116,7 +116,7 @@ def test_edits_exclude_category_hospital():
     ca.apply_user_edits(rec, _row(**{"사용(O/X)": "x", "분류": "식대", "병원 영문": ""}))
     assert rec.use is False
     assert rec.category == "식대" and rec.hospital_en == ""
-    assert rec.edited == ["사용", "분류", "병원"]
+    assert rec.edited == ["분류", "병원", "사용"]
 
 
 def test_edits_unknown_category_becomes_empty():
@@ -129,10 +129,10 @@ def test_receipt_list_edits_survive_rerun(tmp_path, monkeypatch):
     src = tmp_path / "src"
     src.mkdir()
     texts = {"2026-10-05_120000.jpg": "2026.10.05 건양대 주차 3,000원",
-             "2026-10-06_120000.jpg": "아메리카노 4,500"}
+             "2026-10-06_120000.jpg": "아메리카노 4,500",
+             "2026-11-01_120000.jpg": "2026.11.01 합계 2,000"}     # 11월 영수증은 목록 맨 아래로
     for name in texts:
         (src / name).write_bytes(b"x")
-    (src / "2026-11-01_120000.jpg").write_bytes(b"x")   # 다른 달은 제외
 
     class FakeOcr:
         def __init__(self, temp_dir):
@@ -152,6 +152,7 @@ def test_receipt_list_edits_survive_rerun(tmp_path, monkeypatch):
         recs = ca.build_receipts(cfg, tm, ca.DEFAULT_HOSPITALS, results, tmp_path / "w", log)
         assert [r.original.name for r in recs] == list(texts)
         assert recs[1].category == "카페" and recs[1].hospital_en == ""
+        assert not recs[2].use and recs[2].skip_reason == "다른 달 영수증(2026-11-01)(자동 제외)"
 
         list_path = ca.list_csv_path(results, tm)
         rows = ca.read_csv_dicts(list_path)

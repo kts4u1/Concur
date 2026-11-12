@@ -58,15 +58,16 @@ def _jpeg(path, taken=None, size=(40, 20)):
     Image.new("RGB", size, "white").save(path, exif=exif)
 
 
-def test_month_photos_by_name_exif_or_file_date(tmp_path):
+def test_photos_from_month_start_to_60_days_after(tmp_path):
     pytest.importorskip("PIL")
     now = datetime(2026, 11, 12, 9, 0)
     (tmp_path / "2026-10-22_123342.jpg").write_bytes(b"x")           # 단축어 파일 이름
     _set_mtime(tmp_path / "2026-10-22_123342.jpg", now)
     _jpeg(tmp_path / "IMG_0001.JPG", "2026:10:07 09:30:00")           # 사진 속 촬영 날짜
     _set_mtime(tmp_path / "IMG_0001.JPG", now)                         # iCloud가 내려받은 시각
-    _jpeg(tmp_path / "IMG_0002.JPG", "2026:11:01 08:00:00")           # 이번 달
+    _jpeg(tmp_path / "IMG_0002.JPG", "2026:11:01 08:00:00")           # 다음 달에 찍은 사진도 봄
     _set_mtime(tmp_path / "IMG_0002.JPG", now)
+    (tmp_path / "2026-09-30_235959.jpg").write_bytes(b"x")            # 처리할 달 전에 찍은 사진은 제외
     (tmp_path / "IMG_0003.PNG").write_bytes(b"x")                      # 촬영 날짜 없음 → 파일 날짜
     _set_mtime(tmp_path / "IMG_0003.PNG", datetime(2026, 10, 15, 18, 0))
     (tmp_path / "IMG_0004.JPG").write_bytes(b"x")                      # 9월 파일은 열지도 않음
@@ -80,6 +81,7 @@ def test_month_photos_by_name_exif_or_file_date(tmp_path):
         ("IMG_0001.JPG", datetime(2026, 10, 7, 9, 30)),
         ("IMG_0003.PNG", datetime(2026, 10, 15, 18, 0)),
         ("2026-10-22_123342.jpg", datetime(2026, 10, 22, 12, 33, 42)),
+        ("IMG_0002.JPG", datetime(2026, 11, 1, 8, 0)),
     ]
     assert "IMG_0004.JPG" not in cache            # 오래된 파일은 열어 보지 않음
     assert cache["IMG_0001.JPG"]["taken"] == "2026-10-07T09:30:00"
@@ -94,11 +96,15 @@ def test_taken_date_cache_is_reused(tmp_path, monkeypatch):
     assert ca.photo_taken_at(p, st, cache) == datetime(2026, 10, 7, 9, 30)
 
 
-def test_december_month_range(tmp_path):
-    (tmp_path / "2026-12-31_235959.jpg").write_bytes(b"x")
-    (tmp_path / "2027-01-01_000000.jpg").write_bytes(b"x")
-    found = ca.list_originals({"영수증_원본_폴더": str(tmp_path)}, ca.TargetMonth(2026, 12))
-    assert [p.name for p, _ in found] == ["2026-12-31_235959.jpg"]
+def test_photo_window_crosses_year_and_is_configurable(tmp_path):
+    for name in ("2026-11-30_235959.jpg", "2026-12-31_235959.jpg", "2027-02-28_120000.jpg",
+                 "2027-03-01_235959.jpg", "2027-03-02_000000.jpg"):
+        (tmp_path / name).write_bytes(b"x")
+    cfg = {"영수증_원본_폴더": str(tmp_path)}
+    found = ca.list_originals(cfg, ca.TargetMonth(2026, 12))          # 12월 + 60일 = 3월 1일까지
+    assert [p.name for p, _ in found] == ["2026-12-31_235959.jpg", "2027-02-28_120000.jpg", "2027-03-01_235959.jpg"]
+    cfg["영수증_촬영_허용_일수"] = 0
+    assert [p.name for p, _ in ca.list_originals(cfg, ca.TargetMonth(2026, 12))] == ["2026-12-31_235959.jpg"]
 
 
 # ---------- HEIC ----------
