@@ -46,7 +46,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 보정 줄임"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 Edge 열어두기"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -180,6 +180,8 @@ def default_settings():
         "보정_확대_배율": 2.0,
         "입력_전_확인": True,
         "결과_자동_열기": True,
+        "_Edge_열어두기_설명": "true면 ②·③이 끝나도 Edge 창을 닫지 않습니다. Concur에서 확인·수정한 뒤 Edge 창을 직접 닫으면 끝납니다(닫아야 다음 작업을 할 수 있음).",
+        "작업_후_Edge_열어두기": True,
         "_업로드_설명": "Concur에는 원본 사진을 올립니다(보정본은 더 이상 만들지 않음). Concur는 1장당 5MB 제한이 있어 넘으면 자동으로 줄여서 올립니다.",
         "업로드_이미지": "원본",
         "업로드_최대_MB": 5,
@@ -746,6 +748,22 @@ def apply_category_table(cfg: dict, path: Path, log=None) -> list:
     if log:
         log(f"자동 입력표: 분류 {len(order)}개 ({', '.join(order)})")
     return order
+
+
+def add_expense_types_to_table(path: Path, types: list, cfg: dict) -> int:
+    """Concur에서 읽은 Expense Type 중 자동입력표에 없는 것을 줄로 더합니다('(분류 없음)' 위).
+    찾을 글자를 비워 두므로 사용자가 적기 전에는 영수증에 맞춰지지 않습니다."""
+    if not path.exists():
+        write_csv(path, CATEGORY_HEADER, category_rows_from_cfg(cfg))
+    rows = [([str(v or "").strip() for v in r.values()] + [""] * 6)[:6] for r in read_csv_dicts(path)]
+    known = {r[0] for r in rows} | {r[4] for r in rows if r[4]}
+    new = [[t, "", "", "", t, "Concur 항목: '영수증에서 찾을 글자'를 적어야 영수증에 맞춰집니다"]
+           for t in types if t and t not in known and t.lower() != "undefined"]
+    if not new:
+        return 0
+    at = next((i for i, r in enumerate(rows) if compact(r[0]) in ("(분류없음)", "분류없음")), len(rows))
+    write_csv(path, CATEGORY_HEADER, rows[:at] + new + rows[at:])
+    return len(new)
 
 
 # ============================================================
@@ -1944,6 +1962,7 @@ class ConcurBot:
         self.poll_s = 1.0
         self.login_timeout_s = 600
         self.diagnose_after_s = 15
+        self.last_expense_types = []     # [화면 조사]에서 읽은 Expense Type 목록
         self.upload_wait_s = 15          # 영수증 칸(업로드 버튼)이 뜰 때까지 기다리는 시간
         self.upload_done_s = 30          # 올린 뒤 끝날 때까지 기다리는 시간
         self.find_mail_link = find_login_link_in_outlook
@@ -2087,6 +2106,57 @@ class ConcurBot:
         options.first.click()
         time.sleep(0.5)
 
+    def wait_until_closed(self, stop_flag=None):
+        """사용자가 Edge 창을 닫을 때까지(또는 [중지]를 누를 때까지) 기다립니다."""
+        while not (stop_flag is not None and stop_flag.is_set()):
+            try:
+                pages = [pg for pg in self.ctx.pages if not pg.is_closed()]
+            except Exception:
+                return
+            if not pages:
+                return
+            try:
+                pages[-1].wait_for_timeout(1000)
+            except Exception:
+                pass
+
+    def read_dropdown_options(self, key: str = "Expense Type", max_rounds: int = 80) -> list:
+        """드롭다운(예: Expense Type)을 열어 항목 글자를 모두 읽고 닫습니다. 목록이 길면 아래로 내려 가며 읽습니다."""
+        trigger, _ = self.find_select(self.sel(key))
+        if trigger is None:
+            return []
+        page = self.page
+        try:
+            trigger.click()
+        except Exception:
+            return []
+        items = page.locator(self._visible_css("드롭다운 항목"))
+        try:
+            items.first.wait_for(state="visible", timeout=5000)
+        except Exception:
+            page.keyboard.press("Escape")
+            return []
+        found = []
+        for _ in range(max_rounds):
+            for t in items.all_inner_texts():
+                t = " ".join(t.split())
+                if t and t not in found and t.lower() not in ("recently used", "최근에 사용됨", "all", "모두"):
+                    found.append(t)
+            try:
+                moved = items.last.evaluate("""el => {
+                    let c = el.parentElement;
+                    while (c && c.scrollHeight <= c.clientHeight + 2) c = c.parentElement;
+                    if (!c || c === document.body || c === document.documentElement) return false;
+                    const before = c.scrollTop; c.scrollTop = before + Math.max(40, c.clientHeight * 0.9);
+                    return c.scrollTop > before; }""")
+            except Exception:
+                moved = False
+            if not moved:
+                break
+            time.sleep(0.3)
+        page.keyboard.press("Escape")
+        return found
+
     def inspect_screen(self, path: Path) -> Path:
         """지금 Concur 화면의 입력칸(id·name·칸 이름)·버튼 글자와, 설정 '화면_요소'를 이 화면에서 찾는지를 파일로 남깁니다."""
         info = self.page.evaluate(JS_INSPECT)
@@ -2103,6 +2173,12 @@ class ConcurBot:
         for f in info.get("fields", []):
             lines.append(f"  {f['tag']}/{f['type']} | #{f['id']} | {f['name']} | {f['label']} | {f['value']}")
         lines += ["", "[이 화면의 버튼·링크 글자]"] + [f"  {b}" for b in info.get("buttons", [])]
+        try:
+            self.last_expense_types = self.read_dropdown_options("Expense Type")
+        except Exception:
+            self.last_expense_types = []
+        if self.last_expense_types:
+            lines += ["", f"[Expense Type 목록] {len(self.last_expense_types)}개"] + [f"  {t}" for t in self.last_expense_types]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         try:
             self.page.screenshot(path=str(path.with_suffix(".png")))
@@ -2649,6 +2725,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
     log = Log(base / "실행기록", ui.log)
     work_dir = log.folder / "임시"
     bot = None
+    keep_open = False
     title = {"ocr": "영수증 분석", "full": "전체 실행", "edit": "리포트에 입력", "inspect": "화면 조사"}[mode]
     if mode == "inspect":
         try:
@@ -2656,17 +2733,23 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
             bot = ConcurBot(cfg, log, ui, stop_flag)
             bot.start()
             bot.wait_login(need_home=False)
-            made = []
+            made, types_added = [], 0
             while ui.confirm("화면 조사", "열린 Edge 창에서 조사할 Concur 화면(예: 경비 편집 화면, 리포트 만들기 화면)을 연 뒤 [확인]을 누르세요.\n"
                                          "다 끝났으면 [취소]를 누르세요."):
                 path = bot.inspect_screen(log.folder / f"화면조사_{datetime.now():%Y%m%d_%H%M%S}.txt")
                 made.append(path)
                 log(f"화면 조사 파일: {path.name} (같은 이름의 .png 화면 캡처도 있습니다)")
+                if bot.last_expense_types:
+                    added = add_expense_types_to_table(base / CATEGORY_FILE_NAME, bot.last_expense_types, cfg)
+                    types_added += added
+                    log(f"Concur Expense Type {len(bot.last_expense_types)}개를 읽어 자동 입력표에 새로 {added}줄 더했습니다.")
             if made:
                 ui.open(log.folder)
                 ui.info("화면 조사", f"화면 조사 파일 {len(made)}개를 '실행기록' 폴더에 만들었습니다.\n"
                                    "'없음'으로 나온 칸은 이 파일의 id·name을 보고 설정 파일의 '화면_요소'를 고치거나, "
-                                   "파일을 Claude에게 보내 고쳐 달라고 하세요.")
+                                   "파일을 Claude에게 보내 고쳐 달라고 하세요."
+                                   + (f"\n\nConcur Expense Type {types_added}개를 자동 입력표에 더했습니다. "
+                                      "쓰는 항목만 '영수증에서 찾을 글자'·Comment·Business Purpose를 채우면 됩니다." if types_added else ""))
         except Cancelled:
             log("중단했습니다.")
         except Exception as e:
@@ -2735,6 +2818,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         bot = ConcurBot(cfg, log, ui, stop_flag)
         bot.hospitals = hospitals
         bot.start()
+        keep_open = bool(cfg.get("작업_후_Edge_열어두기", True))
         if mode == "edit":
             bot.wait_login(need_home=False)
             if not ui.confirm("리포트 열기", "열린 Edge 창에서 입력할 리포트를 열어 경비 목록이 보이게 한 뒤 [확인]을 누르세요."):
@@ -2760,17 +2844,24 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
                 f"경비 {len(results)}건 중 영수증 연결 {matched}건, 확인 필요 {len(checks)}건\n"
                 + (f"맞는 경비가 없던 영수증 {len(unused)}장\n" if unused else "")
                 + "\n경비처리 결과 파일의 '확인 필요' 칸을 보고 Concur에서 확인한 뒤 직접 제출하세요.\n"
-                  "[확인]을 누르면 Edge 창이 닫힙니다.")
+                + ("Edge 창은 열어 둡니다. 확인·수정이 끝나면 Edge 창을 닫으세요(닫아야 다음 작업을 할 수 있습니다)."
+                   if keep_open else "[확인]을 누르면 Edge 창이 닫힙니다."))
     except Cancelled:
         log("중단했습니다.")
+        keep_open = False
     except Exception as e:
         log("오류: " + str(e))
         log(traceback.format_exc())
         if bot and bot.page:
             bot.screenshot("unexpected_error")
-        ui.info("오류", f"{e}\n\n자세한 내용: {log.path.name}")
+        ui.info("오류", f"{e}\n\n자세한 내용: {log.path.name}"
+                + ("\n\nEdge 창은 열어 둡니다. 확인이 끝나면 Edge 창을 닫으세요." if keep_open else ""))
     finally:
         if bot:
+            if keep_open and not (stop_flag is not None and stop_flag.is_set()):
+                log("Edge 창은 그대로 둡니다. Concur에서 확인·수정이 끝나면 Edge 창을 닫으세요. (닫아야 다음 작업을 할 수 있습니다)")
+                bot.wait_until_closed(stop_flag)
+                log("Edge 창이 닫혔습니다.")
             bot.stop()
         shutil.rmtree(work_dir, ignore_errors=True)          # OCR·업로드용 임시 사본
         log(f"실행 기록: {log.path}")
