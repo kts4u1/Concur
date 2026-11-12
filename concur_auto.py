@@ -46,7 +46,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 자동 입력 편집 창"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 경비 없음 처리"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -229,6 +229,7 @@ def default_settings():
             "다음": "다음|Next|Continue",
             "이메일 링크로 로그인": "이메일 링크로 로그인|Sign in with email link|Email me a sign in link|Email sign in link|Email link",
             "사용 가능한 경비": "사용 가능한 경비|Available Expenses",
+            "사용 가능한 경비 없음": "사용 가능한 경비 없음|사용 가능한 경비가 없습니다|No Available Expenses",
             "리포트에 추가": "리포트에 추가|Add To Report",
             "편집": "편집|Edit",
             "다음 경비": "다음 경비|Next Expense",
@@ -316,6 +317,10 @@ class Log:
 
 class Cancelled(Exception):
     pass
+
+
+class NoExpenses(Exception):
+    """넣을 경비가 없음(오류가 아님): Concur 창은 그대로 두고 작업만 끝냅니다."""
 
 
 # ============================================================
@@ -2466,14 +2471,28 @@ class ConcurBot:
             card = page.get_by_text(self._re("사용 가능한 경비", exact=False))
         card.first.click()
         page.wait_for_url(re.compile(r"view=available_expenses"))
-        page.locator(self.sel("경비 체크박스")).first.wait_for(state="attached")
+        # 경비 목록(체크박스)이 뜨거나 '사용 가능한 경비 없음'이 뜰 때까지
+        boxes, empty = page.locator(self.sel("경비 체크박스")), page.get_by_text(self._re("사용 가능한 경비 없음", exact=False))
+        deadline = time.time() + self.timeout_ms / 1000
+        while True:
+            if self._shown(empty):
+                self.log("사용 가능한 경비가 없습니다(0건).")
+                raise NoExpenses("Concur에 사용 가능한 경비가 없습니다(0건). 카드 결제가 아직 들어오지 않았을 수 있습니다.")
+            try:
+                if boxes.count() > 0:
+                    break
+            except Exception:
+                pass
+            if time.time() >= deadline:
+                raise RuntimeError("사용 가능한 경비 목록이 뜨지 않았습니다.")
+            time.sleep(0.5)
         time.sleep(2)
         r = page.evaluate(JS_SELECT_MONTH, {"month": tm.month, "year": tm.year})
         self.log(f"사용 가능한 경비 중 {tm.prefix} 경비 {r['matched']}건 선택")
         if r["matched"] == 0:
-            self.log("   지난달 경비를 찾지 못했습니다. 목록 예시: " + " / ".join(r["samples"]))
+            self.log("   그 달 경비를 찾지 못했습니다. 목록 예시: " + " / ".join(r["samples"]))
             self.screenshot("available_expenses")
-            raise RuntimeError("추가할 경비가 없습니다.")
+            raise NoExpenses(f"사용 가능한 경비 중 {tm.prefix} 경비가 없습니다. (처리할 달이 맞는지 확인하세요)")
         page.get_by_role("button", name=self._re("리포트에 추가")).click()
         page.locator(self.sel("경비 목록")).first.wait_for(state="visible")
         time.sleep(3)
@@ -2514,7 +2533,16 @@ class ConcurBot:
 
     def open_first_expense(self):
         page = self.page
-        page.locator(self.sel("경비 목록")).first.wait_for(state="visible")
+        # 경비 목록이 뜨거나, 경비가 하나도 없는 빈 리포트 화면이 뜰 때까지
+        entries, empty = page.locator(self.sel("경비 목록")), page.locator(self.sel("사용 가능한 경비 카드"))
+        deadline = time.time() + self.timeout_ms / 1000
+        while not self._shown(entries):
+            if self._shown(empty):
+                raise NoExpenses("이 리포트에는 경비가 없습니다. 먼저 Concur에서 경비를 리포트에 넣어 주세요.")
+            if time.time() >= deadline:
+                break
+            time.sleep(0.5)
+        entries.first.wait_for(state="visible")
         try:
             self.entries = parse_entry_rows(page.evaluate(JS_READ_ROWS, self.sel("경비 목록")))
         except Exception:
@@ -2903,6 +2931,11 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
     except Cancelled:
         log("중단했습니다.")
         keep_open = False
+    except NoExpenses as e:
+        log(f"넣을 경비가 없어 끝냅니다: {e}")
+        ui.info("넣을 경비 없음", f"{e}\n\n프로그램 작업은 여기서 끝냅니다."
+                + ("\nConcur 창은 그대로 두니, 필요하면 직접 경비를 만들거나 나중에 다시 실행하세요. 다 보면 Edge 창을 닫으세요."
+                   if keep_open else ""))
     except Exception as e:
         log("오류: " + str(e))
         log(traceback.format_exc())
