@@ -31,14 +31,14 @@ def checked_dates(page):
     return page.eval_on_selector_all("input[data-date]:checked", "els => els.map(e => e.dataset.date)")
 
 
-def test_지난달_경비만_고름(page):
+def test_selects_only_target_month(page):
     page.set_content(HTML)
     r = page.evaluate(ca.JS_SELECT_MONTH, {"month": 10, "year": 2026})
     assert (r["matched"], r["clicked"]) == (2, 1)
     assert checked_dates(page) == ["10/05/2026", "10/31/2026"]
 
 
-def test_1월을_고를_때_11월_경비는_고르지_않음(page):
+def test_single_digit_month_does_not_match_november(page):
     page.set_content(HTML.replace(" checked", ""))
     r = page.evaluate(ca.JS_SELECT_MONTH, {"month": 1, "year": 2026})
     assert r["matched"] == 2

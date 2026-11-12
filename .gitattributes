@@ -1,3 +1,2 @@
-# build_exe.bat는 Windows 줄바꿈(CRLF)을 유지해야 더블클릭으로 실행됩니다.
 * text=auto
 *.bat text eol=crlf
