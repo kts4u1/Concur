@@ -46,7 +46,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 Concur 항목 목록 추가"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 Concur 항목 전체 목록"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -123,6 +123,7 @@ DEFAULT_ELEMENT_LABELS = {
 # 사용자 Concur의 Expense Type(사용자가 화면을 캡처해 보내 준 것, 글자 그대로). Concur에서 고를 때는 이름이 완전히 같은
 # 항목만 고르므로 띄어쓰기·대소문자까지 같아야 합니다. [화면 조사]가 Concur에서 전체 목록을 읽어 설정에 더하기도 합니다.
 KNOWN_EXPENSE_TYPES = [
+    # 숙박·접대·식사
     "Accommodation", "M card accommodation",
     "Accommodation Covered Recipient", "Airfare Covered Recipient",
     "M card accommodation - Covered recipient", "M card airfare - Covered recipient",
@@ -131,7 +132,20 @@ KNOWN_EXPENSE_TYPES = [
     "Entertainment", "M card entertainment", "M card gifts",
     "Business Meal & Drinks (with clients)", "M card business meals and drinks (with clients)",
     "M card meals and drinks", "Meals & Drinks",
-    "Car mileage", "Other", "Other Staff Expenses", "Parking & Toll", "Training",
+    # 회의·마케팅
+    "M card business meeting", "M card internal meeting",
+    "M card Advertising Costs", "M card Booth Rental Fees", "M card Donation", "M card Donation Covered Recipient",
+    "M card Grant", "M card Grant Covered Recipient", "M card Proprietary Event", "M card sponsorship",
+    "M card Sponsorship Covered Recipient", "M card Venue Rental Fees", "Other",
+    "M card Marketing Costs", "Sales and Distribution", "Trade show and Marcom Expenses",
+    "Other Staff Expenses", "Training",
+    # 통신·교통
+    "Phone & Fax",
+    "Airfare", "Car mileage", "M card airfare", "M card parking & toll", "M card taxi", "M card transportation",
+    "Public Transport", "Rental Car", "Taxi",
+    "M Card Service Fee (Airfare Booking)",
+    # 캡처에는 없지만 사용자 경비 화면에서 본 것(주차 영수증 기본값)
+    "Parking & Toll",
 ]
 
 OLD_DEFAULT_CITY = "Daejeon (ex Taejon), KOREA, REPUBLIC OF"

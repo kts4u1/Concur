@@ -128,9 +128,9 @@ def test_wait_until_closed_waits_while_window_open(browser):
 
 def test_remember_expense_types_in_settings(tmp_path):
     s = tmp_path / ca.SETTINGS_FILE_NAME
-    assert ca.remember_expense_types(s, ["Car mileage", "Taxi", "Hotel", "Undefined"]) == 2
-    assert ca.load_settings(s)[0]["Concur_경비_유형"][-2:] == ["Taxi", "Hotel"]
-    assert ca.remember_expense_types(s, ["Taxi"]) == 0
+    assert ca.remember_expense_types(s, ["Car mileage", "Fuel", "Hotel", "Undefined"]) == 2
+    assert ca.load_settings(s)[0]["Concur_경비_유형"][-2:] == ["Fuel", "Hotel"]
+    assert ca.remember_expense_types(s, ["Fuel", "Taxi"]) == 0
 
 
 def test_known_types_added_to_old_settings_file(tmp_path):
@@ -166,3 +166,12 @@ def test_similar_expense_type_names_chosen_exactly(browser, name):
     assert value == "Undefined"
     bot.choose_option(trigger, name)
     assert page.inner_text("[name=expenseType]") == name               # 이름이 비슷한 다른 항목을 고르지 않음
+
+
+def test_known_expense_types_from_user_captures():
+    types = ca.KNOWN_EXPENSE_TYPES
+    assert len(types) == len(set(types)) == 47                        # 겹치는 이름 없이 캡처 46개 + Parking & Toll
+    for t in ("M Card Service Fee (Airfare Booking)", "M card parking & toll", "Trade show and Marcom Expenses",
+              "Phone & Fax", "Taxi", "Parking & Toll", "Other Staff Expenses"):
+        assert t in types
+    assert all(t == t.strip() and "  " not in t for t in types)
