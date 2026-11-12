@@ -25,6 +25,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -45,7 +46,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 화면 조사"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 보정 줄임"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -174,11 +175,12 @@ def default_settings():
         "로그인_메일_제목": "SAP Concur 로그인 요청|Sign-In Request to SAP Concur",
         "로그인_메일_버튼": "SAP Concur 로그인|Sign in to SAP Concur",
         "로그인_메일_대기_초": 120,
+        "_보정_설명": "영수증 사진은 그대로 읽습니다. 금액이나 날짜를 못 읽은 영수증만 보정(대비·선명하게)해서 한 번 더 읽고, 보정한 사진은 바로 지웁니다. 확대는 작은 사진(긴 변 2000픽셀 미만)에만 합니다.",
         "영수증_보정_사용": True,
         "보정_확대_배율": 2.0,
         "입력_전_확인": True,
         "결과_자동_열기": True,
-        "_업로드_설명": "원본 또는 보정본. Concur는 1장당 5MB 제한이 있어 넘으면 자동으로 줄여서 올립니다.",
+        "_업로드_설명": "Concur에는 원본 사진을 올립니다(보정본은 더 이상 만들지 않음). Concur는 1장당 5MB 제한이 있어 넘으면 자동으로 줄여서 올립니다.",
         "업로드_이미지": "원본",
         "업로드_최대_MB": 5,
         "기본_도시": "Gwangju (ex Kwangju), KOREA, REPUBLIC OF",
@@ -982,21 +984,42 @@ def processed_path(cfg: dict, original: Path) -> Path:
     return Path(cfg["보정본_폴더"]) / f"{original.stem}{PROCESSED_SUFFIX}.png"
 
 
-def preprocess_one(cfg: dict, original: Path, out: Path, log: Log) -> str:
-    """영수증 한 장 보정 → 'made' 또는 'failed'"""
+def make_enhanced_copy(cfg: dict, original: Path, work_dir: Path, log) -> Path:
+    """금액·날짜를 못 읽은 영수증을 다시 읽기 위한 보정 사본(임시 jpg, 읽고 나면 지움). 실패하면 None.
+    iPhone 사진은 이미 커서 확대는 효과가 거의 없고 느리기만 해서, 작은 사진(긴 변 2000픽셀 미만)만 확대합니다."""
     cv2, _ = _cv2()
-    out.parent.mkdir(parents=True, exist_ok=True)
     img = imread_unicode(original)
     if img is None:
         log(f"   읽기 실패: {original.name}")
-        return "failed"
+        return None
+    scale = float(cfg.get("보정_확대_배율", 2.0)) if max(img.shape[:2]) < 2000 else 1.0
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out = work_dir / f"pre_{original.stem}.jpg"
     try:
-        ok = imwrite_unicode(out, preprocess_receipt(img, float(cfg["보정_확대_배율"])), ".png",
-                             [cv2.IMWRITE_PNG_COMPRESSION, 3])
+        ok = imwrite_unicode(out, preprocess_receipt(img, scale), ".jpg", [cv2.IMWRITE_JPEG_QUALITY, 95])
     except Exception as e:
         log(f"   보정 실패: {original.name} ({e})")
-        return "failed"
-    return "made" if ok else "failed"
+        return None
+    return out if ok else None
+
+
+def info_score(rec) -> int:
+    """읽어 낸 정보가 얼마나 되는지(날짜·금액·분류·병원)"""
+    return (2 if rec.date_from_ocr else 0) + (2 if rec.total else 0) + (1 if rec.category else 0) + (1 if rec.hospital_en else 0)
+
+
+def old_processed_note(cfg: dict) -> str:
+    """예전 판이 만든 보정본(png) 폴더가 남아 있으면 지워도 된다는 안내"""
+    folder = Path(str(cfg.get("보정본_폴더") or ""))
+    try:
+        files = [f for f in folder.glob(f"*{PROCESSED_SUFFIX}.png")] if folder.is_dir() else []
+    except OSError:
+        files = []
+    if not files:
+        return ""
+    mb = sum(f.stat().st_size for f in files) / 1024 / 1024
+    return (f"예전 판이 만든 보정 사진 {len(files)}개(약 {mb:,.0f}MB)가 {folder} 에 남아 있습니다. "
+            f"이제 쓰지 않으니 폴더째 지워도 됩니다(iCloud 용량도 차지합니다).")
 
 
 # ============================================================
@@ -1022,21 +1045,23 @@ class WindowsOcr:
         self.temp_dir = temp_dir
         temp_dir.mkdir(parents=True, exist_ok=True)
 
-    def _fit_size(self, path: Path) -> Path:
-        """jpg는 사진 회전 정보를 반영하고 heic는 Windows가 못 읽을 수 있어서 png로 바꿔 OCR합니다."""
+    def _fit_size(self, path: Path) -> tuple:
+        """OCR용 임시 사본(jpg): 사진 회전 정보를 반영하고, heic는 Windows가 못 읽을 수 있어서 바꿉니다.
+        → (읽을 파일, 임시 파일인지). 임시 파일은 읽고 나면 지웁니다."""
         cv2, _ = _cv2()
         img = imread_unicode(path)
         if img is None:
-            return path
+            return path, False
         too_big = max(img.shape[:2]) > self.max_dim
         if path.suffix.lower() == ".png" and not too_big:
-            return path
+            return path, False
         if too_big:
             ratio = (self.max_dim - 1) / max(img.shape[:2])
             img = cv2.resize(img, None, fx=ratio, fy=ratio, interpolation=cv2.INTER_AREA)
-        tmp = self.temp_dir / f"ocr_{path.stem}.png"
-        imwrite_unicode(tmp, img)
-        return tmp
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.temp_dir / f"ocr_{path.stem}.jpg"
+        imwrite_unicode(tmp, img, ".jpg", [cv2.IMWRITE_JPEG_QUALITY, 95])
+        return tmp, True
 
     async def _read(self, path: Path) -> str:
         from winrt.windows.graphics.imaging import BitmapDecoder
@@ -1054,7 +1079,15 @@ class WindowsOcr:
                 close()
 
     def read(self, path: Path) -> str:
-        return asyncio.run(self._read(self._fit_size(path)))
+        src, temp = self._fit_size(path)
+        try:
+            return asyncio.run(self._read(src))
+        finally:
+            if temp:
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
 
 
 # ============================================================
@@ -1485,10 +1518,14 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
     cache_path = results_dir / "ocr_cache.json"
     cache = _load_json(cache_path)
     engine = []
-    counts = {"made": 0, "failed": 0}
+    counts = {"보정": 0, "나아짐": 0}
+    note = old_processed_note(cfg)
+    if note:
+        log("   " + note)
 
-    def read_text(path: Path, st) -> str:
-        c = cache.get(path.name)
+    def read_text(path: Path, st, key: str = None) -> str:
+        key = key or path.name
+        c = cache.get(key)
         if c and c.get("size") == st.st_size and c.get("mtime") == int(st.st_mtime) and "text" in c:
             return c["text"]
         if not engine:
@@ -1499,24 +1536,40 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         except Exception as e:
             log(f"   OCR 실패: {path.name} ({e})")
             text = ""
-        cache[path.name] = {"size": st.st_size, "mtime": int(st.st_mtime), "text": text}
+        cache[key] = {"size": st.st_size, "mtime": int(st.st_mtime), "text": text}
         return text
+
+    def enhanced_text(orig: Path, st) -> str:
+        """보정 사본으로 다시 읽은 글자(결과는 기억해 두고, 보정 사본은 바로 지움)"""
+        key = orig.name + "#보정"
+        c = cache.get(key)
+        if c and c.get("size") == st.st_size and c.get("mtime") == int(st.st_mtime) and "text" in c:
+            return c["text"]
+        copy = make_enhanced_copy(cfg, orig, work_dir, log)
+        if copy is None:
+            return ""
+        try:
+            return read_text(copy, st, key)
+        finally:
+            try:
+                copy.unlink()
+            except OSError:
+                pass
 
     auto, receipts = {}, []
     try:
         for orig, taken in originals:
             st = orig.stat()
             ocr_file, text = orig, read_text(orig, st)
-            first_is_receipt = analyze_receipt(orig, orig, text, cfg, hospitals, taken).is_receipt
-            # 보정은 영수증으로 보이는 사진만 (일반 사진까지 보정하면 느리고 용량이 큼)
-            if use_pre and first_is_receipt:
-                out = processed_path(cfg, orig)
-                if not out.exists():
-                    counts[preprocess_one(cfg, orig, out, log)] += 1
-                if out.exists():
-                    better = read_text(out, st)
-                    if better.strip():
-                        ocr_file, text = out, better
+            first = analyze_receipt(orig, orig, text, cfg, hospitals, taken)
+            first_is_receipt = first.is_receipt
+            # 사진은 그대로 읽고, 영수증인데 금액이나 날짜를 못 읽었을 때만 보정해서 한 번 더 읽음
+            if use_pre and first_is_receipt and (not first.total or not first.date_from_ocr):
+                counts["보정"] += 1
+                better = enhanced_text(orig, st)
+                if better.strip() and info_score(analyze_receipt(orig, orig, better, cfg, hospitals, taken)) > info_score(first):
+                    text = better
+                    counts["나아짐"] += 1
 
             def analyze():
                 r = analyze_receipt(orig, ocr_file, text, cfg, hospitals, taken)
@@ -1529,8 +1582,8 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             receipts.append(analyze())
     finally:
         _save_json(cache_path, cache)       # 중간에 멈춰도 읽은 결과는 남김
-    if counts["made"] or counts["failed"]:
-        log(f"   보정: 새로 {counts['made']}장 / 실패 {counts['failed']}장")
+    if counts["보정"]:
+        log(f"   금액·날짜를 못 읽어 보정해서 다시 읽은 영수증 {counts['보정']}장, 그중 더 잘 읽힌 것 {counts['나아짐']}장")
 
     for group in (list(auto.values()), receipts):
         fill_same_day_hospitals(group)
@@ -2626,6 +2679,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         return
     try:
         log(f"===== {title} | {tm.prefix} ({tm.month_name}) | 프로그램 {APP_VERSION} =====")
+        shutil.rmtree(work_dir, ignore_errors=True)          # 지난 실행의 임시 파일
         if is_unfinished_month(tm):
             log(unfinished_month_note(tm))
         try:
@@ -2718,6 +2772,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
     finally:
         if bot:
             bot.stop()
+        shutil.rmtree(work_dir, ignore_errors=True)          # OCR·업로드용 임시 사본
         log(f"실행 기록: {log.path}")
         log.close()
 
@@ -2779,7 +2834,7 @@ class GuiApp:
         ttk.Checkbutton(lf, text="이메일 링크로 자동 로그인 (Outlook 메일 사용)", variable=self.auto_login).grid(row=0, column=1, padx=(8, 0))
 
         self.pre = tk.BooleanVar(value=bool(self.cfg.get("영수증_보정_사용", True)))
-        ttk.Checkbutton(f, text="영수증 보정 사용 (사진이 선명하면 꺼도 됩니다)", variable=self.pre).grid(row=4, column=1, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(f, text="금액·날짜를 못 읽은 영수증은 보정해서 한 번 더 읽기", variable=self.pre).grid(row=4, column=1, sticky="w", pady=(6, 0))
         self.review = tk.BooleanVar(value=bool(self.cfg.get("입력_전_확인", True)))
         ttk.Checkbutton(f, text="Concur 입력 전에 확인이 필요한 영수증 알려 주기", variable=self.review).grid(row=5, column=1, sticky="w")
 

@@ -182,16 +182,59 @@ def test_list_puts_excluded_photos_last_and_user_can_bring_back(tmp_path, monkey
         log.close()
 
 
-def test_only_receipts_are_corrected_and_corrected_text_is_used(tmp_path, monkeypatch):
+def test_photo_is_read_as_is_and_only_unreadable_receipts_are_corrected(tmp_path, monkeypatch):
     pytest.importorskip("cv2")
     pytest.importorskip("PIL")
     src = tmp_path / "src"
     src.mkdir()
-    _jpeg(src / "2026-10-05_090000.jpg", size=(30, 30))
+    for name in ("2026-10-05_090000.jpg", "2026-10-06_090000.jpg", "2026-10-07_090000.jpg"):
+        _jpeg(src / name, size=(30, 30))
+    texts = {"2026-10-05_090000.jpg": "2026.10.05 합계 3,000 카드",      # 잘 읽힘 → 보정 안 함
+             "2026-10-06_090000.jpg": "합계 카드 결제",                   # 금액·날짜를 못 읽음 → 보정해서 다시
+             "pre_2026-10-06_090000.jpg": "2026.10.06 합계 4,500 카드",
+             "2026-10-07_090000.jpg": "풍경"}                           # 영수증 아님 → 보정 안 함
+    read = []
+    work = tmp_path / "w"
+
+    class FakeOcr:
+        def __init__(self, temp_dir):
+            pass
+
+        def read(self, path):
+            read.append(path.name)
+            assert path.exists()
+            return texts[path.name]
+
+    monkeypatch.setattr(ca, "WindowsOcr", FakeOcr)
+    cfg = ca.default_settings()
+    cfg.update({"영수증_원본_폴더": str(src), "보정본_폴더": str(src / "p"), "영수증_보정_사용": True})
+    results = tmp_path / "결과"
+    results.mkdir()
+    lines = []
+    log = ca.Log(tmp_path / "log", sink=lines.append)
+    try:
+        recs = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), ca.OLD_DEFAULT_HOSPITALS, results, work, log)
+        assert read == ["2026-10-05_090000.jpg", "2026-10-06_090000.jpg", "pre_2026-10-06_090000.jpg", "2026-10-07_090000.jpg"]
+        assert not (src / "p").exists()                                  # 보정본 폴더(큰 png)를 만들지 않음
+        assert list(work.glob("*")) == []                                # 보정 사본은 읽고 바로 지움
+        fixed = next(r for r in recs if r.original.name == "2026-10-06_090000.jpg")
+        assert fixed.total == 4500 and fixed.main_date == "2026-10-06" and fixed.ocr_file.name == "2026-10-06_090000.jpg"
+        assert any("보정해서 다시 읽은 영수증 1장, 그중 더 잘 읽힌 것 1장" in l for l in lines)
+
+        read.clear()                                                     # 두 번째 실행은 기억해 둔 결과를 씀
+        ca.build_receipts(cfg, ca.TargetMonth(2026, 10), ca.OLD_DEFAULT_HOSPITALS, results, work, log)
+        assert read == []
+    finally:
+        log.close()
+
+
+def test_correction_kept_only_when_it_reads_more(tmp_path, monkeypatch):
+    pytest.importorskip("cv2")
+    pytest.importorskip("PIL")
+    src = tmp_path / "src"
+    src.mkdir()
     _jpeg(src / "2026-10-06_090000.jpg", size=(30, 30))
-    texts = {"2026-10-05_090000.jpg": "풍경",
-             "2026-10-06_090000.jpg": "합계 4,800",                # 원본은 금액을 잘못 읽음
-             "2026-10-06_090000_보정됨.png": "합계 4,500 카드"}
+    texts = {"2026-10-06_090000.jpg": "합계 4,500 카드", "pre_2026-10-06_090000.jpg": "합"}   # 보정본이 더 못 읽음
 
     class FakeOcr:
         def __init__(self, temp_dir):
@@ -202,14 +245,40 @@ def test_only_receipts_are_corrected_and_corrected_text_is_used(tmp_path, monkey
 
     monkeypatch.setattr(ca, "WindowsOcr", FakeOcr)
     cfg = ca.default_settings()
-    cfg.update({"영수증_원본_폴더": str(src), "보정본_폴더": str(src / "p"), "영수증_보정_사용": True})
+    cfg.update({"영수증_원본_폴더": str(src), "보정본_폴더": str(src / "p")})
     results = tmp_path / "결과"
     results.mkdir()
     log = ca.Log(tmp_path / "log", sink=lambda s: None)
     try:
-        recs = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
+        recs = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), [], results, tmp_path / "w", log)
     finally:
         log.close()
-    assert sorted(p.name for p in (src / "p").iterdir()) == ["2026-10-06_090000_보정됨.png"]
-    receipt = next(r for r in recs if r.use)
-    assert receipt.total == 4500 and receipt.ocr_file.name == "2026-10-06_090000_보정됨.png"
+    assert recs[0].total == 4500 and recs[0].ocr_text == "합계 4,500 카드"
+
+
+def test_ocr_temp_copy_is_jpg_and_deleted(tmp_path):
+    pytest.importorskip("cv2")
+    pytest.importorskip("PIL")
+    photo = tmp_path / "IMG_0001.JPG"
+    _jpeg(photo, size=(40, 20))
+    ocr = ca.WindowsOcr.__new__(ca.WindowsOcr)          # Windows OCR 없이 임시 사본만 확인
+    ocr.max_dim, ocr.temp_dir = 10000, tmp_path / "tmp"
+    seen = []
+
+    async def fake_read(path):
+        seen.append((path.name, path.exists()))
+        return "ok"
+
+    ocr._read = fake_read
+    assert ocr.read(photo) == "ok"
+    assert seen == [("ocr_IMG_0001.jpg", True)]
+    assert list((tmp_path / "tmp").glob("*")) == []
+
+
+def test_old_processed_folder_notice(tmp_path):
+    folder = tmp_path / "Concur_Expenses_Processed"
+    folder.mkdir()
+    (folder / "2026-10-05_090000_보정됨.png").write_bytes(b"x" * 2048)
+    note = ca.old_processed_note({"보정본_폴더": str(folder)})
+    assert "보정 사진 1개" in note and "지워도 됩니다" in note
+    assert ca.old_processed_note({"보정본_폴더": str(tmp_path / "없음")}) == ""
