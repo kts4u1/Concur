@@ -46,7 +46,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 Edge 열어두기"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 자동 입력 편집 창"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -748,6 +748,60 @@ def apply_category_table(cfg: dict, path: Path, log=None) -> list:
     if log:
         log(f"자동 입력표: 분류 {len(order)}개 ({', '.join(order)})")
     return order
+
+
+def load_category_rows(path: Path, cfg: dict) -> tuple:
+    """자동입력표 → ([[분류, 찾을 글자, Comment, Business Purpose, Expense Type, 설명], ...], '(분류 없음)'일 때 Expense Type)"""
+    if not path.exists():
+        write_csv(path, CATEGORY_HEADER, category_rows_from_cfg(cfg))
+    default_type = (cfg.get("Undefined일_때_선택할_유형") or {}).get("분류없음", "Other Staff Expenses")
+    rows = []
+    for r in read_csv_dicts(path):
+        vals = ([str(v or "").strip() for v in r.values()] + [""] * 6)[:6]
+        if not vals[0]:
+            continue
+        if compact(vals[0]) in ("(분류없음)", "분류없음"):
+            default_type = vals[4] or default_type
+            continue
+        rows.append(vals)
+    return rows, default_type
+
+
+def save_category_rows(path: Path, rows: list, default_type: str):
+    out = [(list(r) + [""] * 6)[:6] for r in rows if str(r[0]).strip()]
+    out.append([NO_CATEGORY, "", "", "", default_type or "Other Staff Expenses",
+                "어느 분류에도 맞지 않는 영수증과 영수증 없는 경비의 Expense Type"])
+    write_csv(path, CATEGORY_HEADER, out)
+
+
+def category_preview(comment: str, purpose: str, hospital: str = "Chosun University Hospital") -> str:
+    """편집 창 미리보기: 병원을 찾았을 때와 못 찾았을 때 실제로 들어갈 글"""
+    cfg = {"입력_문구": {"x": {k: v for k, v in (("Comment", comment), ("Business Purpose", purpose)) if v}}}
+    rec = Receipt(original=Path("x"), ocr_file=Path("x"), category="x", hospital_en=hospital)
+    found = texts_for(rec, cfg)
+    rec.hospital_en = ""
+    missing = texts_for(rec, cfg)
+    return (f"병원을 찾았을 때 ({hospital})\n"
+            f"   Comment: {found.get('Comment', '(비어 있음)')}\n   Business Purpose: {found.get('Business Purpose', '(비어 있음)')}\n"
+            f"병원을 못 찾았을 때\n"
+            f"   Comment: {missing.get('Comment', '(비어 있음)')}\n   Business Purpose: {missing.get('Business Purpose', '(비어 있음)')}")
+
+
+def category_problems(rows: list) -> list:
+    """저장 전에 알려 줄 것: 같은 이름, 찾을 글자는 있는데 문구가 빈 항목, 여러 항목에 같은 찾을 글자"""
+    problems, names, owner = [], set(), {}
+    for r in rows:
+        name, kw = r[0].strip(), [compact(k) for k in re.split(r"[,，/]", r[1]) if compact(k)]
+        if name in names:
+            problems.append(f"'{name}' 항목이 두 번 있습니다(위쪽 것만 씁니다).")
+        names.add(name)
+        if kw and not (r[2].strip() or r[3].strip()):
+            problems.append(f"'{name}': 찾을 글자는 있는데 Comment·Business Purpose가 비어 있습니다.")
+        for k in kw:
+            if k in owner and owner[k] != name:
+                problems.append(f"'{k}' 글자가 '{owner[k]}'와 '{name}'에 다 있습니다(위쪽 '{owner[k]}'로 맞춰집니다).")
+            owner.setdefault(k, name)
+    return problems
 
 
 def add_expense_types_to_table(path: Path, types: list, cfg: dict) -> int:
@@ -2876,7 +2930,8 @@ class GuiApp:
     def __init__(self, base: Path):
         import tkinter as tk
         from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
-        self.sd = simpledialog
+        self.sd, self.ttk = simpledialog, ttk
+        self.editor = None
         self.tk, self.mb, self.fd = tk, messagebox, filedialog
         self.base = base
         self.cfg, created = load_settings(base / SETTINGS_FILE_NAME)
@@ -2943,7 +2998,7 @@ class GuiApp:
         sf.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(2, 6))
         for text, cmd in (("영수증 목록 열기", self.open_list), ("병원 목록 편집", self.open_hospitals),
                           ("병원 엑셀 가져오기", self.import_hospital_excel),
-                          ("자동 입력표 편집", self.open_category_table),
+                          ("자동 입력 편집", self.open_category_table),
                           ("화면 조사", lambda: self.start("inspect")),
                           ("결과 폴더 열기", lambda: open_path(self.base / "결과")),
                           ("설정 파일 열기", lambda: open_path(self.base / SETTINGS_FILE_NAME, notepad=True))):
@@ -2988,10 +3043,14 @@ class GuiApp:
             self.mb.showinfo("영수증 목록", "아직 이 달의 영수증 목록이 없습니다. ①을 먼저 실행하세요.")
 
     def open_category_table(self):
-        path = self.base / CATEGORY_FILE_NAME
-        if not path.exists():
-            apply_category_table(load_settings(self.base / SETTINGS_FILE_NAME)[0], path)
-        open_path(path)
+        """자동 입력 편집 창(이미 열려 있으면 앞으로)"""
+        if self.editor is not None and self.editor.win.winfo_exists():
+            self.editor.win.lift()
+            return
+        try:
+            self.editor = CategoryEditor(self)
+        except PermissionError:
+            self.mb.showerror("자동 입력 편집", "자동입력표.csv가 엑셀에 열려 있습니다. 엑셀을 닫고 다시 누르세요.")
 
     def open_hospitals(self):
         load_hospitals(self.base / HOSPITAL_FILE_NAME)
@@ -3109,6 +3168,241 @@ class GuiApp:
 
     def run(self):
         self.root.mainloop()
+
+
+class CategoryEditor:
+    """자동 입력 편집 창: 왼쪽에서 항목(Expense Type)을 고르고 오른쪽에서 찾을 글자·Comment·Business Purpose를 바로 적습니다."""
+    MARK_ON, MARK_OFF = "●", "○"
+
+    def __init__(self, app):
+        tk, ttk = app.tk, app.ttk
+        self.app, self.tk = app, tk
+        self.path = app.base / CATEGORY_FILE_NAME
+        cfg, _ = load_settings(app.base / SETTINGS_FILE_NAME)
+        self.rows, self.default_type = load_category_rows(self.path, cfg)
+        self.current, self.visible, self.dirty, self.loading = None, [], False, False
+
+        win = self.win = tk.Toplevel(app.root)
+        win.title("자동 입력 편집")
+        win.geometry("1000x620")
+        win.minsize(860, 560)
+        win.transient(app.root)
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        outer = ttk.Frame(win, padding=12)
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(1, weight=1)
+        outer.rowconfigure(1, weight=1)
+
+        ttk.Label(outer, foreground="#555", wraplength=960, justify="left", text=(
+            "왼쪽에서 항목을 고르고 오른쪽에 적으면 됩니다. ● = 설정됨(영수증에 맞춰짐), ○ = 아직 안 함. "
+            "'영수증에서 찾을 글자'가 비어 있는 항목은 영수증에 맞춰지지 않으니, 실제로 쓰는 항목만 채우세요. "
+            "위에 있는 항목이 먼저 맞춰집니다(▲▼로 순서 바꿈).")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        # 왼쪽: 목록
+        left = ttk.Frame(outer)
+        left.grid(row=1, column=0, sticky="nsw", padx=(0, 12))
+        left.rowconfigure(2, weight=1)
+        sf = ttk.Frame(left)
+        sf.grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Label(sf, text="찾기").pack(side="left")
+        self.filter = tk.StringVar()
+        fe = ttk.Entry(sf, textvariable=self.filter, width=22)
+        fe.pack(side="left", padx=4)
+        fe.bind("<KeyRelease>", lambda e: self.refresh_list())
+        self.only_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(left, text="설정한 항목만 보기", variable=self.only_on,
+                        command=self.refresh_list).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
+        self.listbox = tk.Listbox(left, width=40, height=22, exportselection=False, font=("Malgun Gothic", 10))
+        self.listbox.grid(row=2, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
+        sb.grid(row=2, column=1, sticky="ns")
+        self.listbox.configure(yscrollcommand=sb.set)
+        self.listbox.bind("<<ListboxSelect>>", lambda e: self.on_select())
+        bf = ttk.Frame(left)
+        bf.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        for text, cmd in (("새 항목", self.add), ("삭제", self.remove), ("▲ 위로", lambda: self.move(-1)),
+                          ("▼ 아래로", lambda: self.move(1))):
+            ttk.Button(bf, text=text, command=cmd).pack(side="left", padx=2)
+
+        # 오른쪽: 입력 칸
+        right = ttk.Frame(outer)
+        right.grid(row=1, column=1, sticky="nsew")
+        right.columnconfigure(1, weight=1)
+        self.vars = {}
+        types = sorted({r[4] for r in self.rows if r[4]} | {self.default_type}, key=str.lower)
+        fields = (("name", "항목 이름", "영수증 목록의 '분류' 칸에 보이는 이름. Concur 항목 이름을 그대로 써도 됩니다."),
+                  ("keywords", "영수증에서 찾을 글자", "영수증에 이 글자가 있으면 이 항목. 쉼표로 여러 개. 예: 통행료, 톨게이트, 하이패스"),
+                  ("comment", "Comment", "{hospital} 자리에 병원 영문명이 들어갑니다. 예: Toll fee for service in {hospital}"),
+                  ("purpose", "Business Purpose", "예: For service"),
+                  ("etype", "Expense Type", "Concur의 Expense Type이 Undefined(비어 있음)일 때 고를 항목. Concur 목록에 보이는 이름 그대로."))
+        r = 0
+        for key, label, hint in fields:
+            ttk.Label(right, text=label).grid(row=r, column=0, sticky="w", pady=(6, 0), padx=(0, 10))
+            var = self.vars[key] = tk.StringVar()
+            if key == "etype":
+                w = ttk.Combobox(right, textvariable=var, values=types)
+                w.bind("<<ComboboxSelected>>", lambda e: self.on_edit())
+            else:
+                w = ttk.Entry(right, textvariable=var)
+            w.grid(row=r, column=1, sticky="ew", pady=(6, 0))
+            w.bind("<KeyRelease>", lambda e: self.on_edit())
+            ttk.Label(right, text=hint, foreground="#777", wraplength=420, justify="left").grid(row=r + 1, column=1, sticky="w")
+            r += 2
+        ttk.Label(right, text="미리보기").grid(row=r, column=0, sticky="nw", pady=(12, 0))
+        self.preview = ttk.Label(right, text="", justify="left", wraplength=420, foreground="#1a4d8f")
+        self.preview.grid(row=r, column=1, sticky="w", pady=(12, 0))
+        r += 1
+        self.status = ttk.Label(right, text="", foreground="#b05000", wraplength=420, justify="left")
+        self.status.grid(row=r, column=1, sticky="w", pady=(8, 0))
+
+        # 아래: 기본 Expense Type, 저장
+        bottom = ttk.Frame(outer)
+        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Label(bottom, text="어느 항목에도 안 맞을 때 Expense Type").pack(side="left")
+        self.default_var = tk.StringVar(value=self.default_type)
+        dc = ttk.Combobox(bottom, textvariable=self.default_var, values=types, width=28)
+        dc.pack(side="left", padx=6)
+        dc.bind("<<ComboboxSelected>>", lambda e: self.mark_dirty())
+        dc.bind("<KeyRelease>", lambda e: self.mark_dirty())
+        ttk.Button(bottom, text="닫기", command=self.close).pack(side="right", padx=3)
+        ttk.Button(bottom, text="엑셀로 열기", command=self.open_excel).pack(side="right", padx=3)
+        ttk.Button(bottom, text="저장", style="Big.TButton", command=self.save).pack(side="right", padx=3)
+
+        self.refresh_list()
+        first = next((i for i, row in enumerate(self.visible) if self.rows[row][1].strip()), 0 if self.visible else None)
+        if first is not None:
+            self.select_visible(first)
+
+    # ---------- 목록 ----------
+    def label(self, row: list) -> str:
+        mark = self.MARK_ON if row[1].strip() else self.MARK_OFF
+        return f"{mark} {row[0]}" + (f"   → {row[4]}" if row[4] and row[4] != row[0] else "")
+
+    def refresh_list(self):
+        q = self.filter.get().strip().lower()
+        self.visible = [i for i, row in enumerate(self.rows)
+                        if (not q or q in " ".join(row[:5]).lower()) and (not self.only_on.get() or row[1].strip())]
+        self.listbox.delete(0, "end")
+        for i in self.visible:
+            self.listbox.insert("end", self.label(self.rows[i]))
+        if self.current in self.visible:
+            pos = self.visible.index(self.current)
+            self.listbox.selection_set(pos)
+            self.listbox.see(pos)
+
+    def select_visible(self, pos: int):
+        self.listbox.selection_clear(0, "end")
+        self.listbox.selection_set(pos)
+        self.listbox.see(pos)
+        self.on_select()
+
+    def on_select(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        self.current = self.visible[sel[0]]
+        row = self.rows[self.current]
+        self.loading = True
+        for key, value in zip(("name", "keywords", "comment", "purpose", "etype"), row[:5]):
+            self.vars[key].set(value)
+        self.loading = False
+        self.update_preview()
+
+    # ---------- 입력 ----------
+    def on_edit(self):
+        if self.loading or self.current is None:
+            return
+        row = self.rows[self.current]
+        row[:5] = [self.vars[k].get().strip() for k in ("name", "keywords", "comment", "purpose", "etype")]
+        self.mark_dirty()
+        if self.current in self.visible:
+            pos = self.visible.index(self.current)
+            self.listbox.delete(pos)
+            self.listbox.insert(pos, self.label(row))
+            self.listbox.selection_set(pos)
+        self.update_preview()
+
+    def update_preview(self):
+        if self.current is None:
+            self.preview.configure(text="")
+            return
+        row = self.rows[self.current]
+        self.preview.configure(text=category_preview(row[2], row[3]))
+        self.status.configure(text="" if row[1].strip() else
+                              "아직 '영수증에서 찾을 글자'가 비어 있어 이 항목은 영수증에 맞춰지지 않습니다.")
+
+    def mark_dirty(self):
+        self.dirty = True
+        self.win.title("자동 입력 편집 *")
+
+    def add(self):
+        at = self.current + 1 if self.current is not None else 0
+        self.rows.insert(at, ["새 항목", "", "", "", "", ""])
+        self.current = at
+        self.filter.set("")
+        self.only_on.set(False)
+        self.refresh_list()
+        self.select_visible(self.visible.index(at))
+        self.mark_dirty()
+
+    def remove(self):
+        if self.current is None:
+            return
+        name = self.rows[self.current][0]
+        if not self.app.mb.askyesno("삭제", f"'{name}' 항목을 지울까요?", parent=self.win):
+            return
+        at = self.current
+        self.rows.pop(at)
+        self.current = None
+        self.mark_dirty()
+        self.refresh_list()
+        if self.visible:                       # 지운 자리 옆 항목을 고른 채로
+            near = min(range(len(self.visible)), key=lambda k: (abs(self.visible[k] - at), self.visible[k] >= at))
+            self.select_visible(near)
+        else:
+            for v in self.vars.values():
+                v.set("")
+            self.preview.configure(text="")
+
+    def move(self, delta: int):
+        i = self.current
+        if i is None or not 0 <= i + delta < len(self.rows):
+            return
+        self.rows[i], self.rows[i + delta] = self.rows[i + delta], self.rows[i]
+        self.current = i + delta
+        self.refresh_list()
+        self.mark_dirty()
+
+    # ---------- 저장 ----------
+    def save(self) -> bool:
+        problems = category_problems(self.rows)
+        if problems and not self.app.mb.askyesno(
+                "저장", "확인할 것이 있습니다.\n\n" + "\n".join(f"· {p}" for p in problems[:10]) + "\n\n그래도 저장할까요?",
+                parent=self.win):
+            return False
+        try:
+            save_category_rows(self.path, self.rows, self.default_var.get().strip())
+        except PermissionError:
+            self.app.mb.showerror("저장", "자동입력표.csv가 엑셀에 열려 있습니다. 엑셀을 닫고 다시 저장하세요.", parent=self.win)
+            return False
+        self.dirty = False
+        self.win.title("자동 입력 편집")
+        on = sum(1 for r in self.rows if r[1].strip())
+        self.app.append(f"자동 입력을 저장했습니다: 설정된 항목 {on}개 (다음 실행부터 씁니다)")
+        self.status.configure(text=f"저장했습니다. 설정된 항목 {on}개.")
+        return True
+
+    def open_excel(self):
+        if self.dirty and not self.save():
+            return
+        open_path(self.path)
+
+    def close(self):
+        if self.dirty:
+            ans = self.app.mb.askyesnocancel("자동 입력 편집", "바꾼 내용을 저장할까요?", parent=self.win)
+            if ans is None or (ans and not self.save()):
+                return
+        self.win.destroy()
 
 
 class GuiBridge:

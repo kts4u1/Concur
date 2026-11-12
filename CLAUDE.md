@@ -94,14 +94,15 @@
   - **다음 Claude가 고칠 때:** 사용자에게 화면조사 txt·png와 실행 기록을 받아, '없음'인 키의 새 id/name을 `DEFAULT_ELEMENTS`에 반영하고(사용자 설정 파일에 예전 값이 저장돼 있으면 `load_settings`에서 옮겨 주기), 버튼 글자는 `화면_문구`에 `|`로 덧붙이고, `tests/test_screen_change.py`처럼 가짜 화면 테스트를 더합니다. 아직 설정으로 못 옮긴 것: `JS_SELECT_MONTH`의 체크박스 클래스, 진행 표시("3 of 4") 정규식, 로그인 확인용 `#cnqr-app-content`.
 - **끝나도 Edge 열어 두기 (2026-11-13, 사용자 요청):** "다시 직접 보고 수정해야 하니 닫지 말아 달라". `작업_후_Edge_열어두기`(기본 true)면 ②·③이 끝나거나 오류가 나도 `run_job`의 finally에서 `bot.wait_until_closed(stop_flag)`로 사용자가 Edge 창을 닫을 때까지(또는 [중지]) 기다린 뒤 정리합니다. 그동안 작업 스레드가 살아 있어 실행 버튼은 눌리지 않습니다. 사용자가 취소(Cancelled)한 경우는 바로 닫습니다.
 - **Concur Expense Type 목록 가져오기 (2026-11-13, 사용자 질문 "골라야 할 항목이 엄청 많은데 쉽게 넣는 방법"):** 이 클라우드 환경은 사용자 회사 계정으로 Concur에 들어갈 수 없어 직접 볼 수 없습니다. 대신 [화면 조사]가 경비 편집 화면에서 Expense Type 드롭다운을 열어 목록을 모두 읽고(`read_dropdown_options`: 화면에 보이는 만큼만 그리는 목록도 아래로 내리며 읽음, Recently Used 같은 제목은 뺌) 화면조사 파일에 적은 뒤, `add_expense_types_to_table`이 자동입력표에 없는 항목을 '(분류 없음)' 위에 줄로 더합니다(찾을 글자는 비워 둠 → 사용자가 적기 전에는 영수증에 안 맞춰짐, 이미 Expense Type 칸에 쓰는 이름·Undefined는 뺌). 확인한 항목 일부: Car mileage, Parking & Toll, Meals & Drinks, Other, Training. 식대를 지금처럼 Other Staff Expenses로 둘지 Meals & Drinks로 바꿀지는 사용자 결정.
+- **자동 입력 편집 창 (2026-11-13, 사용자 요청 "엑셀로는 힘들다, Expense Type을 고르면 넣을 글을 직접 만드는 창"):** 창의 [자동 입력 편집] → `CategoryEditor`(tkinter Toplevel). 왼쪽 목록(● 설정됨 / ○ 안 함, 찾기·설정한 항목만), 오른쪽 입력칸(항목 이름·찾을 글자·Comment·Business Purpose·Expense Type 콤보), 미리보기(`category_preview`: 병원 있을 때/없을 때), [새 항목]·[삭제]·▲▼·[저장]·[엑셀로 열기]·[닫기](저장 안 했으면 물어봄). 저장 전 `category_problems`(같은 이름, 같은 찾을 글자가 여러 항목, 찾을 글자는 있는데 문구 빈 항목). 파일 읽기·쓰기는 `load_category_rows`/`save_category_rows`(‘(분류 없음)’ 줄은 아래 기본 Expense Type 칸). 사용자는 실제로 10개 정도만 쓴다고 함.
 - 분류 키워드와 병원 표에 있는 이상한 글자('주자', '메리카', '중남대' 등)는 OCR이 잘못 읽은 글자에 맞춘 것이라 일부러 둔 것입니다. 지우면 안 됩니다.
 
 ## 어디까지 확인했나
 
 - 이전 채팅에서: 글자 분석·매칭 테스트, Concur를 흉내 낸 가짜 화면에서 처음부터 저장까지 실행, 프로그램 창이 뜨는지 확인했습니다. 다만 그 테스트 코드와 가짜 화면은 넘어오지 않았습니다.
-- 이 저장소에서: `tests` 폴더에 테스트 195개가 있습니다. 날짜·금액·분류·병원 뽑기, 엑셀로 고친 내용 유지, 경비와 영수증 맞추기, 설정 파일, 지난달 경비만 고르기, 촬영 날짜로 사진 고르기, HEIC 읽기·JPEG 변환, 영수증 아닌 사진 빼기, 영수증 날짜로 달 정하기(늦게 찍은 영수증, 다른 달 영수증, 날짜 못 읽은 영수증에 날짜 적기), 이번 달 처리, 이메일 링크 자동 로그인(가짜 Concur 로그인 화면과 가짜 Outlook), 병원 찾기(엑셀 가져오기·한글→영문·같은 날·가게 이름·영수증 글자의 새 병원), 도시 자동 선택(가짜 도시 드롭다운), 쉼표 없는 금액·두 자리 연도를 확인합니다. 모두 통과합니다.
+- 이 저장소에서: `tests` 폴더에 테스트 199개가 있습니다(창 테스트 1개는 화면이 있을 때만). 날짜·금액·분류·병원 뽑기, 엑셀로 고친 내용 유지, 경비와 영수증 맞추기, 설정 파일, 지난달 경비만 고르기, 촬영 날짜로 사진 고르기, HEIC 읽기·JPEG 변환, 영수증 아닌 사진 빼기, 영수증 날짜로 달 정하기(늦게 찍은 영수증, 다른 달 영수증, 날짜 못 읽은 영수증에 날짜 적기), 이번 달 처리, 이메일 링크 자동 로그인(가짜 Concur 로그인 화면과 가짜 Outlook), 병원 찾기(엑셀 가져오기·한글→영문·같은 날·가게 이름·영수증 글자의 새 병원), 도시 자동 선택(가짜 도시 드롭다운), 쉼표 없는 금액·두 자리 연도를 확인합니다. 모두 통과합니다.
 - **실제 Concur와 실제 Windows OCR에서는 아직 한 번도 돌려 보지 않았습니다.**
-- 프로그램 창(tkinter)은 이 환경에 없어 띄워 보지 못했습니다. 처리할 달 목록을 만드는 함수만 테스트합니다.
+- 프로그램 창(tkinter): 2026-11-13에 이 환경에 `python3-tk`(시스템 Python 3.12용)와 한글 글꼴을 설치해 가상 화면(Xvfb)에서 처음 띄워 봤습니다. 메인 창과 자동 입력 편집 창이 제대로 뜨고, 편집·저장이 됩니다(`tests/test_category_editor.py`의 창 테스트는 화면이 있을 때만 돎). 다시 하려면 아래 '창 테스트'를 보세요.
 - 아직 확인 못 한 것(로그인): 실제 Concur 로그인 화면에서 버튼·입력칸을 찾는지, 회사 PC의 Outlook이 클래식인지와 pywin32 접근이 막히지 않는지, 메일 링크가 메일 보안에 감싸져도 열리는지.
 - 아직 확인 못 한 것: 실제 iCloud 사진 폴더(Windows)의 파일 날짜와 폴더 위치, Windows에서 `pillow-heif` 설치와 exe 안에 들어가는지(`--collect-all pillow_heif`), 영수증 판단이 실제 사진에서 얼마나 맞는지.
 
@@ -128,6 +129,17 @@
   python -m pytest
   ```
   브라우저는 이 환경에 이미 설치된 Chromium(`/opt/pw-browsers/chromium`)을 씁니다. 다른 위치를 쓰려면 환경 변수 `PW_CHROMIUM`에 경로를 넣습니다. `playwright install`은 하지 않습니다.
+- **창 테스트:** 기본 Python 3.13에는 tkinter가 없습니다. 시스템 Python 3.12로 돌립니다(컨테이너가 새로 뜨면 다시 설치).
+  ```bash
+  apt-get install -y python3-tk fonts-nanum python3-pip
+  ```
+  ```bash
+  /usr/bin/python3.12 -m pip install --break-system-packages pytest
+  ```
+  ```bash
+  xvfb-run -a -s "-screen 0 1280x800x24" /usr/bin/python3.12 -m pytest -q -p no:cacheprovider tests/test_category_editor.py
+  ```
+  화면 캡처는 `xvfb-run` 안에서 `import -window root 파일.png`(ImageMagick)로 찍을 수 있습니다.
 - `requirements.txt`는 Windows용(Windows OCR 패키지 포함)이라 Linux에서는 설치하지 않습니다. 테스트용 `requirements-dev.txt`에는 사진 처리 패키지(opencv-python-headless, Pillow, pillow-heif)가 들어 있습니다.
 - **이 저장소는 누구나 볼 수 있는 공개 저장소입니다.** 사번이 들어간 경로, 회사 계정, 실제 영수증 사진, 개인 설정 파일(`concur_settings.json`, `병원목록.csv`, `결과` 폴더, `실행기록` 폴더)은 올리지 않습니다.
 - `build_exe.bat`는 Windows 줄바꿈(CRLF)을 유지해야 합니다. `.gitattributes`에 설정해 두었습니다.
