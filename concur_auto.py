@@ -45,7 +45,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 자동 입력표"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 화면 조사"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -81,6 +81,43 @@ OLD_DEFAULT_HOSPITALS = [
     ["예수", "Jeonju Jesus hospital"],
 ]
 
+
+# Concur 화면의 입력칸·목록 위치(CSS 선택자). Power Automate 흐름에 저장돼 있던 값입니다.
+# Concur가 바뀌면 설정 파일의 '화면_요소'만 고치면 됩니다([화면 조사] 파일 참고). 쉼표로 여러 개를 적으면 그중 하나를 찾습니다.
+DEFAULT_ELEMENTS = {
+    "리포트 이름": "#name",
+    "리포트 시작일": "#custom11-date-input-field-input",
+    "리포트 종료일": "#custom12-date-input-field-input",
+    "리포트 Business Purpose": "#businessPurpose",
+    "리포트 Comment": "#comment",
+    "사용 가능한 경비 카드": ".report-empty-state-actions__card-body",
+    "경비 체크박스": "input[type=checkbox].sapcnqr-checkbox__input",
+    "경비 목록": ".entries-list",
+    "경비 목록 체크박스": ".entries-list .sapcnqr-dropzone input.sapcnqr-checkbox__input",
+    "도구 모음": ".sapcnqr-toolbar__toolbar",
+    "경비 날짜": "#transactionDate-date-input-field-input",
+    "경비 금액": "#transactionAmount",
+    "Comment": "#comment",
+    "Business Purpose": "#businessPurpose",
+    "Receipt Status": "[name=receiptType]",
+    "Expense Type": "[name=expenseType]",
+    "LCRT": "#custom32 .sapcnqr-select-field__input",
+    "도시": "#location",
+    "영수증 업로드 버튼": "#upload-receipt-button",
+    "드롭다운 항목": ".sapcnqr-listbox-item__wrapper",
+}
+# 위치(id)로 못 찾을 때 화면 글자(라벨)로 찾는 입력칸
+DEFAULT_ELEMENT_LABELS = {
+    "리포트 이름": "Report Name|리포트 이름",
+    "리포트 시작일": "Start Date|시작일|시작 날짜",
+    "리포트 종료일": "End Date|종료일|종료 날짜",
+    "리포트 Business Purpose": "Business Purpose|비즈니스 목적|업무 목적",
+    "리포트 Comment": "Comment|코멘트|의견",
+    "경비 날짜": "Transaction Date|거래 날짜|거래일",
+    "경비 금액": "Amount|금액",
+    "Comment": "Comment|코멘트|의견",
+    "Business Purpose": "Business Purpose|비즈니스 목적|업무 목적",
+}
 
 OLD_DEFAULT_CITY = "Daejeon (ex Taejon), KOREA, REPUBLIC OF"
 DEFAULT_CITIES = {
@@ -199,6 +236,10 @@ def default_settings():
             "NA": "NA",
             "Undefined": "Undefined",
         },
+        "_화면_요소_설명": "Concur 화면의 입력칸 위치(CSS 선택자). Concur가 바뀌어 칸을 못 찾으면 창의 [화면 조사]로 만든 파일의 id·name을 보고 여기를 고칩니다. 예: 입력칸 id가 txtComment면 \"#txtComment\". 쉼표로 여러 개를 적으면 그중 하나를 찾습니다.",
+        "화면_요소": dict(DEFAULT_ELEMENTS),
+        "_화면_요소_라벨_설명": "위치로 못 찾을 때 화면에 보이는 칸 이름(라벨)으로 찾습니다. '|'로 여러 개.",
+        "화면_요소_라벨": dict(DEFAULT_ELEMENT_LABELS),
         "대기시간_초": 60,
     }
 
@@ -1627,8 +1668,9 @@ def prepare_upload_file(rec: Receipt, cfg: dict, work_dir: Path) -> Path:
 # ============================================================
 
 JS_READ_ROWS = r"""
-() => {
-  const root = document.querySelector('.entries-list') || document;
+(sel) => {
+  let root = document;
+  try { root = document.querySelector(sel || '.entries-list') || document; } catch (e) {}
   const boxes = Array.from(root.querySelectorAll('input[type="checkbox"]'));
   const seen = new Set();
   const out = [];
@@ -1679,6 +1721,29 @@ def apply_vendor_hospital(rec, vendor: str, hospitals: list) -> bool:
         return False
     rec.hospital_en, rec.hospital_src = en, HOSP_FROM_VENDOR
     return True
+
+
+JS_INSPECT = r"""
+() => {
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  const labelOf = e => {
+    if (e.labels && e.labels.length) return Array.from(e.labels).map(l => l.innerText.trim()).join(' / ');
+    const ids = e.getAttribute('aria-labelledby');
+    if (ids) return ids.split(/\s+/).map(x => (document.getElementById(x) || {}).innerText || '').join(' ').trim();
+    return e.getAttribute('aria-label') || e.getAttribute('placeholder') || '';
+  };
+  const clean = t => (t || '').replace(/\s+/g, ' ').trim();
+  const fields = Array.from(document.querySelectorAll(
+      'input:not([type=hidden]), textarea, select, [role=combobox], [role=textbox], [contenteditable=true]'))
+    .filter(vis).slice(0, 200)
+    .map(e => ({tag: e.tagName.toLowerCase(), type: e.getAttribute('type') || e.getAttribute('role') || '',
+                id: e.id || '', name: e.getAttribute('name') || '', label: clean(labelOf(e)).slice(0, 60),
+                value: clean(e.value || e.innerText).slice(0, 40)}));
+  const buttons = Array.from(document.querySelectorAll('button, [role=button], a[href]')).filter(vis)
+    .map(e => clean(e.innerText || e.getAttribute('aria-label')).slice(0, 40)).filter(t => t);
+  return {url: location.href.split('?')[0], title: document.title, fields, buttons: Array.from(new Set(buttons)).slice(0, 80)};
+}
+"""
 
 
 JS_SELECT_MONTH = r"""
@@ -1867,6 +1932,31 @@ class ConcurBot:
     def _exact(self, text: str):
         return re.compile(r"^\s*" + re.escape(text) + r"\s*$")
 
+    def sel(self, key: str) -> str:
+        """설정 '화면_요소'의 위치(없으면 기본값)"""
+        return str((self.cfg.get("화면_요소") or {}).get(key) or DEFAULT_ELEMENTS[key])
+
+    def _visible_css(self, key: str) -> str:
+        return ", ".join(part.strip() + ":visible" for part in self.sel(key).split(",") if part.strip())
+
+    def field(self, key: str, timeout_s: float = None):
+        """입력칸: 위치(화면_요소)로 찾고, 못 찾으면 칸 이름(화면_요소_라벨)으로 찾습니다. 끝내 못 찾으면 무엇을 고칠지 알려 줍니다."""
+        page = self.page
+        label = str((self.cfg.get("화면_요소_라벨") or {}).get(key) or DEFAULT_ELEMENT_LABELS.get(key, ""))
+        locs = [page.locator(self.sel(key))]
+        if label:
+            body = "|".join(re.escape(a.strip()) for a in label.split("|") if a.strip())
+            locs.append(page.get_by_label(re.compile(r"^\s*(?:" + body + r")\s*\*?\s*$", re.I)))
+        deadline = time.time() + (self.timeout_ms / 1000 if timeout_s is None else timeout_s)
+        while True:
+            el = self._first_shown(locs)
+            if el is not None:
+                return el
+            if time.time() >= deadline:
+                raise RuntimeError(f"Concur 화면에서 '{key}' 칸을 찾지 못했습니다(위치 {self.sel(key)}). "
+                                   f"Concur 화면이 바뀌었으면 [화면 조사]로 확인한 뒤 설정 '화면_요소'를 고치세요.")
+            time.sleep(0.3)
+
     def _alts(self, key: str) -> list:
         """화면 문구의 여러 글자(한국어|영어)"""
         return [a.strip() for a in str(self.t.get(key, key)).split("|") if a.strip()]
@@ -1916,7 +2006,7 @@ class ConcurBot:
     def choose_city(self, trigger, city_text: str):
         """도시 드롭다운: 정확한 이름이 보이면 고르고, 없으면 앞 단어(예: Mokpo)로 검색해 그 단어와 KOREA가 든 항목을 고릅니다."""
         page = self.page
-        items = page.locator(".sapcnqr-listbox-item__wrapper:visible")
+        items = page.locator(self._visible_css("드롭다운 항목"))
         trigger.click()
         exact = items.filter(has_text=self._exact(city_text))
         if not self._visible(exact.first, 3000):
@@ -1934,7 +2024,7 @@ class ConcurBot:
 
     def choose_option(self, trigger, option_text: str):
         page = self.page
-        options = page.locator(".sapcnqr-listbox-item__wrapper:visible").filter(has_text=self._exact(option_text))
+        options = page.locator(self._visible_css("드롭다운 항목")).filter(has_text=self._exact(option_text))
         trigger.click()
         if not self._visible(options.first, 4000):
             page.keyboard.type(option_text.split(",")[0][:20], delay=30)
@@ -1943,6 +2033,29 @@ class ConcurBot:
                 raise RuntimeError(f"드롭다운에서 '{option_text}' 항목을 찾지 못했습니다.")
         options.first.click()
         time.sleep(0.5)
+
+    def inspect_screen(self, path: Path) -> Path:
+        """지금 Concur 화면의 입력칸(id·name·칸 이름)·버튼 글자와, 설정 '화면_요소'를 이 화면에서 찾는지를 파일로 남깁니다."""
+        info = self.page.evaluate(JS_INSPECT)
+        lines = [f"화면 조사 {datetime.now():%Y-%m-%d %H:%M:%S} | 프로그램 {APP_VERSION}",
+                 f"주소: {info.get('url', '')}", f"제목: {info.get('title', '')}", "",
+                 "[설정 '화면_요소'를 이 화면에서 찾는지] (다른 화면의 칸은 '없음'이 정상입니다)"]
+        for key in DEFAULT_ELEMENTS:
+            try:
+                n = self.page.locator(self.sel(key)).count()
+            except Exception as e:
+                n = f"선택자 오류: {str(e).splitlines()[0][:60]}"
+            lines.append(f"  {key:<22} {self.sel(key):<55} {'찾음' if n else '없음'}{f'({n})' if isinstance(n, int) and n else ''}")
+        lines += ["", "[이 화면의 입력칸]  종류 | id | name | 칸 이름 | 지금 값"]
+        for f in info.get("fields", []):
+            lines.append(f"  {f['tag']}/{f['type']} | #{f['id']} | {f['name']} | {f['label']} | {f['value']}")
+        lines += ["", "[이 화면의 버튼·링크 글자]"] + [f"  {b}" for b in info.get("buttons", [])]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:
+            self.page.screenshot(path=str(path.with_suffix(".png")))
+        except Exception:
+            pass
+        return path
 
     def screenshot(self, name: str):
         try:
@@ -2153,12 +2266,11 @@ class ConcurBot:
             page.get_by_role("link", name=self._re("리포트 생성", exact=False)).first.click(timeout=15000)
         except Exception:
             page.goto(self.base + "/nui/expense?modal=header&context=new-report")
-        page.locator("#name").wait_for(state="visible")
-        self.type_text(page.locator("#name"), name)
-        self.type_text(page.locator("#custom11-date-input-field-input"), tm.first_day_us)
-        self.type_text(page.locator("#custom12-date-input-field-input"), tm.last_day_us)
-        self.type_text(page.locator("#businessPurpose:visible").first, name)
-        self.type_text(page.locator("#comment:visible").first, name)
+        self.type_text(self.field("리포트 이름"), name)
+        self.type_text(self.field("리포트 시작일"), tm.first_day_us)
+        self.type_text(self.field("리포트 종료일"), tm.last_day_us)
+        self.type_text(self.field("리포트 Business Purpose"), name)
+        self.type_text(self.field("리포트 Comment"), name)
         page.get_by_role("button", name=self._re("리포트 생성")).last.click()
         page.wait_for_url(re.compile(r"/nui/expense/reports/"))
         time.sleep(3)
@@ -2166,12 +2278,12 @@ class ConcurBot:
     # ---------- 지난달 경비 추가 ----------
     def add_available_expenses(self, tm: TargetMonth):
         page = self.page
-        card = page.locator(".report-empty-state-actions__card-body").filter(has_text=self._re("사용 가능한 경비", exact=False))
+        card = page.locator(self.sel("사용 가능한 경비 카드")).filter(has_text=self._re("사용 가능한 경비", exact=False))
         if not self._visible(card.first, 20000):
             card = page.get_by_text(self._re("사용 가능한 경비", exact=False))
         card.first.click()
         page.wait_for_url(re.compile(r"view=available_expenses"))
-        page.locator("input[type=checkbox].sapcnqr-checkbox__input").first.wait_for(state="attached")
+        page.locator(self.sel("경비 체크박스")).first.wait_for(state="attached")
         time.sleep(2)
         r = page.evaluate(JS_SELECT_MONTH, {"month": tm.month, "year": tm.year})
         self.log(f"사용 가능한 경비 중 {tm.prefix} 경비 {r['matched']}건 선택")
@@ -2180,7 +2292,7 @@ class ConcurBot:
             self.screenshot("available_expenses")
             raise RuntimeError("추가할 경비가 없습니다.")
         page.get_by_role("button", name=self._re("리포트에 추가")).click()
-        page.locator(".entries-list").first.wait_for(state="visible")
+        page.locator(self.sel("경비 목록")).first.wait_for(state="visible")
         time.sleep(3)
 
     # ---------- 경비 편집 화면 열기 ----------
@@ -2219,23 +2331,23 @@ class ConcurBot:
 
     def open_first_expense(self):
         page = self.page
-        page.locator(".entries-list").first.wait_for(state="visible")
+        page.locator(self.sel("경비 목록")).first.wait_for(state="visible")
         try:
-            self.entries = parse_entry_rows(page.evaluate(JS_READ_ROWS))
+            self.entries = parse_entry_rows(page.evaluate(JS_READ_ROWS, self.sel("경비 목록")))
         except Exception:
             self.entries = []
-        boxes = page.locator(".entries-list .sapcnqr-dropzone input.sapcnqr-checkbox__input")
+        boxes = page.locator(self.sel("경비 목록 체크박스"))
         try:
             boxes.first.wait_for(state="attached", timeout=10000)
             self.click_checkbox(boxes.first)
         except Exception:
-            self.click_checkbox(page.locator(".entries-list input.sapcnqr-checkbox__input").nth(1))
-        toolbar_edit = page.locator(".sapcnqr-toolbar__toolbar").get_by_role("button", name=self._re("편집"))
+            self.click_checkbox(page.locator(self.sel("경비 목록")).locator(self.sel("경비 체크박스")).nth(1))
+        toolbar_edit = page.locator(self.sel("도구 모음")).get_by_role("button", name=self._re("편집"))
         if self._visible(toolbar_edit.first, 5000):
             toolbar_edit.first.click()
         else:
             page.get_by_role("button", name=self._re("편집")).first.click()
-        page.locator("#transactionAmount").first.wait_for(state="attached")
+        self.field("경비 금액")
 
     def progress(self) -> tuple:
         el = self.page.get_by_text(re.compile(r"^\s*\d+\s*(?:/|of)\s*\d+\s*(?:개)?\s*$")).first
@@ -2260,28 +2372,28 @@ class ConcurBot:
         """rec가 있으면 문구·Receipt·첨부까지, 없어도 LCRT·Expense Type·도시는 처리"""
         page, t, done = self.page, self.t, []
         try:
-            page.locator('[name="receiptType"], #comment').first.wait_for(state="attached", timeout=8000)
+            page.locator(f'{self.sel("Receipt Status")}, {self.sel("Comment")}').first.wait_for(state="attached", timeout=8000)
         except Exception:
             pass
 
-        for field_id, field_name in (("comment", "Comment"), ("businessPurpose", "Business Purpose")):
+        for field_name in ("Comment", "Business Purpose"):
             text = texts_for(rec, self.cfg).get(field_name) if rec else None
             if text:
-                self.type_text(page.locator(f"#{field_id}:visible").first, text)
+                self.type_text(self.field(field_name), text)
                 done.append(f"{field_name} 입력")
 
         if rec:
-            trigger, value = self.find_select('[name="receiptType"]')
+            trigger, value = self.find_select(self.sel("Receipt Status"))
             if trigger is not None and value == t["No Receipt"]:
                 self.choose_option(trigger, t["Receipt"])
                 done.append("Receipt 선택")
 
-        trigger, _ = self.find_select("#custom32 .sapcnqr-select-field__input")
+        trigger, _ = self.find_select(self.sel("LCRT"))
         if trigger is not None:
             self.choose_option(trigger, t["NA"])
             done.append("LCRT=NA")
 
-        trigger, value = self.find_select('[name="expenseType"]')
+        trigger, value = self.find_select(self.sel("Expense Type"))
         if trigger is not None and value == t["Undefined"]:
             types = self.cfg["Undefined일_때_선택할_유형"]
             new_type = types.get((rec.category if rec else "") or "분류없음") or types.get("분류없음")
@@ -2290,7 +2402,7 @@ class ConcurBot:
                 done.append(f"Expense Type={new_type}")
                 checks.append(f"Expense Type 자동 선택({new_type})")
 
-        trigger, value = self.find_select("#location")
+        trigger, value = self.find_select(self.sel("도시"))
         if trigger is not None:
             city = city_to_choose(rec, value, self.cfg["기본_도시"])
             if city:
@@ -2304,7 +2416,7 @@ class ConcurBot:
     def _upload_control(self):
         page = self.page
         return self._first_shown([
-            page.locator("#upload-receipt-button"),
+            page.locator(self.sel("영수증 업로드 버튼")),
             page.get_by_role("button", name=self._re("영수증 업로드", exact=False)),
             page.locator("button, [role=button], a").filter(has_text=self._re("영수증 업로드", exact=False)),
         ])
@@ -2382,8 +2494,8 @@ class ConcurBot:
             checks = []
             try:
                 self.wait_progress(i)
-                date_text = page.locator("#transactionDate-date-input-field-input:visible").first.input_value()
-                amount_text = page.locator("#transactionAmount:visible").first.input_value()
+                date_text = self.field("경비 날짜").input_value()
+                amount_text = self.field("경비 금액").input_value()
                 row["Concur 날짜"], row["Concur 금액"] = date_text, amount_text
                 iso, amount = concur_date_to_iso(date_text), concur_amount_to_int(amount_text)
                 rec = find_receipt(receipts, iso, amount) if iso and amount is not None else None
@@ -2484,7 +2596,34 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
     log = Log(base / "실행기록", ui.log)
     work_dir = log.folder / "임시"
     bot = None
-    title = {"ocr": "영수증 분석", "full": "전체 실행", "edit": "리포트에 입력"}[mode]
+    title = {"ocr": "영수증 분석", "full": "전체 실행", "edit": "리포트에 입력", "inspect": "화면 조사"}[mode]
+    if mode == "inspect":
+        try:
+            log(f"===== 화면 조사 | 프로그램 {APP_VERSION} =====")
+            bot = ConcurBot(cfg, log, ui, stop_flag)
+            bot.start()
+            bot.wait_login(need_home=False)
+            made = []
+            while ui.confirm("화면 조사", "열린 Edge 창에서 조사할 Concur 화면(예: 경비 편집 화면, 리포트 만들기 화면)을 연 뒤 [확인]을 누르세요.\n"
+                                         "다 끝났으면 [취소]를 누르세요."):
+                path = bot.inspect_screen(log.folder / f"화면조사_{datetime.now():%Y%m%d_%H%M%S}.txt")
+                made.append(path)
+                log(f"화면 조사 파일: {path.name} (같은 이름의 .png 화면 캡처도 있습니다)")
+            if made:
+                ui.open(log.folder)
+                ui.info("화면 조사", f"화면 조사 파일 {len(made)}개를 '실행기록' 폴더에 만들었습니다.\n"
+                                   "'없음'으로 나온 칸은 이 파일의 id·name을 보고 설정 파일의 '화면_요소'를 고치거나, "
+                                   "파일을 Claude에게 보내 고쳐 달라고 하세요.")
+        except Cancelled:
+            log("중단했습니다.")
+        except Exception as e:
+            log("오류: " + str(e))
+            ui.info("오류", f"{e}\n\n자세한 내용: {log.path.name}")
+        finally:
+            if bot:
+                bot.stop()
+            log.close()
+        return
     try:
         log(f"===== {title} | {tm.prefix} ({tm.month_name}) | 프로그램 {APP_VERSION} =====")
         if is_unfinished_month(tm):
@@ -2659,6 +2798,7 @@ class GuiApp:
         for text, cmd in (("영수증 목록 열기", self.open_list), ("병원 목록 편집", self.open_hospitals),
                           ("병원 엑셀 가져오기", self.import_hospital_excel),
                           ("자동 입력표 편집", self.open_category_table),
+                          ("화면 조사", lambda: self.start("inspect")),
                           ("결과 폴더 열기", lambda: open_path(self.base / "결과")),
                           ("설정 파일 열기", lambda: open_path(self.base / SETTINGS_FILE_NAME, notepad=True))):
             ttk.Button(sf, text=text, command=cmd).pack(side="left", padx=3)
@@ -2866,10 +3006,11 @@ def main():
     parser.add_argument("--ocr-only", action="store_true", help="영수증 분석만")
     parser.add_argument("--edit-only", action="store_true", help="이미 만든 리포트에 입력만")
     parser.add_argument("--full", action="store_true", help="전체 실행")
+    parser.add_argument("--inspect", action="store_true", help="Concur 화면 조사(입력칸 위치를 파일로 남김)")
     args = parser.parse_args()
     base = app_dir()
 
-    cli = args.cli or args.ocr_only or args.edit_only or args.full
+    cli = args.cli or args.ocr_only or args.edit_only or args.full or args.inspect
     if not cli:
         try:
             app = GuiApp(base)
@@ -2888,13 +3029,14 @@ def main():
             app.run()
             return
 
-    mode = "ocr" if args.ocr_only else "edit" if args.edit_only else "full" if args.full else ""
+    mode = ("ocr" if args.ocr_only else "edit" if args.edit_only else "full" if args.full
+            else "inspect" if args.inspect else "")
     if not mode:
-        print("1) 영수증 분석만   2) 전체 실행   3) 만든 리포트에 입력만")
-        mode = {"1": "ocr", "2": "full", "3": "edit"}.get(input("번호: ").strip(), "")
+        print("1) 영수증 분석만   2) 전체 실행   3) 만든 리포트에 입력만   4) 화면 조사")
+        mode = {"1": "ocr", "2": "full", "3": "edit", "4": "inspect"}.get(input("번호: ").strip(), "")
         if not mode:
             return
-        if not args.month:
+        if not args.month and mode != "inspect":
             last, this = resolve_target_month(None).prefix, recent_months(1, include_current=True)[0]
             args.month = input(f"처리할 달 (Enter={last} 지난달, 이번 달은 {this}): ").strip() or None
     run_job(mode, args.month, ConsoleUI(), base)
