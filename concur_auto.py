@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import calendar
 import csv
+import html as html_lib
 import json
 import os
 import queue
@@ -97,6 +98,13 @@ def default_settings():
         "보정본_폴더": str(source / "Concur_Expenses_Processed"),
         "Concur_주소": "https://us2.concursolutions.com",
         "브라우저_프로필_폴더": str(home / "AppData" / "Local" / "ConcurAuto" / "edge-profile"),
+        "_로그인_설명": "'이메일 링크': 로그인 화면이 나오면 [다음] → [이메일 링크로 로그인]을 누르고, Outlook에 온 로그인 메일의 링크를 이 프로그램의 Edge 창에서 엽니다. '직접': Edge 창에서 직접 로그인합니다.",
+        "로그인_방법": "이메일 링크",
+        "_로그인_이메일_설명": "로그인 화면의 이메일 칸이 비어 있을 때 넣을 회사 이메일. 비워 두면 Edge 창에서 직접 입력합니다.",
+        "로그인_이메일": "",
+        "로그인_메일_제목": "SAP Concur 로그인 요청",
+        "로그인_메일_버튼": "SAP Concur 로그인",
+        "로그인_메일_대기_초": 120,
         "영수증_보정_사용": True,
         "보정_확대_배율": 2.0,
         "입력_전_확인": True,
@@ -131,6 +139,8 @@ def default_settings():
         "_화면_문구_설명": "Concur 화면에 보이는 글자. Concur 언어 설정이 바뀌면 여기만 고칩니다.",
         "화면_문구": {
             "리포트 생성": "리포트 생성",
+            "다음": "다음",
+            "이메일 링크로 로그인": "이메일 링크로 로그인",
             "사용 가능한 경비": "사용 가능한 경비",
             "리포트에 추가": "리포트에 추가",
             "편집": "편집",
@@ -1033,14 +1043,104 @@ JS_SELECT_MONTH = r"""
 """
 
 
+A_TAG = re.compile(r"<a\b([^>]*)>(.*?)</a>", re.I | re.S)
+HREF_ATTR = re.compile(r"""href\s*=\s*(["'])(.*?)\1""", re.I | re.S)
+SIGNIN_URL = re.compile(r"/nui/signin|/signin|/login|/sso|saml", re.I)
+
+
+def extract_login_link(html_body: str, button_text: str):
+    """메일 본문(HTML)에서 글자가 button_text인 링크의 주소. 글자가 똑같은 링크를 먼저 고릅니다."""
+    want = compact(button_text)
+    found = []
+    for m in A_TAG.finditer(html_body or ""):
+        text = compact(html_lib.unescape(re.sub(r"<[^>]+>", "", m.group(2))))
+        h = HREF_ATTR.search(m.group(1))
+        if not (want and h and want in text):
+            continue
+        url = html_lib.unescape(h.group(2)).strip()
+        if url.lower().startswith(("https://", "http://")):
+            found.append((text != want, url))
+    return min(found)[1] if found else None
+
+
+def _newest_login_link(inbox, subject: str, button: str, since: datetime):
+    items = inbox.Items
+    items.Sort("[ReceivedTime]", True)          # 최근 메일부터
+    item = items.GetFirst()
+    for _ in range(30):
+        if item is None:
+            break
+        try:
+            received = item.ReceivedTime.replace(tzinfo=None)   # Outlook 시각(PC 기준)
+            if received < since - timedelta(minutes=2):
+                break                                           # 더 오래된 메일만 남음
+            if getattr(item, "Class", None) == 43 and compact(subject) in compact(item.Subject or ""):
+                link = extract_login_link(item.HTMLBody or "", button)
+                if link:
+                    return link
+        except Exception:
+            pass
+        item = items.GetNext()
+    return None
+
+
+def find_login_link_in_outlook(cfg: dict, since: datetime, log, check_stop=None, poll_s: float = 3.0):
+    """Outlook 받은 편지함에서 since 이후에 온 Concur 로그인 메일의 [SAP Concur 로그인] 링크를 찾습니다."""
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        log("   Outlook 메일을 읽으려면 pywin32 가 필요합니다:  pip install -r requirements.txt")
+        return None
+    subject = str(cfg.get("로그인_메일_제목", "SAP Concur 로그인 요청"))
+    button = str(cfg.get("로그인_메일_버튼", "SAP Concur 로그인"))
+    timeout = float(cfg.get("로그인_메일_대기_초", 120))
+    pythoncom.CoInitialize()
+    try:
+        try:
+            inbox = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI").GetDefaultFolder(6)
+        except Exception as e:
+            log(f"   Outlook을 열지 못했습니다. (새 Outlook은 지원하지 않습니다) {e}")
+            return None
+        deadline = time.time() + timeout
+        while True:
+            link = _newest_login_link(inbox, subject, button, since)
+            if link:
+                log("   Outlook에서 로그인 메일을 찾았습니다.")
+                return link
+            if time.time() >= deadline:
+                log(f"   {int(timeout)}초 동안 로그인 메일을 찾지 못했습니다.")
+                return None
+            if check_stop:
+                check_stop()
+            time.sleep(poll_s)
+    finally:
+        pythoncom.CoUninitialize()
+
+
+PASTE_LINK_MSG = ("Outlook에서 로그인 메일을 찾지 못했습니다.\n\n"
+                  "메일의 [SAP Concur 로그인] 버튼을 마우스 오른쪽으로 눌러 [하이퍼링크 복사]를 고른 뒤 여기에 붙여 넣으세요.\n"
+                  "버튼을 그냥 누르면 다른 Edge 창에서 열려서 이 프로그램 창은 로그인되지 않습니다.\n\n"
+                  "[취소]를 누르면 열린 Edge 창에서 직접 로그인할 때까지 기다립니다.")
+
+
 class ConcurBot:
-    def __init__(self, cfg: dict, log: Log):
+    def __init__(self, cfg: dict, log: Log, ui=None, stop_flag=None):
         self.cfg = cfg
         self.log = log
+        self.ui = ui
+        self.stop_flag = stop_flag
         self.base = cfg["Concur_주소"].rstrip("/")
         self.t = cfg["화면_문구"]
         self.timeout_ms = int(cfg.get("대기시간_초", 60)) * 1000
         self.pw = self.ctx = self.page = None
+        self.poll_s = 1.0
+        self.login_timeout_s = 600
+        self.find_mail_link = find_login_link_in_outlook
+
+    def _check_stop(self):
+        if self.stop_flag is not None and self.stop_flag.is_set():
+            raise Cancelled()
 
     def start(self):
         try:
@@ -1125,24 +1225,114 @@ class ConcurBot:
             pass
 
     # ---------- 로그인 ----------
-    def wait_login(self, need_home: bool = True):
-        page = self.page
-        page.goto(self.base + "/home", wait_until="domcontentloaded")
-        self.log("Concur 로그인 확인 중... 로그인 화면이 뜨면 열린 Edge 창에서 직접 로그인하세요. (최대 10분)")
-        create = page.get_by_role("link", name=self.t["리포트 생성"])
-        deadline = time.time() + 600
-        while time.time() < deadline:
+    def _shown(self, locator) -> bool:
+        try:
+            return locator.count() > 0 and locator.first.is_visible()
+        except Exception:
+            return False
+
+    def _email_box(self):
+        return self.page.locator("input[type=email]:visible, input[type=text]:visible, input:not([type]):visible")
+
+    def _next_button(self):
+        return self.page.get_by_role("button", name=self.t["다음"], exact=True)
+
+    def _email_link_button(self):
+        page, text = self.page, self.t["이메일 링크로 로그인"]
+        for loc in (page.get_by_role("button", name=text), page.get_by_role("link", name=text),
+                    page.get_by_text(text, exact=True)):
+            if self._shown(loc):
+                return loc.first
+        return None
+
+    def on_signin_screen(self) -> bool:
+        return (self._shown(self._next_button()) and self._shown(self._email_box())) or self._email_link_button() is not None
+
+    def is_logged_in(self) -> bool:
+        url = self.page.url or ""
+        if "concursolutions.com" not in url or SIGNIN_URL.search(url) or self.on_signin_screen():
+            return False
+        for loc in (self.page.get_by_role("link", name=self.t["리포트 생성"]),
+                    self.page.get_by_text(self.t["리포트 생성"]),
+                    self.page.locator("#cnqr-app-content")):
             try:
-                if "concursolutions.com" in page.url and create.count() > 0:
-                    self.log("로그인 확인")
-                    return
-                if not need_home and "concursolutions.com" in page.url and page.locator("#cnqr-app-content").count() > 0:
-                    self.log("로그인 확인")
-                    return
+                if loc.count() > 0:
+                    return True
             except Exception:
                 pass
-            time.sleep(2)
-        raise RuntimeError("로그인 대기 시간(10분)이 지났습니다.")
+        return False
+
+    def _email_step(self) -> bool:
+        """첫 로그인 화면: 이메일 칸 확인 → [다음]"""
+        next_btn, box = self._next_button(), self._email_box()
+        if not (self._shown(next_btn) and self._shown(box)):
+            return False
+        if time.time() - self._next_clicked_at < 10:          # 방금 눌렀으면 화면이 바뀔 때까지 기다림
+            return True
+        if not (box.first.input_value() or "").strip():
+            email = str(self.cfg.get("로그인_이메일") or "").strip()
+            if not email:
+                if not self._asked_email:
+                    self.log("열린 Edge 창에서 회사 이메일을 입력하고 [다음]을 누르세요. "
+                             "(프로그램 창의 'Concur 로그인 이메일'에 적어 두면 다음부터 자동으로 넣습니다)")
+                    self._asked_email = True
+                return True
+            box.first.fill(email)
+        self.log("로그인: 이메일 확인 → [다음]")
+        self._next_clicked_at = time.time()
+        next_btn.first.click()
+        return True
+
+    def _email_link_step(self) -> bool:
+        """두 번째 로그인 화면: [이메일 링크로 로그인] → Outlook 메일의 링크를 이 창에서 엽니다."""
+        button = self._email_link_button()
+        if button is None:
+            return False
+        if self._link_requested_at is not None:              # 한 번만 요청
+            return True
+        self._link_requested_at = datetime.now()
+        self.log("로그인: [이메일 링크로 로그인] → Outlook에서 로그인 메일을 기다립니다. (보통 10초 안에 옵니다)")
+        button.click()
+        link = self.find_mail_link(self.cfg, self._link_requested_at, self.log, self._check_stop)
+        if not link and self.ui is not None and hasattr(self.ui, "ask_text"):
+            link = self.ui.ask_text("로그인 링크 붙여넣기", PASTE_LINK_MSG)
+        link = (link or "").strip()
+        if link.lower().startswith(("https://", "http://")):
+            self.log("로그인 메일의 링크를 이 Edge 창에서 엽니다.")
+            self.page.goto(link, wait_until="domcontentloaded")
+        else:
+            self.log("열린 Edge 창에서 직접 로그인하세요. 로그인되면 자동으로 이어서 진행합니다.")
+        return True
+
+    def wait_login(self, need_home: bool = True):
+        """이미 로그인돼 있으면 바로 진행합니다. 로그인 화면이면 '로그인_방법'에 따라 이메일 링크로 자동 로그인합니다."""
+        page = self.page
+        page.goto(self.base + "/home", wait_until="domcontentloaded")
+        auto = str(self.cfg.get("로그인_방법", "이메일 링크")).strip() == "이메일 링크"
+        self.log("Concur 로그인 확인 중... "
+                 + ("로그인 화면이 나오면 이메일 링크로 자동 로그인합니다." if auto
+                    else "로그인 화면이 뜨면 열린 Edge 창에서 직접 로그인하세요.")
+                 + f" (최대 {self.login_timeout_s // 60}분)")
+        self._link_requested_at, self._asked_email, self._next_clicked_at = None, False, 0.0
+        last_error = ""
+        deadline = time.time() + self.login_timeout_s
+        while time.time() < deadline:
+            self._check_stop()
+            try:
+                if self.is_logged_in():
+                    self.log("로그인 확인")
+                    return
+                if auto:
+                    self._email_step() or self._email_link_step()
+            except Cancelled:
+                raise
+            except Exception as e:
+                msg = str(e).splitlines()[0][:150] if str(e) else type(e).__name__
+                if msg != last_error:
+                    self.log(f"   로그인 화면 처리 중 문제(계속 기다립니다): {msg}")
+                    last_error = msg
+            time.sleep(self.poll_s)
+        raise RuntimeError(f"로그인 대기 시간({self.login_timeout_s // 60}분)이 지났습니다.")
 
     # ---------- 리포트 생성 ----------
     def create_report(self, tm: TargetMonth):
@@ -1362,6 +1552,10 @@ class ConsoleUI:
         a = input(f"\n[{title}] {msg}\n(y=예 / n=아니오 / c=취소): ").strip().lower()
         return None if a in ("c", "취소") else a in ("y", "yes", "예", "")
 
+    def ask_text(self, title, msg):
+        a = input(f"\n[{title}] {msg}\n(붙여 넣고 Enter / 그냥 Enter=건너뛰기): ").strip()
+        return a or None
+
     def info(self, title, msg):
         print(f"\n[{title}] {msg}")
 
@@ -1428,7 +1622,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
                     raise Cancelled()
                 receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log)
 
-        bot = ConcurBot(cfg, log)
+        bot = ConcurBot(cfg, log, ui, stop_flag)
         bot.start()
         if mode == "edit":
             bot.wait_login(need_home=False)
@@ -1478,7 +1672,8 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
 class GuiApp:
     def __init__(self, base: Path):
         import tkinter as tk
-        from tkinter import filedialog, messagebox, scrolledtext, ttk
+        from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+        self.sd = simpledialog
         self.tk, self.mb, self.fd = tk, messagebox, filedialog
         self.base = base
         self.cfg, created = load_settings(base / SETTINGS_FILE_NAME)
@@ -1489,7 +1684,7 @@ class GuiApp:
 
         root = self.root = tk.Tk()
         root.title("Concur 경비 자동 입력")
-        root.geometry("820x660")
+        root.geometry("820x720")
         root.minsize(720, 560)
         style = ttk.Style()
         for name in ("TLabel", "TButton", "TCheckbutton"):
@@ -1517,13 +1712,22 @@ class GuiApp:
         self.city = tk.StringVar(value=self.cfg["기본_도시"])
         ttk.Entry(f, textvariable=self.city).grid(row=2, column=1, columnspan=2, sticky="ew")
 
+        ttk.Label(f, text="Concur 로그인 이메일").grid(row=3, column=0, sticky="w", pady=3)
+        lf = ttk.Frame(f)
+        lf.grid(row=3, column=1, columnspan=2, sticky="ew")
+        lf.columnconfigure(0, weight=1)
+        self.login_email = tk.StringVar(value=str(self.cfg.get("로그인_이메일") or ""))
+        ttk.Entry(lf, textvariable=self.login_email).grid(row=0, column=0, sticky="ew")
+        self.auto_login = tk.BooleanVar(value=str(self.cfg.get("로그인_방법", "이메일 링크")).strip() == "이메일 링크")
+        ttk.Checkbutton(lf, text="이메일 링크로 자동 로그인 (Outlook 메일 사용)", variable=self.auto_login).grid(row=0, column=1, padx=(8, 0))
+
         self.pre = tk.BooleanVar(value=bool(self.cfg.get("영수증_보정_사용", True)))
-        ttk.Checkbutton(f, text="영수증 보정 사용 (사진이 선명하면 꺼도 됩니다)", variable=self.pre).grid(row=3, column=1, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(f, text="영수증 보정 사용 (사진이 선명하면 꺼도 됩니다)", variable=self.pre).grid(row=4, column=1, sticky="w", pady=(6, 0))
         self.review = tk.BooleanVar(value=bool(self.cfg.get("입력_전_확인", True)))
-        ttk.Checkbutton(f, text="Concur 입력 전에 확인이 필요한 영수증 알려 주기", variable=self.review).grid(row=4, column=1, sticky="w")
+        ttk.Checkbutton(f, text="Concur 입력 전에 확인이 필요한 영수증 알려 주기", variable=self.review).grid(row=5, column=1, sticky="w")
 
         bf = ttk.Frame(f)
-        bf.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(12, 4))
+        bf.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(12, 4))
         self.run_buttons = []
         for text, mode in (("① 영수증 분석만", "ocr"), ("② 전체 실행", "full"), ("③ 만든 리포트에 입력만", "edit")):
             b = ttk.Button(bf, text=text, style="Big.TButton", command=lambda m=mode: self.start(m))
@@ -1533,7 +1737,7 @@ class GuiApp:
         self.stop_button.pack(side="left", padx=3, ipady=8)
 
         sf = ttk.Frame(f)
-        sf.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(2, 6))
+        sf.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(2, 6))
         for text, cmd in (("영수증 목록 열기", self.open_list), ("병원 목록 편집", self.open_hospitals),
                           ("결과 폴더 열기", lambda: open_path(self.base / "결과")),
                           ("설정 파일 열기", lambda: open_path(self.base / SETTINGS_FILE_NAME, notepad=True))):
@@ -1544,11 +1748,11 @@ class GuiApp:
             "어느 달 영수증인지는 영수증에 적힌 날짜로 정하므로 늦게 찍어도 됩니다.\n"
             "처음에는 ①로 OCR 결과를 확인하세요. 영수증 목록(엑셀)에서 고친 내용은 다음 실행에도 그대로 쓰입니다.\n"
             "②③ 실행 중에는 열린 Edge 창을 클릭하지 마세요. 다른 프로그램은 써도 됩니다. 제출은 직접 하세요."
-        )).grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        )).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
 
         self.text = scrolledtext.ScrolledText(f, height=16, state="disabled", font=("Malgun Gothic", 9))
-        self.text.grid(row=8, column=0, columnspan=3, sticky="nsew")
-        f.rowconfigure(8, weight=1)
+        self.text.grid(row=9, column=0, columnspan=3, sticky="nsew")
+        f.rowconfigure(9, weight=1)
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self.poll)
@@ -1589,6 +1793,8 @@ class GuiApp:
         cfg["기본_도시"] = self.city.get().strip()
         cfg["영수증_보정_사용"] = bool(self.pre.get())
         cfg["입력_전_확인"] = bool(self.review.get())
+        cfg["로그인_이메일"] = self.login_email.get().strip()
+        cfg["로그인_방법"] = "이메일 링크" if self.auto_login.get() else "직접"
         save_settings(self.base / SETTINGS_FILE_NAME, cfg)
 
     def set_running(self, running: bool):
@@ -1645,6 +1851,8 @@ class GuiApp:
                         holder[0] = self.mb.askokcancel(title, msg, parent=self.root)
                     elif how == "yesnocancel":
                         holder[0] = self.mb.askyesnocancel(title, msg, parent=self.root)
+                    elif how == "text":
+                        holder[0] = self.sd.askstring(title, msg, parent=self.root)
                     else:
                         self.mb.showinfo(title, msg, parent=self.root)
                     ev.set()
@@ -1685,6 +1893,9 @@ class GuiBridge:
 
     def yes_no_cancel(self, title, msg):
         return self._ask("yesnocancel", title, msg)
+
+    def ask_text(self, title, msg):
+        return self._ask("text", title, msg)
 
     def info(self, title, msg):
         self._ask("info", title, msg)
