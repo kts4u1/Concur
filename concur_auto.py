@@ -142,10 +142,8 @@ KNOWN_EXPENSE_TYPES = [
     # 통신·교통
     "Phone & Fax",
     "Airfare", "Car mileage", "M card airfare", "M card parking & toll", "M card taxi", "M card transportation",
-    "Public Transport", "Rental Car", "Taxi",
+    "Parking & Toll", "Public Transport", "Rental Car", "Taxi",
     "M Card Service Fee (Airfare Booking)",
-    # 캡처에는 없지만 사용자 경비 화면에서 본 것(주차 영수증 기본값)
-    "Parking & Toll",
 ]
 
 OLD_DEFAULT_CITY = "Daejeon (ex Taejon), KOREA, REPUBLIC OF"

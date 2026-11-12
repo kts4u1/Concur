@@ -170,7 +170,7 @@ def test_similar_expense_type_names_chosen_exactly(browser, name):
 
 def test_known_expense_types_from_user_captures():
     types = ca.KNOWN_EXPENSE_TYPES
-    assert len(types) == len(set(types)) == 47                        # 겹치는 이름 없이 캡처 46개 + Parking & Toll
+    assert len(types) == len(set(types)) == 47                        # 사용자가 캡처한 47개, 겹치는 이름 없이
     for t in ("M Card Service Fee (Airfare Booking)", "M card parking & toll", "Trade show and Marcom Expenses",
               "Phone & Fax", "Taxi", "Parking & Toll", "Other Staff Expenses"):
         assert t in types
