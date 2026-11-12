@@ -297,3 +297,60 @@ def test_signin_screen_is_not_mistaken_for_logged_in(browser):
     assert bot.on_signin_screen() and not bot.is_logged_in()
     bot.page.goto("https://www.concursolutions.com/nui/signin/hrd")
     assert bot.on_signin_screen() and not bot.is_logged_in()
+
+
+# ---------- 실제 사이트처럼 [다음] 버튼 모양이 다를 때 ----------
+
+GO_HRD = "location.href='https://www.concursolutions.com/nui/signin/hrd?email='+encodeURIComponent(document.getElementById('u').value)"
+
+SIGNIN_VARIANTS = {
+    # 버튼이 <button>이 아니라 상자(div)로 만들어진 경우
+    "div_button": f"""<!doctype html><meta charset="utf-8"><h1>로그인</h1>
+<input id="u" type="text" aria-label="사용자 이름, 검증된 이메일 주소 또는 SSO 코드" value="{{value}}">
+<div role="button" tabindex="0" onclick="{GO_HRD}"><span class="sapcnqr-button__text"> 다음 </span></div>""",
+    # <input type=submit value="다음"> 인 경우
+    "submit_input": f"""<!doctype html><meta charset="utf-8"><h1>로그인</h1>
+<form onsubmit="event.preventDefault(); {GO_HRD}">
+<label>사용자 이름, 검증된 이메일 주소 또는 SSO 코드<input id="u" type="email" value="{{value}}"></label>
+<input type="submit" value="다음"></form>""",
+    # 버튼 위에 투명한 막이 덮여 클릭이 안 되고 Enter만 되는 경우
+    "covered_button": f"""<!doctype html><meta charset="utf-8"><h1>로그인</h1>
+<form onsubmit="event.preventDefault(); {GO_HRD}" style="position:relative">
+<input id="u" name="username" value="{{value}}">
+<button type="submit">다음</button>
+<div style="position:absolute; inset:0; z-index:9"></div></form>""",
+}
+
+
+class VariantConcur(FakeConcur):
+    def __init__(self, signin_html, **kw):
+        super().__init__(**kw)
+        self.signin_html = signin_html
+
+    def handle(self, route, request):
+        if urlparse(request.url).path == "/nui/signin":
+            route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                          body=self.signin_html.format(value=self.saved_email))
+        else:
+            super().handle(route, request)
+
+
+@pytest.mark.parametrize("variant", list(SIGNIN_VARIANTS))
+def test_next_button_variants(browser, variant):
+    site = VariantConcur(SIGNIN_VARIANTS[variant], saved_email="saved@example.com")
+    bot, ctx, calls, lines = make_bot(browser, site)
+    bot.wait_login()
+    assert site.typed_email == "saved@example.com"
+    assert bot.page.url == "https://us2.concursolutions.com/home"
+
+
+def test_unknown_signin_screen_is_written_to_log(browser):
+    html = """<!doctype html><meta charset="utf-8"><h1>로그인</h1>
+<input id="u" type="text" value="saved@example.com"><button>계속</button>"""
+    site = VariantConcur(html, saved_email="saved@example.com")
+    bot, ctx, calls, lines = make_bot(browser, site)
+    bot.login_timeout_s = 2
+    bot.diagnose_after_s = 0.2
+    with pytest.raises(RuntimeError):
+        bot.wait_login()
+    assert any("화면의 버튼" in line and "계속" in line for line in lines)

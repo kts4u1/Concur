@@ -45,6 +45,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
+APP_VERSION = "2026-11-12 로그인 보강"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORIES = ("주차", "카페", "식대")
@@ -1136,6 +1137,7 @@ class ConcurBot:
         self.pw = self.ctx = self.page = None
         self.poll_s = 1.0
         self.login_timeout_s = 600
+        self.diagnose_after_s = 15
         self.find_mail_link = find_login_link_in_outlook
 
     def _check_stop(self):
@@ -1151,7 +1153,8 @@ class ConcurBot:
         profile.mkdir(parents=True, exist_ok=True)
         self.pw = sync_playwright().start()
         self.ctx = self.pw.chromium.launch_persistent_context(
-            str(profile), channel="msedge", headless=False, no_viewport=True, args=["--start-maximized"])
+            str(profile), channel="msedge", headless=False, no_viewport=True, args=["--start-maximized"],
+            chromium_sandbox=True)      # '--no-sandbox' 경고줄이 뜨지 않게
         self.ctx.set_default_timeout(self.timeout_ms)
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
 
@@ -1231,22 +1234,68 @@ class ConcurBot:
         except Exception:
             return False
 
-    def _email_box(self):
-        return self.page.locator("input[type=email]:visible, input[type=text]:visible, input:not([type]):visible")
-
-    def _next_button(self):
-        return self.page.get_by_role("button", name=self.t["다음"], exact=True)
-
-    def _email_link_button(self):
-        page, text = self.page, self.t["이메일 링크로 로그인"]
-        for loc in (page.get_by_role("button", name=text), page.get_by_role("link", name=text),
-                    page.get_by_text(text, exact=True)):
-            if self._shown(loc):
-                return loc.first
+    def _first_shown(self, locators):
+        """여러 찾는 방법 중 화면에 보이는 첫 요소"""
+        for loc in locators:
+            try:
+                n = loc.count()
+            except Exception:
+                continue
+            for i in range(min(n, 5)):
+                el = loc.nth(i)
+                try:
+                    if el.is_visible():
+                        return el
+                except Exception:
+                    pass
         return None
 
+    def _button_like(self, text: str, exact: bool = True):
+        page = self.page
+        pattern = re.compile(r"^\s*" + re.escape(text) + r"\s*$") if exact else re.compile(re.escape(text))
+        value = text.replace("'", "\\'")
+        return self._first_shown([
+            page.get_by_role("button", name=pattern),
+            page.get_by_role("link", name=pattern),
+            page.locator("button, [role=button], a, div[tabindex], span[tabindex]").filter(has_text=pattern),
+            page.locator(f"input[type=submit][value='{value}'], input[type=button][value='{value}']"),
+            page.get_by_text(pattern),
+        ])
+
+    def _email_box(self):
+        page = self.page
+        return self._first_shown([
+            page.get_by_label(re.compile("이메일|사용자 이름|SSO|user|email", re.I)),
+            page.locator("input[type=email], input[autocomplete=username], input[name*=user i], input[id*=user i]"),
+            page.locator("input[type=text], input:not([type])"),
+            page.get_by_role("textbox"),
+        ])
+
+    def _next_button(self):
+        return self._button_like(self.t["다음"])
+
+    def _email_link_button(self):
+        return self._button_like(self.t["이메일 링크로 로그인"])
+
     def on_signin_screen(self) -> bool:
-        return (self._shown(self._next_button()) and self._shown(self._email_box())) or self._email_link_button() is not None
+        return (self._next_button() is not None and self._email_box() is not None) or self._email_link_button() is not None
+
+    def _diagnose_login(self):
+        """로그인 화면에서 누를 것을 못 찾을 때, 화면에 보이는 버튼·입력칸을 기록에 남깁니다(고칠 때 씀)."""
+        try:
+            buttons = self.page.evaluate("""() => Array.from(document.querySelectorAll(
+                'button, [role=button], input[type=submit], input[type=button], a'))
+                .filter(e => e.offsetParent !== null)
+                .map(e => (e.innerText || e.value || e.getAttribute('aria-label') || '').trim().slice(0, 30))
+                .filter(t => t).slice(0, 15)""")
+            inputs = self.page.evaluate("""() => Array.from(document.querySelectorAll('input'))
+                .filter(e => e.offsetParent !== null)
+                .map(e => (e.type || '') + '/' + (e.name || e.id || '')).slice(0, 10)""")
+        except Exception as e:
+            buttons, inputs = [f"(읽지 못함: {e})"], []
+        self.log(f"   로그인 화면에서 누를 버튼을 찾지 못했습니다. 주소: {self.page.url.split('?')[0]}")
+        self.log(f"   화면의 버튼: {buttons} / 입력칸: {inputs}")
+        self.screenshot("login_screen")
 
     def is_logged_in(self) -> bool:
         url = self.page.url or ""
@@ -1263,13 +1312,20 @@ class ConcurBot:
         return False
 
     def _email_step(self) -> bool:
-        """첫 로그인 화면: 이메일 칸 확인 → [다음]"""
-        next_btn, box = self._next_button(), self._email_box()
-        if not (self._shown(next_btn) and self._shown(box)):
+        """첫 로그인 화면: 이메일 칸 확인 → [다음]. 버튼을 못 누르면 이메일 칸에서 Enter."""
+        next_btn = self._next_button()
+        if next_btn is None:
             return False
-        if time.time() - self._next_clicked_at < 10:          # 방금 눌렀으면 화면이 바뀔 때까지 기다림
+        if time.time() - self._next_clicked_at < 8:           # 방금 눌렀으면 화면이 바뀔 때까지 기다림
             return True
-        if not (box.first.input_value() or "").strip():
+        box = self._email_box()
+        value = ""
+        if box is not None:
+            try:
+                value = (box.input_value() or "").strip()
+            except Exception:
+                value = "?"                                     # 입력칸이 아닌 요소면 값이 있다고 봄
+        if box is not None and not value:
             email = str(self.cfg.get("로그인_이메일") or "").strip()
             if not email:
                 if not self._asked_email:
@@ -1277,10 +1333,25 @@ class ConcurBot:
                              "(프로그램 창의 'Concur 로그인 이메일'에 적어 두면 다음부터 자동으로 넣습니다)")
                     self._asked_email = True
                 return True
-            box.first.fill(email)
-        self.log("로그인: 이메일 확인 → [다음]")
+            box.fill(email)
+        self._next_attempts += 1
         self._next_clicked_at = time.time()
-        next_btn.first.click()
+        if self._next_attempts % 2 == 1:
+            self.log("로그인: 이메일 확인 → [다음]")
+            try:
+                next_btn.click(timeout=5000)
+                return True
+            except Exception as e:
+                self.log(f"   [다음]을 누르지 못해 Enter로 넘어갑니다. ({str(e).splitlines()[0][:80]})")
+        else:
+            self.log("   화면이 넘어가지 않아 이메일 칸에서 Enter를 누릅니다.")
+        if box is not None:
+            box.press("Enter")
+        else:
+            next_btn.click(force=True, timeout=5000)
+        if self._next_attempts >= 3 and not self._diagnosed:
+            self._diagnosed = True
+            self._diagnose_login()
         return True
 
     def _email_link_step(self) -> bool:
@@ -1314,8 +1385,10 @@ class ConcurBot:
                     else "로그인 화면이 뜨면 열린 Edge 창에서 직접 로그인하세요.")
                  + f" (최대 {self.login_timeout_s // 60}분)")
         self._link_requested_at, self._asked_email, self._next_clicked_at = None, False, 0.0
+        self._next_attempts, self._diagnosed = 0, False
         last_error = ""
-        deadline = time.time() + self.login_timeout_s
+        started = time.time()
+        deadline = started + self.login_timeout_s
         while time.time() < deadline:
             self._check_stop()
             try:
@@ -1323,7 +1396,11 @@ class ConcurBot:
                     self.log("로그인 확인")
                     return
                 if auto:
-                    self._email_step() or self._email_link_step()
+                    known = self._email_step() or self._email_link_step()
+                    if (not known and not self._diagnosed and SIGNIN_URL.search(self.page.url or "")
+                            and time.time() - started > self.diagnose_after_s):
+                        self._diagnosed = True
+                        self._diagnose_login()
             except Cancelled:
                 raise
             except Exception as e:
@@ -1581,7 +1658,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
     bot = None
     title = {"ocr": "영수증 분석", "full": "전체 실행", "edit": "리포트에 입력"}[mode]
     try:
-        log(f"===== {title} | {tm.prefix} ({tm.month_name}) =====")
+        log(f"===== {title} | {tm.prefix} ({tm.month_name}) | 프로그램 {APP_VERSION} =====")
         if is_unfinished_month(tm):
             log(unfinished_month_note(tm))
         receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log)
@@ -1683,7 +1760,7 @@ class GuiApp:
         self.stop_flag = threading.Event()
 
         root = self.root = tk.Tk()
-        root.title("Concur 경비 자동 입력")
+        root.title(f"Concur 경비 자동 입력 ({APP_VERSION})")
         root.geometry("820x720")
         root.minsize(720, 560)
         style = ttk.Style()
