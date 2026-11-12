@@ -46,7 +46,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 Concur 항목 전체 목록"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 영수증 불러오기 탭"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -200,6 +200,9 @@ def default_settings():
         "_안내": "메모장으로 고칠 수 있습니다. 경로의 \\ 는 \\\\ 처럼 두 번 씁니다. 병원 목록은 병원목록.csv 에서 고칩니다.",
         "_영수증_폴더_설명": "iPhone으로 찍기만 한다면 iCloud 사진 폴더(보통 사진\\iCloud Photos\\Photos)를 고릅니다. 파일 이름·형식은 상관없습니다.",
         "영수증_원본_폴더": str(source),
+        "_영수증_추가_폴더_설명": ("영수증 사진이 있는 다른 폴더들(하위 폴더 포함). 아이폰이 아닌 휴대폰의 사진 폴더(OneDrive·구글 드라이브), "
+                          "카카오톡 받은 파일, 프로그램이 사진을 복사해 두는 '가져온 영수증' 폴더 등. 창의 [영수증 불러오기] 탭에서 고칩니다."),
+        "영수증_추가_폴더": [],
         "_영수증_날짜_설명": "어느 달 영수증인지는 영수증에 적힌 날짜로 정하고, 날짜를 못 읽은 영수증만 촬영 날짜를 참고합니다. 처리할 달이 끝나고 아래 일수 안에 찍은 사진까지 봅니다.",
         "영수증_촬영_허용_일수": 60,
         "보정본_폴더": str(source / "Concur_Expenses_Processed"),
@@ -1029,12 +1032,15 @@ def preprocess_receipt(image, scale: float):
 
 
 NAME_DATETIME = re.compile(r"(20\d{2})-(\d{2})-(\d{2})(?:[_ T]?(\d{2})(\d{2})(\d{2}))?")
+# 갤럭시·안드로이드·카카오톡: 20261103_123456.jpg, IMG_20261103_123456.jpg, KakaoTalk_20261103_123456789.jpg
+NAME_DATETIME_COMPACT = re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})")
 EXIF_DATETIME = re.compile(r"\s*(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})")
 
 
 def file_name_datetime(name: str):
-    """단축어로 만든 파일 이름(2026-10-22_123342.jpg)의 촬영 시각"""
-    m = NAME_DATETIME.search(name)
+    """파일 이름의 촬영 시각: 단축어(2026-10-22_123342.jpg), 갤럭시·안드로이드(20261022_123342.jpg),
+    카카오톡(KakaoTalk_20261022_123342123.jpg, 보낸 시각)"""
+    m = NAME_DATETIME.search(name) or NAME_DATETIME_COMPACT.search(name)
     if not m:
         return None
     try:
@@ -1093,36 +1099,189 @@ def photo_window(cfg: dict, tm: TargetMonth) -> tuple:
     return start, month_end + timedelta(days=int(cfg.get("영수증_촬영_허용_일수", 60)))
 
 
-def list_originals(cfg: dict, tm: TargetMonth, cache=None) -> list:
+IMPORTED_FOLDER_NAME = "가져온 영수증"
+SKIP_FOLDER_NAMES = {"concur_expenses_processed", "$recycle.bin", "system volume information"}
+
+
+def _norm_folder(path) -> str:
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def receipt_folders(cfg: dict) -> list:
+    """영수증을 찾을 폴더들: 기본 폴더(영수증_원본_폴더) + 추가 폴더(영수증_추가_폴더). 빈 값·같은 폴더는 뺌"""
+    extra = cfg.get("영수증_추가_폴더") or []
+    if isinstance(extra, str):
+        extra = [extra]
+    out, seen = [], set()
+    for f in [cfg.get("영수증_원본_폴더", "")] + list(extra):
+        text = str(f or "").strip()
+        if text and _norm_folder(text) not in seen:
+            seen.add(_norm_folder(text))
+            out.append(Path(text))
+    return out
+
+
+def set_receipt_folders(cfg: dict, folders: list):
+    """폴더 목록을 설정에 저장(첫 폴더 = 기본 폴더)"""
+    folders = [str(f) for f in folders if str(f).strip()]
+    first = folders[0] if folders else ""
+    if first != cfg.get("영수증_원본_폴더"):
+        cfg["영수증_원본_폴더"] = first
+        if first:
+            cfg["보정본_폴더"] = str(Path(first) / "Concur_Expenses_Processed")
+    cfg["영수증_추가_폴더"] = folders[1:]
+
+
+def missing_folder_message(source: Path) -> str:
+    try:
+        similar = [d.name for d in source.parent.iterdir()
+                   if d.is_dir() and d.name.lower().startswith(source.name.lower()[:6])]
+    except OSError:
+        similar = []
+    hint = (f"\n같은 위치에 비슷한 폴더가 있습니다: {', '.join(similar[:5])}" if similar else "")
+    return (f"영수증 폴더가 없습니다: {source}{hint}\n"
+            f"프로그램 창의 [영수증 불러오기] 탭에서 영수증 폴더를 다시 고르세요.")
+
+
+def iter_photo_files(folder: Path):
+    """폴더와 하위 폴더의 사진 파일(숨김 폴더·예전 보정본 폴더는 뺌)"""
+    for root, dirs, files in os.walk(folder, onerror=lambda e: None):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() not in SKIP_FOLDER_NAMES]
+        for name in files:
+            p = Path(root) / name
+            if name.startswith(".") or p.suffix.lower() not in SUPPORTED_EXTENSIONS or p.stem.endswith(PROCESSED_SUFFIX):
+                continue
+            yield p
+
+
+def list_originals(cfg: dict, tm: TargetMonth, cache=None, log=None) -> list:
     """처리할 달 영수증일 수 있는 사진 [(경로, 촬영 시각), ...] — 촬영 순서대로.
-    영수증을 나중에 찍을 수도 있으므로 처리할 달 1일부터, 그 달이 끝나고 허용 일수 안에 찍은 사진까지."""
-    source = Path(cfg["영수증_원본_폴더"])
-    if not source.is_dir():
-        try:
-            similar = [d.name for d in source.parent.iterdir()
-                       if d.is_dir() and d.name.lower().startswith(source.name.lower()[:6])]
-        except OSError:
-            similar = []
-        hint = (f"\n같은 위치에 비슷한 폴더가 있습니다: {', '.join(similar[:5])}\n"
-                f"프로그램 창의 [찾기]로 영수증 폴더를 다시 고르세요.") if similar else ""
-        raise RuntimeError(f"영수증 폴더가 없습니다: {source}{hint}")
+    영수증을 나중에 찍을 수도 있으므로 처리할 달 1일부터, 그 달이 끝나고 허용 일수 안에 찍은 사진까지.
+    영수증 폴더 여러 곳(하위 폴더 포함)에서 찾고, 같은 사진(이름·크기가 같음)이 여러 곳에 있으면 한 번만 씁니다."""
+    log = log or (lambda s="": None)
+    folders = receipt_folders(cfg)
+    if not folders:
+        raise RuntimeError("영수증 폴더가 정해지지 않았습니다. 프로그램 창의 [영수증 불러오기] 탭에서 폴더를 넣으세요.")
+    existing = [d for d in folders if d.is_dir()]
+    if not existing:
+        raise RuntimeError(missing_folder_message(folders[0]))
+    for d in folders:
+        if d not in existing:
+            log(f"   영수증 폴더가 없어 건너뜁니다: {d}")
     cache = {} if cache is None else cache
     start, end = photo_window(cfg, tm)
     too_old = start - timedelta(days=2)
-    found = []
-    for p in source.iterdir():
-        if not (p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS) or p.name.startswith("."):
+    found, seen, names, same_name, dup = [], set(), set(), set(), 0
+    for folder in existing:
+        for p in iter_photo_files(folder):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            # 파일 수정 시각은 촬영 시각과 같거나 늦으므로, 처리할 달보다 앞이면 열어 볼 필요가 없음
+            if not file_name_datetime(p.name) and datetime.fromtimestamp(st.st_mtime) < too_old:
+                continue
+            key = (p.name.lower(), st.st_size)
+            if key in seen:                       # 같은 사진이 다른 폴더에도 있음
+                dup += 1
+                continue
+            if key[0] in names:                   # 이름은 같은데 다른 사진
+                same_name.add(p.name)
+            seen.add(key)
+            names.add(key[0])
+            taken = photo_taken_at(p, st, cache)
+            if start <= taken < end:
+                found.append((p, taken))
+    if dup:
+        log(f"   여러 폴더에 같은 사진이 있어 한 번만 씁니다: {dup}장")
+    for name in sorted(same_name):
+        log(f"   이름이 같은 다른 사진이 있습니다: {name} (영수증 목록에서 헷갈릴 수 있으니 한쪽 이름을 바꾸세요)")
+    return sorted(found, key=lambda x: (x[1], x[0].name.lower(), str(x[0]).lower()))
+
+
+def count_photos_per_folder(cfg: dict, tm: TargetMonth, cache=None) -> list:
+    """[(폴더, 처리할 달 영수증일 수 있는 사진 수 또는 None(폴더 없음)), ...] — [영수증 불러오기] 탭에서 확인용"""
+    out = []
+    for folder in receipt_folders(cfg):
+        if not folder.is_dir():
+            out.append((folder, None))
             continue
-        if p.stem.endswith(PROCESSED_SUFFIX):
+        one = dict(cfg, 영수증_원본_폴더=str(folder), 영수증_추가_폴더=[])
+        out.append((folder, len(list_originals(one, tm, cache))))
+    return out
+
+
+def import_receipt_files(paths, dest: Path) -> dict:
+    """아무 곳에 있는 사진 파일을 '가져온 영수증' 폴더로 복사합니다(원본은 그대로, 날짜 정보 유지).
+    → {"copied": [...], "same": 이미 있던 수, "skipped": 사진이 아닌 파일 이름들}"""
+    dest.mkdir(parents=True, exist_ok=True)
+    result = {"copied": [], "same": 0, "skipped": []}
+    for src in map(Path, paths):
+        if not src.is_file() or src.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            result["skipped"].append(src.name)
             continue
-        st = p.stat()
-        # 파일 수정 시각은 촬영 시각과 같거나 늦으므로, 처리할 달보다 앞이면 열어 볼 필요가 없음
-        if not file_name_datetime(p.name) and datetime.fromtimestamp(st.st_mtime) < too_old:
+        target = dest / src.name
+        n = 2
+        while target.exists():
+            if target.stat().st_size == src.stat().st_size and _same_file_content(target, src):
+                break
+            target = dest / f"{src.stem}_{n}{src.suffix}"
+            n += 1
+        if target.exists():
+            result["same"] += 1
             continue
-        taken = photo_taken_at(p, st, cache)
-        if start <= taken < end:
-            found.append((p, taken))
-    return sorted(found, key=lambda x: (x[1], x[0].name.lower()))
+        shutil.copy2(src, target)
+        result["copied"].append(target.name)
+    return result
+
+
+def _same_file_content(a: Path, b: Path) -> bool:
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(1 << 20), fb.read(1 << 20)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+def suggested_receipt_folders(home: Path = None, env=None) -> list:
+    """이 PC에서 영수증 사진이 있을 만한 곳 [(이름, 폴더), ...] — 있는 폴더만"""
+    home = Path(home or Path.home())
+    env = os.environ if env is None else env
+    onedrives = []
+    for key in ("OneDriveConsumer", "OneDrive"):
+        if env.get(key):
+            onedrives.append(Path(env[key]))
+    onedrives.append(home / "OneDrive")
+    candidates = [
+        ("iCloud Drive 영수증 폴더 (아이폰)", [default_receipt_folder(home)]),
+        ("iCloud 사진 (아이폰)", [home / "Pictures" / "iCloud Photos" / "Photos", home / "Pictures" / "iCloud Photos"]),
+        ("OneDrive 갤럭시 사진 (Samsung Gallery)",
+         [od / pic / "Samsung Gallery" for od in onedrives for pic in ("Pictures", "사진")]),
+        ("OneDrive 카메라 앨범",
+         [od / pic / roll for od in onedrives for pic in ("Pictures", "사진") for roll in ("Camera Roll", "카메라 앨범")]),
+        ("구글 드라이브", [Path("G:/내 드라이브"), Path("G:/My Drive"), home / "Google Drive" / "My Drive",
+                      home / "Google Drive" / "내 드라이브", home / "Google Drive"]),
+        ("카카오톡 받은 파일", [home / "Documents" / "카카오톡 받은 파일"]
+         + [od / doc / "카카오톡 받은 파일" for od in onedrives for doc in ("Documents", "문서")]),
+        ("다운로드", [home / "Downloads"]),
+    ]
+    out, seen = [], set()
+    for label, paths in candidates:
+        for path in paths:
+            try:
+                ok = path.is_dir()
+            except OSError:
+                ok = False
+            if ok and _norm_folder(path) not in seen:
+                seen.add(_norm_folder(path))
+                out.append((label, path))
+                break
+    return out
 
 
 def processed_path(cfg: dict, original: Path) -> Path:
@@ -1674,7 +1833,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
                    hospital_csv=None) -> list:
     date_cache_path = results_dir / "photo_date_cache.json"
     date_cache = _load_json(date_cache_path)
-    originals = list_originals(cfg, tm, date_cache)
+    originals = list_originals(cfg, tm, date_cache, log)
     _save_json(date_cache_path, date_cache)
     start, end = photo_window(cfg, tm)
     log(f"{tm.prefix} 영수증을 찾을 사진: {len(originals)}장 "
@@ -3109,16 +3268,24 @@ class GuiApp:
 
         root = self.root = tk.Tk()
         root.title(f"Concur 경비 자동 입력 ({APP_VERSION})")
-        root.geometry("820x720")
-        root.minsize(720, 560)
+        root.geometry("880x820")
+        root.minsize(780, 680)
         style = ttk.Style()
         for name in ("TLabel", "TButton", "TCheckbutton"):
             style.configure(name, font=("Malgun Gothic", 10))
         style.configure("Big.TButton", font=("Malgun Gothic", 11, "bold"))
 
-        f = ttk.Frame(root, padding=14)
-        f.pack(fill="both", expand=True)
+        outer = ttk.Frame(root, padding=(10, 8))
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
+        nb = self.notebook = ttk.Notebook(outer)
+        nb.grid(row=0, column=0, sticky="nsew")
+        f = ttk.Frame(nb, padding=10)
         f.columnconfigure(1, weight=1)
+        nb.add(f, text="  실행  ")
+        self.sources_frame = ttk.Frame(nb, padding=10)
+        nb.add(self.sources_frame, text="  영수증 불러오기  ")
 
         ttk.Label(f, text="처리할 달").grid(row=0, column=0, sticky="w", pady=3)
         months = recent_months(include_current=True)                     # 맨 위가 이번 달
@@ -3129,9 +3296,9 @@ class GuiApp:
         ttk.Label(mf, foreground="#555", text="  처음에는 지난달이 골라져 있습니다. 맨 위의 이번 달도 고를 수 있습니다.").pack(side="left")
 
         ttk.Label(f, text="영수증 폴더").grid(row=1, column=0, sticky="w", pady=3)
-        self.folder = tk.StringVar(value=self.cfg["영수증_원본_폴더"])
-        ttk.Entry(f, textvariable=self.folder).grid(row=1, column=1, sticky="ew")
-        ttk.Button(f, text="찾기", command=self.pick_folder).grid(row=1, column=2, padx=(6, 0))
+        self.folder_summary = ttk.Label(f, text="", foreground="#1a4d8f")
+        self.folder_summary.grid(row=1, column=1, sticky="w")
+        ttk.Button(f, text="영수증 불러오기 탭", command=lambda: nb.select(self.sources_frame)).grid(row=1, column=2, padx=(6, 0))
 
         ttk.Label(f, text="기본 도시").grid(row=2, column=0, sticky="w", pady=3)
         self.city = tk.StringVar(value=self.cfg["기본_도시"])
@@ -3172,21 +3339,23 @@ class GuiApp:
             ttk.Button(sf, text=text, command=cmd).pack(side="left", padx=3)
 
         ttk.Label(f, foreground="#555", wraplength=760, justify="left", text=(
-            "영수증 폴더는 iCloud 사진 폴더나 iCloud Drive 폴더 모두 됩니다. 파일 이름·형식은 상관없고, 영수증이 아닌 사진은 자동으로 뺍니다.\n"
+            "영수증 사진은 [영수증 불러오기] 탭에 넣은 폴더들에서 찾습니다(아이폰·갤럭시·카카오톡·USB 모두 됨). "
+            "파일 이름·형식은 상관없고, 영수증이 아닌 사진은 자동으로 뺍니다.\n"
             "어느 달 영수증인지는 영수증에 적힌 날짜로 정하므로 늦게 찍어도 됩니다.\n"
             "처음에는 ①로 OCR 결과를 확인하세요. 영수증 목록(엑셀)에서 고친 내용은 다음 실행에도 그대로 쓰입니다.\n"
             "②③ 실행 중에는 열린 Edge 창을 클릭하지 마세요. 다른 프로그램은 써도 됩니다. 제출은 직접 하세요."
         )).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
 
-        self.text = scrolledtext.ScrolledText(f, height=16, state="disabled", font=("Malgun Gothic", 9))
-        self.text.grid(row=9, column=0, columnspan=3, sticky="nsew")
-        f.rowconfigure(9, weight=1)
+        self.text = scrolledtext.ScrolledText(outer, height=12, state="disabled", font=("Malgun Gothic", 9))
+        self.text.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        self.sources = ReceiptSourcesTab(self, self.sources_frame)
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self.poll)
         if created:
             self.append("처음 실행입니다. 영수증 폴더·기본 도시를 확인하고, [병원 목록 편집]에서 담당 병원을 넣어 주세요.")
-            self.append("iPhone으로 찍기만 한다면 영수증 폴더로 iCloud 사진 폴더(보통 사진\\iCloud Photos\\Photos)를 고르세요.")
+            self.append("영수증 사진이 있는 곳은 [영수증 불러오기] 탭에서 넣습니다. 아이폰은 iCloud 사진 폴더, "
+                        "갤럭시는 OneDrive 사진 폴더, 그 밖에는 카카오톡 받은 파일이나 [사진 고르기]로 가져오면 됩니다.")
             self.append("병원 목록에는 영수증에서 확인한 병원(원광대병원, 목포한국병원)만 들어 있습니다. "
                         "영수증에서 새 병원이 보이면 자동으로 더하고, [병원 엑셀 가져오기]로 회사 엑셀(MR·CT·XR 탭)에서 가져올 수도 있습니다.")
 
@@ -3197,10 +3366,13 @@ class GuiApp:
         self.text.see("end")
         self.text.configure(state="disabled")
 
-    def pick_folder(self):
-        d = self.fd.askdirectory(initialdir=self.folder.get() or str(Path.home()))
-        if d:
-            self.folder.set(str(Path(d)))
+    def update_folder_summary(self, folders: list):
+        if not folders:
+            text = "없음 — [영수증 불러오기] 탭에서 넣으세요"
+        else:
+            names = [Path(f).name or str(f) for f in folders]
+            text = f"{len(folders)}곳: " + ", ".join(names[:3]) + (" …" if len(names) > 3 else "")
+        self.folder_summary.configure(text=text)
 
     def open_list(self):
         path = list_csv_path(self.base / "결과", resolve_target_month(self.month.get()))
@@ -3249,10 +3421,7 @@ class GuiApp:
 
     def save_form(self):
         cfg, _ = load_settings(self.base / SETTINGS_FILE_NAME)
-        folder = self.folder.get().strip()
-        if folder != cfg["영수증_원본_폴더"]:
-            cfg["영수증_원본_폴더"] = folder
-            cfg["보정본_폴더"] = str(Path(folder) / "Concur_Expenses_Processed")
+        set_receipt_folders(cfg, self.sources.folders)
         cfg["기본_도시"] = self.city.get().strip()
         cfg["영수증_보정_사용"] = bool(self.pre.get())
         cfg["입력_전_확인"] = bool(self.review.get())
@@ -3319,6 +3488,8 @@ class GuiApp:
                     else:
                         self.mb.showinfo(title, msg, parent=self.root)
                     ev.set()
+                elif kind == "call":
+                    item[1]()
                 elif kind == "done":
                     self.set_running(False)
         except queue.Empty:
@@ -3335,6 +3506,215 @@ class GuiApp:
 
     def run(self):
         self.root.mainloop()
+
+
+PHONE_GUIDE = (
+    "• 아이폰: 위 '이 PC에서 찾은 곳'의 iCloud 사진이나 iCloud Drive 영수증 폴더를 넣으면 찍기만 해도 들어옵니다.\n"
+    "• 갤럭시: 갤러리 앱 → 설정 → 'OneDrive와 동기화'를 켜면 PC의 OneDrive 사진\\Samsung Gallery 폴더로 들어옵니다"
+    "(PC에도 같은 Microsoft 계정으로 OneDrive 로그인).\n"
+    "• 그 밖의 휴대폰: 구글 드라이브 PC 앱 폴더에 올리거나, 카카오톡 '나와의 채팅'으로 보낸 뒤 PC 카카오톡에서 저장하세요"
+    "('카카오톡 받은 파일' 폴더). 카카오톡은 '원본'으로 보내야 글자가 잘 읽힙니다.\n"
+    "• USB 케이블로 옮긴 사진이나 이메일 첨부 사진은 [사진 고르기…]로 가져오면 됩니다. "
+    "같은 영수증을 두 가지 방법으로 넣으면 두 장으로 보일 수 있으니 한 가지 방법만 쓰세요."
+)
+
+
+class ReceiptSourcesTab:
+    """[영수증 불러오기] 탭: 영수증을 찾을 폴더 여러 곳, 이 PC에서 찾은 곳, 사진 파일 직접 가져오기"""
+
+    def __init__(self, app, parent):
+        tk, ttk = app.tk, app.ttk
+        self.app, self.tk = app, tk
+        cfg, _ = load_settings(app.base / SETTINGS_FILE_NAME)
+        self.folders = [str(f) for f in receipt_folders(cfg)]
+        self.counts = {}
+        parent.columnconfigure(0, weight=1)
+
+        ttk.Label(parent, foreground="#555", wraplength=820, justify="left", text=(
+            "영수증 사진이 있는 곳을 모두 넣어 두세요. 프로그램이 이 폴더들(하위 폴더 포함)에서 처리할 달 영수증을 찾습니다. "
+            "아이폰이 아니어도 사진이 PC 폴더에 있기만 하면 됩니다. 영수증이 아닌 사진은 자동으로 뺍니다.")
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        box = ttk.LabelFrame(parent, text=" 영수증을 찾을 폴더 ", padding=8)
+        box.grid(row=1, column=0, sticky="ew")
+        box.columnconfigure(0, weight=1)
+        self.tree = ttk.Treeview(box, columns=("folder", "count"), show="headings", height=5, selectmode="browse")
+        self.tree.heading("folder", text="폴더")
+        self.tree.heading("count", text="이 달 사진")
+        self.tree.column("folder", width=560, anchor="w")
+        self.tree.column("count", width=120, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="ew")
+        bf = ttk.Frame(box)
+        bf.grid(row=0, column=1, sticky="n", padx=(8, 0))
+        for text, cmd in (("폴더 추가…", self.add_folder_dialog), ("빼기", self.remove_selected),
+                          ("폴더 열기", self.open_selected), ("이 달 사진 세기", self.count_photos)):
+            ttk.Button(bf, text=text, command=cmd, width=14).pack(fill="x", pady=1)
+
+        sug = ttk.LabelFrame(parent, text=" 이 PC에서 찾은 곳 (골라서 [추가]) ", padding=8)
+        sug.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self.suggestions = suggested_receipt_folders()
+        self.sug_box = None
+        if self.suggestions:
+            self.sug_box = ttk.Combobox(sug, state="readonly", width=80,
+                                        values=[f"{label}  —  {path}" for label, path in self.suggestions])
+            self.sug_box.current(0)
+            self.sug_box.pack(side="left", fill="x", expand=True)
+            ttk.Button(sug, text="추가", command=self.add_suggestion).pack(side="left", padx=(6, 0))
+        else:
+            ttk.Label(sug, foreground="#777", text=(
+                "iCloud·OneDrive·구글 드라이브·카카오톡 받은 파일 폴더를 찾지 못했습니다. [폴더 추가…]로 직접 고르세요.")).pack(anchor="w")
+
+        imp = ttk.LabelFrame(parent, text=" 사진 직접 가져오기 ", padding=8)
+        imp.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(imp, wraplength=800, justify="left", text=(
+            "USB로 옮긴 사진, 이메일·메신저로 받은 사진 등 아무 곳의 사진을 골라 프로그램의 '가져온 영수증' 폴더에 복사합니다"
+            "(원본은 그대로). 이 폴더는 자동으로 위 목록에 들어갑니다.")).pack(anchor="w")
+        row = ttk.Frame(imp)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Button(row, text="사진 고르기…", command=self.import_dialog).pack(side="left")
+        ttk.Button(row, text="가져온 영수증 폴더 열기", command=self.open_imported).pack(side="left", padx=6)
+        self.import_status = ttk.Label(row, text="", foreground="#1a4d8f")
+        self.import_status.pack(side="left", padx=6)
+
+        guide = ttk.LabelFrame(parent, text=" 휴대폰별 안내 ", padding=8)
+        guide.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(guide, wraplength=820, justify="left", foreground="#444", text=PHONE_GUIDE).pack(anchor="w")
+        self.refresh()
+
+    # ---------- 목록 ----------
+    def imported_folder(self) -> Path:
+        return self.app.base / IMPORTED_FOLDER_NAME
+
+    def refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        for i, folder in enumerate(self.folders):
+            if not Path(folder).is_dir():
+                count = "폴더 없음"
+            elif _norm_folder(folder) in self.counts:
+                count = f"{self.counts[_norm_folder(folder)]}장"
+            else:
+                count = "-"
+            self.tree.insert("", "end", iid=str(i), values=(folder, count))
+        self.app.update_folder_summary(self.folders)
+
+    def save(self):
+        path = self.app.base / SETTINGS_FILE_NAME
+        cfg, _ = load_settings(path)
+        set_receipt_folders(cfg, self.folders)
+        save_settings(path, cfg)
+
+    def add_folder(self, folder) -> bool:
+        folder = str(Path(folder))
+        if any(_norm_folder(f) == _norm_folder(folder) for f in self.folders):
+            return False
+        self.folders.append(folder)
+        self.save()
+        self.refresh()
+        return True
+
+    def add_folder_dialog(self):
+        start = self.folders[0] if self.folders and Path(self.folders[0]).is_dir() else str(Path.home())
+        d = self.app.fd.askdirectory(title="영수증 사진이 있는 폴더 고르기", initialdir=start)
+        if d:
+            if self.add_folder(d):
+                self.app.append(f"영수증 폴더 추가: {Path(d)}")
+            else:
+                self.app.mb.showinfo("폴더 추가", "이미 목록에 있는 폴더입니다.")
+
+    def add_suggestion(self):
+        i = self.sug_box.current() if self.sug_box is not None else -1
+        if i < 0:
+            return
+        label, path = self.suggestions[i]
+        if self.add_folder(path):
+            self.app.append(f"영수증 폴더 추가: {label} ({path})")
+        else:
+            self.app.mb.showinfo("폴더 추가", "이미 목록에 있는 폴더입니다.")
+
+    def selected(self):
+        sel = self.tree.selection()
+        return int(sel[0]) if sel else None
+
+    def remove_selected(self, ask=True):
+        i = self.selected()
+        if i is None:
+            self.app.mb.showinfo("빼기", "뺄 폴더를 목록에서 고르세요.")
+            return
+        if ask and not self.app.mb.askyesno(
+                "빼기", f"이 폴더를 목록에서 뺄까요? (폴더와 사진은 지우지 않습니다)\n\n{self.folders[i]}"):
+            return
+        del self.folders[i]
+        self.save()
+        self.refresh()
+
+    def open_selected(self):
+        i = self.selected()
+        if i is None:
+            self.app.mb.showinfo("폴더 열기", "열 폴더를 목록에서 고르세요.")
+            return
+        open_path(Path(self.folders[i]))
+
+    def open_imported(self):
+        self.imported_folder().mkdir(parents=True, exist_ok=True)
+        open_path(self.imported_folder())
+
+    # ---------- 이 달 사진 세기 ----------
+    def count_photos(self, wait=False):
+        tm = resolve_target_month(self.app.month.get())
+        cfg, _ = load_settings(self.app.base / SETTINGS_FILE_NAME)
+        set_receipt_folders(cfg, self.folders)
+        self.app.append(f"{tm.prefix} 영수증일 수 있는 사진을 세는 중… (사진이 많으면 조금 걸립니다)")
+
+        def work():
+            try:
+                cache_path = self.app.base / "결과" / "photo_date_cache.json"
+                cache = _load_json(cache_path)
+                counts = count_photos_per_folder(cfg, tm, cache)
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    _save_json(cache_path, cache)
+                except OSError:
+                    pass
+                self.app.q.put(("call", lambda: self.show_counts(tm, counts)))
+            except Exception as e:
+                self.app.q.put(("log", f"사진 세기 실패: {e}"))
+
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+        if wait:
+            t.join()
+        return t
+
+    def show_counts(self, tm, counts):
+        start, end = photo_window(load_settings(self.app.base / SETTINGS_FILE_NAME)[0], tm)
+        self.app.append(f"{tm.prefix} 영수증일 수 있는 사진({start:%m/%d} ~ {end - timedelta(days=1):%m/%d} 촬영):")
+        for folder, n in counts:
+            if n is not None:
+                self.counts[_norm_folder(folder)] = n
+            self.app.append(f"   {folder}: " + ("폴더 없음" if n is None else f"{n}장"))
+        self.refresh()
+
+    # ---------- 사진 가져오기 ----------
+    def import_dialog(self):
+        files = self.app.fd.askopenfilenames(
+            title="가져올 영수증 사진 고르기 (여러 장 고를 수 있음)",
+            filetypes=[("사진", "*.jpg *.jpeg *.png *.heic *.heif"), ("모든 파일", "*.*")])
+        if files:
+            self.import_files(files)
+
+    def import_files(self, files) -> dict:
+        dest = self.imported_folder()
+        result = import_receipt_files(files, dest)
+        self.add_folder(dest)
+        parts = [f"{len(result['copied'])}장 가져옴"]
+        if result["same"]:
+            parts.append(f"이미 있던 사진 {result['same']}장")
+        if result["skipped"]:
+            parts.append(f"사진이 아닌 파일 {len(result['skipped'])}개는 뺌")
+        msg = ", ".join(parts)
+        self.import_status.configure(text=msg)
+        self.app.append(f"사진 가져오기: {msg} → {dest}")
+        return result
 
 
 class CategoryEditor:

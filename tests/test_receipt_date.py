@@ -112,6 +112,6 @@ def test_missing_folder_message_suggests_similar_folder(tmp_path):
     try:
         ca.list_originals({"영수증_원본_폴더": str(tmp_path / "Concur_Expenses")}, OCT)
     except RuntimeError as e:
-        assert "Concur_Expense" in str(e) and "[찾기]" in str(e)
+        assert "Concur_Expense" in str(e) and "[영수증 불러오기]" in str(e)
     else:
         raise AssertionError("폴더가 없으면 알려야 합니다")
