@@ -304,3 +304,66 @@ def test_vendor_from_report_list_when_field_missing(page):
     text = bot.vendor_text("2026-11-03", 3100)
     assert "WON GWANG" in text
     assert ca.hospital_from_merchant(text, HOSPITALS)[1] == "Wonkwang University Hospital"
+
+
+# ---------- 여러 탭(MR·CT·XR)과 영문 이름 열 ----------
+
+def make_pm_excel(path):
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    wb.active.title = "Summary"
+    mr = wb.create_sheet("MR")
+    mr.append(["Region", "병원명", "Customer Name", "Model", "PM 1H", "PM 2H"])
+    for row in [["광주", "조선대학교병원", "Chosun University Hospital", "Ingenia", "3월", "9월"],
+                ["익산", "원광대학교병원", "Wonkwang University Hospital", "Achieva", "4월", "10월"],
+                ["목포", "목포한국병원", "Mokpo Hankook Hospital", "Prodiva", "5월", "11월"],
+                ["광주", "광주기독병원", "", "Ingenia", "6월", "12월"]]:
+        mr.append(row)
+    ct = wb.create_sheet("CT")
+    ct.append(["지역", "고객명", "장비"])
+    for row in [["광주", "전남대학교병원", "IQon"], ["광주", "조선대학교병원", "Incisive"], ["순천", "성가롤로병원", "Ingenuity"]]:
+        ct.append(row)
+    xr = wb.create_sheet("XR")                       # 병원 이름 열이 없는 탭
+    xr.append(["No", "S/N"])
+    xr.append([1, 12345])
+    contact = wb.create_sheet("Contact")             # 'CT'가 들어 있지만 다른 탭
+    contact.append(["담당", "병원"])
+    contact.append(["홍길동", "엉뚱한병원"])
+    wb.save(path)
+    return path
+
+
+def test_read_several_tabs_with_english_column(tmp_path):
+    p = make_pm_excel(tmp_path / "pm.xlsx")
+    pairs, notes = ca.read_hospitals_from_excel(p, "MR|CT|XR")
+    assert pairs == [("조선대학교병원", "Chosun University Hospital"), ("원광대학교병원", "Wonkwang University Hospital"),
+                     ("목포한국병원", "Mokpo Hankook Hospital"), ("광주기독병원", ""),
+                     ("전남대학교병원", ""), ("성가롤로병원", "")]
+    assert notes[0] == "MR 탭: 병원 4곳 (영문 이름 열 있음)" and notes[1] == "CT 탭: 병원 2곳"
+    assert notes[2].startswith("XR 탭:")
+    assert ca._find_sheets(["Summary", "MR", "CT", "XR", "Contact"], "MR|CT|XR") == ["MR", "CT", "XR"]
+
+
+def test_import_uses_english_from_excel_and_fixes_auto_names(tmp_path):
+    p = make_pm_excel(tmp_path / "pm.xlsx")
+    csv_path = tmp_path / ca.HOSPITAL_FILE_NAME
+    ca.write_csv(csv_path, ca.HOSPITAL_HEADER, [
+        ["조선대", "Joseon University Hospital", "영수증에서 찾음: 조선대학교병원 (영문 이름 확인)"],
+        ["원광대", "WKUH", "직접 고침"],
+    ])
+    lines = []
+    cfg = dict(ca.default_settings(), 병원_엑셀_파일=str(p))
+    assert ca.import_hospitals_from_excel(cfg, csv_path, lines.append) == (6, 4)
+    rows = {r[0]: r for r in ca.load_hospital_rows(csv_path)}
+    assert rows["조선대"][1] == "Chosun University Hospital"        # 자동 영문명 → 엑셀 영문명
+    assert rows["원광대"][1] == "WKUH"                              # 직접 고친 것은 그대로
+    assert rows["목포한국"][1] == "Mokpo Hankook Hospital" and rows["목포한국"][2].startswith("엑셀 영문명")
+    assert rows["광주기독"][1] == "Gwangju Christian Hospital" and "자동 변환" in rows["광주기독"][2]
+    assert "영문명 1곳 바꿈" in lines[0] and "MR 탭: 병원 4곳" in lines[0]
+
+
+def test_old_tab_setting_is_moved_to_several_tabs(tmp_path):
+    import json
+    s = tmp_path / ca.SETTINGS_FILE_NAME
+    s.write_text(json.dumps({"병원_엑셀_탭": "MR System Information"}, ensure_ascii=False), encoding="utf-8")
+    assert ca.load_settings(s)[0]["병원_엑셀_탭"] == "MR|CT|XR|MR System Information"

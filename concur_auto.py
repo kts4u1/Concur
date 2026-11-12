@@ -45,33 +45,18 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 영수증 첨부 보강"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 병원 목록 정리"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORIES = ("주차", "카페", "식대")
 
-# 광주·전라권 기본 병원 목록 (영문명은 병원 공식 영문명을 참고했습니다. 다르면 병원목록.csv에서 고치세요)
+# 기본 병원 목록: 사용자 영수증에서 확인한 병원만 (2026-11-13 사용자 요청. 나머지는 영수증·회사 엑셀에서 더해짐)
 DEFAULT_HOSPITALS = [
-    ["전남대", "Chonnam National University Hospital"],
-    ["화순전남대", "Chonnam National University Hwasun Hospital"],
-    ["빛고을전남대", "Bitgoeul Chonnam National University Hospital"],
-    ["조선대", "Chosun University Hospital"],
-    ["광주기독", "Kwangju Christian Hospital"],
-    ["광주보훈", "Gwangju Veterans Hospital"],
     ["원광대", "Wonkwang University Hospital"],
-    ["전북대", "Jeonbuk National University Hospital"],
-    ["예수병원", "Jeonju Jesus Hospital"],
     ["목포한국", "Mokpo Hankook Hospital"],
-    ["목포중앙", "Mokpo Jung-Ang Hospital"],
-    ["성가롤로", "St. Carollo Hospital"],
-    ["군산의료원", "Gunsan Medical Center"],
-    ["남원의료원", "Namwon Medical Center"],
-    ["강진의료원", "Gangjin Medical Center"],
-    ["순천의료원", "Suncheon Medical Center"],
-    ["목포시의료원", "Mokpo Medical Center"],
 ]
 
-# 예전 기본 목록(동료분 흐름의 대전·충청권). 예전 병원목록.csv를 광주·전라권으로 바꿀 때 알아보는 데 씁니다.
+# 예전 기본 목록(동료분 흐름의 대전·충청권). 예전 병원목록.csv에서 지울 줄을 알아보는 데 씁니다.
 OLD_DEFAULT_HOSPITALS = [
     ["국립소방", "National Fire Hospital"],
     ["건양대", "KYUH"],
@@ -177,7 +162,7 @@ def default_settings():
         "영수증_판별_단어": ["합계", "결제", "승인", "카드", "영수증", "금액", "부가세", "사업자", "매출", "가맹점", "거래", "주차"],
         "_병원_엑셀_설명": "병원 정보 엑셀(MR System Information 탭)을 고르면 실행할 때마다 새 병원을 병원목록.csv에 더합니다. 영문 이름은 한글을 자동으로 바꾼 것이라 확인이 필요합니다. 열을 비워 두면 병원 이름처럼 보이는 열을 자동으로 고르고, 열 제목(예: 병원명)이나 열 문자(예: C)를 적어도 됩니다.",
         "병원_엑셀_파일": "",
-        "병원_엑셀_탭": "MR System Information",
+        "병원_엑셀_탭": "MR|CT|XR|MR System Information",
         "병원_엑셀_열": "",
         "_가게_이름_설명": "Concur 경비의 가게(공급업체) 이름을 읽어 병원을 찾을 때 쓰는 칸. 영수증 글자에서 병원을 못 찾았을 때만 씁니다.",
         "가게_이름_칸": ["#vendorDescription", "[name=vendorDescription]", "#vendor", "[name=vendor]",
@@ -315,6 +300,8 @@ def load_settings(path: Path) -> tuple:
     for k, v in user.items():
         if isinstance(v, str):
             merged[k] = upgraded(v, defaults.get(k))
+    if user.get("병원_엑셀_탭") in ("MR System Information",):      # 예전 기본값 → 여러 탭
+        merged["병원_엑셀_탭"] = defaults["병원_엑셀_탭"]
     screen, old_screen = merged.get("화면_문구"), user.get("화면_문구")
     if isinstance(screen, dict) and isinstance(old_screen, dict):
         for k, v in old_screen.items():
@@ -335,11 +322,17 @@ def save_settings(path: Path, cfg: dict):
 
 
 HOSPITAL_HEADER = ["OCR에서 찾을 글자", "Concur에 쓸 영문명", "비고"]
-DEFAULT_HOSPITAL_NOTE = "기본 목록(광주·전라권)"
+DEFAULT_HOSPITAL_NOTE = "영수증에서 확인"
+OLD_DEFAULT_NOTES = ("기본 목록(동료분 흐름)", "기본 목록(광주·전라권)")
+
+
+def _is_old_default_row(row: list) -> bool:
+    return row[2] in OLD_DEFAULT_NOTES or (row[0], row[1]) in {(k, e) for k, e in OLD_DEFAULT_HOSPITALS}
 
 
 def load_hospital_rows(path: Path) -> list:
-    """[[찾을 글자, 영문명, 비고], ...]. 예전 기본 목록(대전·충청권)이 그대로 남아 있으면 광주·전라권으로 바꿉니다."""
+    """[[찾을 글자, 영문명, 비고], ...].
+    예전 기본 목록(동료분 대전·충청권, 잠깐 넣었던 광주·전라권)은 지우고 영수증에서 확인한 병원만 남깁니다."""
     if not path.exists():
         write_csv(path, HOSPITAL_HEADER, [pair + [DEFAULT_HOSPITAL_NOTE] for pair in DEFAULT_HOSPITALS])
     rows = []
@@ -347,9 +340,12 @@ def load_hospital_rows(path: Path) -> list:
         vals = [str(v or "").strip() for v in row.values()] + ["", ""]
         if vals[0] and vals[1]:
             rows.append(vals[:3])
-    old = {(k, e) for k, e in OLD_DEFAULT_HOSPITALS}
-    if any((r[0], r[1]) in old for r in rows):
-        rows = [r for r in rows if (r[0], r[1]) not in old]          # 고치지 않은 예전 기본 줄만 지움
+    if any(_is_old_default_row(r) for r in rows):
+        rows = [r for r in rows if not _is_old_default_row(r)]
+        official = {compact(k): e for k, e in DEFAULT_HOSPITALS}
+        for r in rows:          # 영수증에서 찾아 자동으로 만든 영문명은 확인한 공식 영문명으로
+            if compact(r[0]) in official and r[2].startswith("영수증에서 찾음"):
+                r[1], r[2] = official[compact(r[0])], DEFAULT_HOSPITAL_NOTE
         keys = {compact(r[0]) for r in rows}
         rows = [k_e + [DEFAULT_HOSPITAL_NOTE] for k_e in DEFAULT_HOSPITALS if compact(k_e[0]) not in keys] + rows
         try:
@@ -496,7 +492,42 @@ def _pick_hospital_column(rows: list, column: str) -> tuple:
     return ci, start
 
 
-def read_hospital_names_from_excel(path: Path, sheet: str, column: str = "") -> list:
+ENGLISH_HOSPITAL = re.compile(r"\b(hospital|medical|university|univ|center|centre|clinic|health)\b", re.I)
+
+
+def _find_sheets(sheetnames: list, spec: str) -> list:
+    """'MR|CT|XR'처럼 적은 탭 이름 → 실제 탭 이름들. 같은 이름 → 그 이름으로 시작 → (3글자 이상이면) 포함 순서로 찾습니다."""
+    found = []
+    names = [(compact(n).lower(), n) for n in sheetnames]
+    for want in (compact(w).lower() for w in str(spec or "").split("|")):
+        if not want:
+            continue
+        hit = (next((n for k, n in names if k == want), None)
+               or next((n for k, n in names if k.startswith(want)), None)
+               or (next((n for k, n in names if want in k), None) if len(want) >= 3 else None))
+        if hit and hit not in found:
+            found.append(hit)
+    return found
+
+
+def _english_column(rows: list, start: int, ko_col: int):
+    """병원 영문 이름처럼 보이는 열(Hospital/Medical/University… 가 든 영어)"""
+    scores = {}
+    for row in rows[start:start + 3000]:
+        for ci, v in enumerate(row):
+            if ci == ko_col or not isinstance(v, str):
+                continue
+            t = v.strip()
+            if t and not re.search(r"[가-힣]", t) and ENGLISH_HOSPITAL.search(t):
+                scores[ci] = scores.get(ci, 0) + 1
+    if not scores:
+        return None
+    ci = max(scores, key=scores.get)
+    return ci if scores[ci] >= 3 else None
+
+
+def read_hospitals_from_excel(path: Path, sheets: str, column: str = "") -> tuple:
+    """병원 정보 엑셀의 여러 탭에서 ([(한글 병원 이름, 영문 이름 또는 ''), ...], [안내 문구, ...])"""
     try:
         import openpyxl
     except ImportError:
@@ -505,31 +536,55 @@ def read_hospital_names_from_excel(path: Path, sheet: str, column: str = "") -> 
         wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
     except Exception as e:
         raise RuntimeError(f"병원 엑셀을 열지 못했습니다(.xlsx 파일인지 확인): {path.name} ({e})")
+    out, notes, seen = [], [], {}
     try:
-        names = {compact(n).lower(): n for n in wb.sheetnames}
-        want = compact(sheet).lower()
-        real = names.get(want) or next((n for k, n in names.items() if want and want in k), None)
-        if not real:
-            raise RuntimeError(f"엑셀에 '{sheet}' 탭이 없습니다. 있는 탭: {', '.join(wb.sheetnames)}")
-        rows = [list(r) for r in wb[real].iter_rows(values_only=True)]
+        tabs = _find_sheets(wb.sheetnames, sheets)
+        if not tabs:
+            raise RuntimeError(f"엑셀에 '{sheets}' 탭이 없습니다. 있는 탭: {', '.join(wb.sheetnames)}")
+        for tab in tabs:
+            rows = [list(r) for r in wb[tab].iter_rows(values_only=True)]
+            try:
+                ci, start = _pick_hospital_column(rows, column)
+            except RuntimeError as e:
+                notes.append(f"{tab} 탭: {e}")
+                continue
+            en_col = _english_column(rows, start, ci)
+            count = 0
+            for row in rows[start:]:
+                if ci >= len(row) or row[ci] is None:
+                    continue
+                name = clean_hospital_name(row[ci])
+                key = compact(name).lower()
+                if len(re.findall(r"[가-힣]", name)) < 2 or key in _HEADER_WORDS:
+                    continue
+                en = ""
+                if en_col is not None and en_col < len(row) and isinstance(row[en_col], str):
+                    cand = " ".join(row[en_col].split())
+                    if cand and not re.search(r"[가-힣]", cand):
+                        en = cand
+                hk = compact(hospital_key(name))
+                if hk in seen:
+                    if en and not out[seen[hk]][1]:
+                        out[seen[hk]] = (out[seen[hk]][0], en)       # 영문명이 있는 줄로 채움
+                    continue
+                seen[hk] = len(out)
+                out.append((name, en))
+                count += 1
+            notes.append(f"{tab} 탭: 병원 {count}곳" + (" (영문 이름 열 있음)" if en_col is not None else ""))
     finally:
         wb.close()
-    ci, start = _pick_hospital_column(rows, column)
-    out, seen = [], set()
-    for row in rows[start:]:
-        if ci >= len(row) or row[ci] is None:
-            continue
-        name = clean_hospital_name(row[ci])
-        key = compact(name).lower()
-        if len(re.findall(r"[가-힣]", name)) < 2 or key in _HEADER_WORDS or key in seen:
-            continue
-        seen.add(key)
-        out.append(name)
-    return out
+    if not out and any("탭: 병원" not in n for n in notes):
+        raise RuntimeError(" / ".join(notes))              # 어느 탭에서도 병원 이름 열을 못 찾음
+    return out, notes
+
+
+def read_hospital_names_from_excel(path: Path, sheet: str, column: str = "") -> list:
+    return [name for name, _ in read_hospitals_from_excel(path, sheet, column)[0]]
 
 
 def import_hospitals_from_excel(cfg: dict, csv_path: Path, log=print) -> tuple:
-    """병원 엑셀의 병원 중 병원목록.csv에 없는 것을 더합니다. → (읽은 수, 더한 수)"""
+    """병원 엑셀의 병원 중 병원목록.csv에 없는 것을 더합니다. → (읽은 수, 더한 수)
+    엑셀에 영문 이름 열이 있으면 그 이름을 쓰고, 자동으로 만든 영문명(자동 변환·영수증에서 찾음)도 엑셀 영문명으로 바꿉니다."""
     path = str(cfg.get("병원_엑셀_파일") or "").strip()
     if not path:
         return 0, 0
@@ -537,22 +592,31 @@ def import_hospitals_from_excel(cfg: dict, csv_path: Path, log=print) -> tuple:
     if not p.exists():
         log(f"병원 엑셀 파일이 없습니다: {p}")
         return 0, 0
-    names = read_hospital_names_from_excel(p, str(cfg.get("병원_엑셀_탭") or "MR System Information"),
-                                           str(cfg.get("병원_엑셀_열") or ""))
+    pairs, notes = read_hospitals_from_excel(p, str(cfg.get("병원_엑셀_탭") or "MR|CT|XR|MR System Information"),
+                                             str(cfg.get("병원_엑셀_열") or ""))
     rows = load_hospital_rows(csv_path)
-    keys = {compact(r[0]) for r in rows}
-    added = []
-    for name in names:
+    by_key = {compact(r[0]): r for r in rows}
+    added, updated = [], 0
+    for name, en in pairs:
         key = hospital_key(name)
-        if compact(key) in keys:
+        row = by_key.get(compact(key))
+        if row is not None:
+            if en and ("자동 변환" in row[2] or row[2].startswith("영수증에서 찾음")) and row[1] != en:
+                row[1], row[2] = en, f"엑셀 영문명: {name}"
+                updated += 1
             continue
-        keys.add(compact(key))
-        added.append([key, hospital_english_name(name), f"엑셀에서 자동 변환: {name} (영문 이름 확인)"])
-    if added:
+        new = [key, en, f"엑셀 영문명: {name}"] if en else \
+              [key, hospital_english_name(name), f"엑셀에서 자동 변환: {name} (영문 이름 확인)"]
+        by_key[compact(key)] = new
+        added.append(new)
+    if added or updated:
         write_csv(csv_path, HOSPITAL_HEADER, rows + added)
-    log(f"병원 엑셀: {len(names)}곳 읽음, 병원 목록에 새로 {len(added)}곳 추가"
-        + (" (영문 이름은 자동 변환이니 [병원 목록 편집]에서 확인하세요)" if added else ""))
-    return len(names), len(added)
+    auto = sum(1 for a in added if "자동 변환" in a[2])
+    log(f"병원 엑셀: {len(pairs)}곳 읽음, 병원 목록에 새로 {len(added)}곳 추가"
+        + (f", 영문명 {updated}곳 바꿈" if updated else "")
+        + (f" (영문 이름 자동 변환 {auto}곳은 [병원 목록 편집]에서 확인하세요)" if auto else "")
+        + (f" | {' / '.join(notes)}" if notes else ""))
+    return len(pairs), len(added)
 
 
 # ---------- Concur 가게 이름(영문)으로 병원 찾기 ----------
@@ -2548,7 +2612,8 @@ class GuiApp:
         if created:
             self.append("처음 실행입니다. 영수증 폴더·기본 도시를 확인하고, [병원 목록 편집]에서 담당 병원을 넣어 주세요.")
             self.append("iPhone으로 찍기만 한다면 영수증 폴더로 iCloud 사진 폴더(보통 사진\\iCloud Photos\\Photos)를 고르세요.")
-            self.append("기본 병원 목록은 광주·전라권입니다. 짧은 글자(2글자)는 다른 병원·주소에도 걸릴 수 있으니 3글자 이상으로 적어 주세요.")
+            self.append("병원 목록에는 영수증에서 확인한 병원(원광대병원, 목포한국병원)만 들어 있습니다. "
+                        "영수증에서 새 병원이 보이면 자동으로 더하고, [병원 엑셀 가져오기]로 회사 엑셀(MR·CT·XR 탭)에서 가져올 수도 있습니다.")
 
     # ---------- 화면 동작 ----------
     def append(self, line):
@@ -2577,7 +2642,7 @@ class GuiApp:
         cfg, _ = load_settings(self.base / SETTINGS_FILE_NAME)
         current = str(cfg.get("병원_엑셀_파일") or "")
         picked = self.fd.askopenfilename(
-            title="병원 정보 엑셀 고르기 (MR System Information 탭이 있는 파일)",
+            title="병원 정보 엑셀 고르기 (MR·CT·XR 탭이 있는 파일)",
             initialdir=str(Path(current).parent) if current else str(Path.home()),
             filetypes=[("Excel 파일", "*.xlsx *.xlsm"), ("모든 파일", "*.*")])
         if not picked:
@@ -2590,8 +2655,8 @@ class GuiApp:
             self.mb.showerror("병원 엑셀 가져오기", str(e))
             return
         self.mb.showinfo("병원 엑셀 가져오기",
-                         f"병원 {read}곳을 읽었고, 병원 목록에 새로 {added}곳을 넣었습니다.\n\n"
-                         "영문 이름은 한글을 자동으로 바꾼 것이라 공식 영문명과 다를 수 있습니다. "
+                         f"병원 {read}곳을 읽었고, 병원 목록에 새로 {added}곳을 넣었습니다. (MR·CT·XR 탭)\n\n"
+                         "엑셀에 영문 이름이 없는 병원은 한글을 자동으로 바꾼 것이라 공식 영문명과 다를 수 있습니다. "
                          "이어서 열리는 병원 목록에서 확인하고 고쳐 주세요.\n"
                          "앞으로는 실행할 때마다 이 엑셀에서 새 병원을 자동으로 더합니다.")
         if added:

@@ -115,29 +115,30 @@ def test_fill_expense_attaches_after_typing(page, receipt_file):
     assert page.input_value("#comment") == "Parking fee for service"
 
 
-# ---------- 기본 병원 목록: 광주·전라권 ----------
+# ---------- 기본 병원 목록: 영수증에서 확인한 병원만 ----------
 
-def test_old_default_hospital_list_is_replaced_once(tmp_path):
+def test_old_default_rows_are_removed_and_only_confirmed_hospitals_stay(tmp_path):
     p = tmp_path / ca.HOSPITAL_FILE_NAME
     old_rows = [pair + ["기본 목록(동료분 흐름)"] for pair in ca.OLD_DEFAULT_HOSPITALS]
-    old_rows[0] = [old_rows[0][0], "My own name", "고침"]       # 사용자가 고친 줄은 남김
-    ca.write_csv(p, ca.HOSPITAL_HEADER, old_rows + [["원광대", "WKUH", "직접 넣음"]])
+    ca.write_csv(p, ca.HOSPITAL_HEADER, old_rows + [
+        ["전남대", "Chonnam National University Hospital", "기본 목록(광주·전라권)"],   # 잠깐 넣었던 기본 줄
+        ["원광대", "Wongwang University Hospital", "영수증에서 찾음: 원광대병원 (영문 이름 확인)"],
+        ["조선대", "Chosun Univ. Hospital", "직접 넣음"],
+    ])
     rows = ca.load_hospital_rows(p)
-    keys = {r[0]: r[1] for r in rows}
-    assert "건양대" not in keys                                  # 고치지 않은 예전 기본 줄은 지움
-    assert keys[ca.OLD_DEFAULT_HOSPITALS[0][0]] == "My own name"
-    assert keys["원광대"] == "WKUH"                               # 사용자가 넣은 줄은 그대로(기본값으로 덮지 않음)
-    assert keys["전남대"] == "Chonnam National University Hospital"
-    assert ca.load_hospital_rows(p) == rows                      # 두 번째부터는 그대로
+    assert [r[:2] for r in rows] == [
+        ["목포한국", "Mokpo Hankook Hospital"],
+        ["원광대", "Wonkwang University Hospital"],        # 자동 영문명 → 확인한 공식 영문명
+        ["조선대", "Chosun Univ. Hospital"],               # 사용자가 넣은 줄은 그대로
+    ]
+    assert ca.load_hospital_rows(p) == rows                  # 두 번째부터는 그대로
 
 
-def test_new_hospital_file_has_gwangju_jeolla_list(tmp_path):
+def test_new_hospital_file_has_only_confirmed_hospitals(tmp_path):
     p = tmp_path / ca.HOSPITAL_FILE_NAME
     rows = ca.load_hospital_rows(p)
-    assert [r[:2] for r in rows] == ca.DEFAULT_HOSPITALS
-    assert all(r[2] == "기본 목록(광주·전라권)" for r in rows)
-    found = ca.detect_hospital(ca.compact("화순전남대학교병원 주차장"), ca.load_hospitals(p))
-    assert found == ("화순전남대", "Chonnam National University Hwasun Hospital")
+    assert rows == [["원광대", "Wonkwang University Hospital", "영수증에서 확인"],
+                    ["목포한국", "Mokpo Hankook Hospital", "영수증에서 확인"]]
 
 
 # ---------- 서울(본사 주소)은 뒤로 ----------
@@ -153,5 +154,6 @@ def test_seoul_is_used_only_when_no_other_city(text, city):
 def test_parking_receipt_with_seoul_head_office_gets_local_city():
     p = Path("IMG_0100.JPG")
     text = "하이파킹 본사 서울특별시 강남구\n조선대학교병원 주차장 광주광역시 동구\n2026.11.02 주차요금 99,000"
-    rec = ca.analyze_receipt(p, p, text, ca.default_settings(), ca.DEFAULT_HOSPITALS, datetime(2026, 11, 2, 9, 0))
+    rec = ca.analyze_receipt(p, p, text, ca.default_settings(), [["조선대", "Chosun University Hospital"]],
+                             datetime(2026, 11, 2, 9, 0))
     assert (rec.total, rec.hospital_en, ca.city_name(rec.city)) == (99000, "Chosun University Hospital", "Gwangju (ex Kwangju)")
