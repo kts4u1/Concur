@@ -106,7 +106,7 @@ def find_button(widget, text):
 
 
 @pytest.mark.skipif(tkinter is None, reason="창을 띄울 화면이 없음")
-def test_pick_names_and_types_from_concur_list(tmp_path):
+def test_korean_name_and_concur_expense_type(tmp_path):
     cfg = ca.default_settings()
     cfg["Concur_경비_유형"] = ca.KNOWN_EXPENSE_TYPES + ["Taxi"]           # [화면 조사]로 읽어 온 것처럼
     ca.save_settings(tmp_path / ca.SETTINGS_FILE_NAME, cfg)
@@ -114,28 +114,32 @@ def test_pick_names_and_types_from_concur_list(tmp_path):
     try:
         app.open_category_table()
         ed = app.editor
+        assert ed.name_entry.winfo_class() == "TEntry"                      # 항목 이름은 직접 적는 칸
+        etype_box = next(w for w in ed.name_entry.master.winfo_children() if w.winfo_class() == "TCombobox")
         for t in ("Car mileage", "Meals & Drinks", "Other", "Training", "Parking & Toll", "Taxi"):
-            assert t in ed.name_box.cget("values")                          # 항목 이름에서 고르기
-        etype_box = next(w for w in ed.name_box.master.winfo_children()
-                         if w.winfo_class() == "TCombobox" and w is not ed.name_box)
-        assert "Meals & Drinks" in etype_box.cget("values")                 # Expense Type에서도 같은 목록
+            assert t in etype_box.cget("values")                            # Expense Type은 Concur 목록에서 고르기
 
-        dlg = ed.add()                                                      # [새 항목] → 고르는 창
-        box = next(w for w in dlg.winfo_children()[0].winfo_children() if w.winfo_class() == "Listbox")
-        box.selection_set(ed.type_choices.index("Taxi"))
-        find_button(dlg, "추가").invoke()
-        assert ed.rows[ed.current][:5] == ["Taxi", "", "", "", "Taxi"]      # Expense Type도 같은 이름
-        assert ed.vars["etype"].get() == "Taxi"
-
-        ed.vars["name"].set("Meals & Drinks")                                # 이름을 목록에서 바꾸면
-        ed.on_name_picked()
-        assert ed.vars["etype"].get() == "Meals & Drinks"                    # Expense Type도 따라감
-        ed.vars["etype"].set("Other")
+        find_button(ed.win, "새 항목").invoke()                              # [새 항목] → 바로 이름 적기
+        assert ed.rows[ed.current][:5] == ["새 항목", "", "", "", ""]
+        assert ed.vars["name"].get() == "새 항목"
+        assert ed.add() == "새 항목 2"                                        # 또 누르면 이름이 겹치지 않게
+        ed.remove()
+        ed.select_visible([ed.rows[i][0] for i in ed.visible].index("새 항목"))
+        ed.vars["name"].set("택시")
+        ed.vars["keywords"].set("택시, 콜택시")
+        ed.vars["comment"].set("Taxi fee for service in {hospital}")
+        ed.vars["purpose"].set("For service")
         ed.on_edit()
-        ed.vars["name"].set("Training")
-        ed.on_name_picked()
-        assert ed.vars["etype"].get() == "Other"                             # 직접 바꾼 Expense Type은 그대로
-        ed.dirty = False
+        assert "Expense Type: Other Staff Expenses (비어 있어 아래 기본값)" in ed.preview.cget("text")
+        ed.vars["etype"].set("Taxi")
+        etype_box.event_generate("<<ComboboxSelected>>")
+        assert "Expense Type: Taxi" in ed.preview.cget("text")
+        assert ed.listbox.get(ed.visible.index(ed.current)) == "● 택시   → Taxi"
+        assert ed.save()
+        rows, _ = ca.load_category_rows(tmp_path / ca.CATEGORY_FILE_NAME, cfg)
+        taxi = next(r for r in rows if r[0] == "택시")
+        assert taxi[:5] == ["택시", "택시, 콜택시", "Taxi fee for service in {hospital}", "For service", "Taxi"]
+        assert "새 항목" not in [r[0] for r in rows]
         ed.close()
     finally:
         app.root.destroy()

@@ -31,6 +31,8 @@ def test_target_month_properties():
     assert tm.first_day_us == "02/01/2028"
     assert tm.last_day_us == "02/29/2028"
     assert tm.report_name("{month_name} Expenses") == "February Expenses"
+    assert tm.month_abbr == "Feb"
+    assert tm.report_name("Monthly Expense for {month_abbr}") == "Monthly Expense for Feb"
 
 
 def test_recent_months_cross_year():

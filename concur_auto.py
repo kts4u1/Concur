@@ -46,7 +46,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 항목 고르기·빠른 입력"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 리포트 이름·한글 항목 이름"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -110,8 +110,8 @@ DEFAULT_ELEMENTS = {
 # 위치(id)로 못 찾을 때 화면 글자(라벨)로 찾는 입력칸
 DEFAULT_ELEMENT_LABELS = {
     "리포트 이름": "Report Name|리포트 이름",
-    "리포트 시작일": "Start Date|시작일|시작 날짜",
-    "리포트 종료일": "End Date|종료일|종료 날짜",
+    "리포트 시작일": "From Date|Start Date|시작일|시작 날짜",
+    "리포트 종료일": "To Date|End Date|종료일|종료 날짜",
     "리포트 Business Purpose": "Business Purpose|비즈니스 목적|업무 목적",
     "리포트 Comment": "Comment|코멘트|의견",
     "경비 날짜": "Transaction Date|거래 날짜|거래일",
@@ -207,7 +207,11 @@ def default_settings():
         "도시_낮은_우선순위": ["서울"],
         "_영수증_병원_설명": "병원 목록에 없어도 영수증에 'OO병원'이 보이면 그 이름을 쓰고 병원 목록에 더합니다(영문 이름은 자동 변환).",
         "영수증에서_병원_찾기": True,
-        "리포트_이름_형식": "{month_name} Expenses",
+        "_리포트_설명": ("리포트 만들기 화면에 넣는 값. {month_abbr}=Nov처럼 달 영어 줄임말, {month_name}=November, "
+                       "{month}=11, {year}=2026, {report_name}=리포트 이름. Policy·Cost Object는 Concur가 미리 넣은 값을 그대로 둡니다."),
+        "리포트_이름_형식": "Monthly Expense for {month_abbr}",
+        "리포트_Business_Purpose": "service",
+        "리포트_Comment_형식": "{report_name}",
         "_키워드_설명": "아래 키워드·분류_우선순위·입력_문구·Undefined일_때_선택할_유형은 자동입력표.csv를 처음 만들 때만 씁니다. 그 뒤로는 자동입력표.csv(창의 [자동 입력표 편집])에서 고치세요.",
         "키워드": {
             "주차": ["주차", "입차", "출차", "주자"],
@@ -372,6 +376,8 @@ def load_settings(path: Path) -> tuple:
             merged[k] = upgraded(v, defaults.get(k))
     if user.get("병원_엑셀_탭") in ("MR System Information",):      # 예전 기본값 → 여러 탭
         merged["병원_엑셀_탭"] = defaults["병원_엑셀_탭"]
+    if user.get("리포트_이름_형식") in OLD_REPORT_NAME_FORMATS:       # 예전 기본값 → Monthly Expense for Nov
+        merged["리포트_이름_형식"] = defaults["리포트_이름_형식"]
     screen, old_screen = merged.get("화면_문구"), user.get("화면_문구")
     if isinstance(screen, dict) and isinstance(old_screen, dict):
         for k, v in old_screen.items():
@@ -861,6 +867,7 @@ def add_expense_types_to_table(path: Path, types: list, cfg: dict) -> int:
 
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July",
                "August", "September", "October", "November", "December"]
+OLD_REPORT_NAME_FORMATS = ("{month_name} Expenses",)
 
 
 @dataclass
@@ -877,6 +884,10 @@ class TargetMonth:
         return MONTH_NAMES[self.month - 1]
 
     @property
+    def month_abbr(self) -> str:
+        return MONTH_NAMES[self.month - 1][:3]
+
+    @property
     def first_day_us(self) -> str:
         return f"{self.month:02d}/01/{self.year}"
 
@@ -884,8 +895,9 @@ class TargetMonth:
     def last_day_us(self) -> str:
         return f"{self.month:02d}/{calendar.monthrange(self.year, self.month)[1]:02d}/{self.year}"
 
-    def report_name(self, fmt: str) -> str:
-        return fmt.format(month_name=self.month_name, year=self.year, month=self.month)
+    def report_name(self, fmt: str, **extra) -> str:
+        return fmt.format(month_name=self.month_name, month_abbr=self.month_abbr, year=self.year, month=self.month,
+                          **extra)
 
 
 def resolve_target_month(text=None, today=None) -> TargetMonth:
@@ -2524,7 +2536,9 @@ class ConcurBot:
     def create_report(self, tm: TargetMonth):
         page = self.page
         name = tm.report_name(self.cfg["리포트_이름_형식"])
-        self.log(f"리포트 생성: {name} ({tm.first_day_us} ~ {tm.last_day_us})")
+        purpose = tm.report_name(self.cfg.get("리포트_Business_Purpose", "service"), report_name=name)
+        comment = tm.report_name(self.cfg.get("리포트_Comment_형식", "{report_name}"), report_name=name)
+        self.log(f"리포트 생성: {name} ({tm.first_day_us} ~ {tm.last_day_us}), Business Purpose={purpose}, Comment={comment}")
         try:
             page.get_by_role("link", name=self._re("리포트 생성", exact=False)).first.click(timeout=15000)
         except Exception:
@@ -2532,8 +2546,8 @@ class ConcurBot:
         self.type_text(self.field("리포트 이름"), name)
         self.type_text(self.field("리포트 시작일"), tm.first_day_us)
         self.type_text(self.field("리포트 종료일"), tm.last_day_us)
-        self.type_text(self.field("리포트 Business Purpose"), name)
-        self.type_text(self.field("리포트 Comment"), name)
+        self.type_text(self.field("리포트 Business Purpose"), purpose)
+        self.type_text(self.field("리포트 Comment"), comment)
         page.get_by_role("button", name=self._re("리포트 생성")).last.click()
         page.wait_for_url(re.compile(r"/nui/expense/reports/"))
         time.sleep(3)
@@ -3298,7 +3312,8 @@ class GuiApp:
 
 
 class CategoryEditor:
-    """자동 입력 편집 창: 왼쪽에서 항목(Expense Type)을 고르고 오른쪽에서 찾을 글자·Comment·Business Purpose를 바로 적습니다."""
+    """자동 입력 편집 창: 왼쪽에서 항목을 고르고 오른쪽에서 이름(한글 마음대로)·찾을 글자·Comment·Business Purpose를 적고
+    Expense Type은 Concur 목록에서 고릅니다."""
     MARK_ON, MARK_OFF = "●", "○"
 
     def __init__(self, app):
@@ -3323,7 +3338,8 @@ class CategoryEditor:
         outer.rowconfigure(1, weight=1)
 
         ttk.Label(outer, foreground="#555", wraplength=960, justify="left", text=(
-            "왼쪽에서 항목을 고르고 오른쪽에 적으면 됩니다. ● = 설정됨(영수증에 맞춰짐), ○ = 아직 안 함. "
+            "왼쪽에서 항목을 고르고 오른쪽에 적으면 됩니다. 항목 이름은 한글로 마음대로 적고, Concur에서 고를 항목은 "
+            "'Expense Type'에서 고르세요. ● = 설정됨(영수증에 맞춰짐), ○ = 아직 안 함. "
             "'영수증에서 찾을 글자'가 비어 있는 항목은 영수증에 맞춰지지 않으니, 실제로 쓰는 항목만 채우세요. "
             "위에 있는 항목이 먼저 맞춰집니다(▲▼로 순서 바꿈).")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
@@ -3359,12 +3375,13 @@ class CategoryEditor:
         right.columnconfigure(1, weight=1)
         self.vars = {}
         types = self.type_choices
-        fields = (("name", "항목 이름", "▼를 눌러 Concur 항목을 고르세요(직접 적어도 됩니다). 고르면 아래 Expense Type도 같이 채워집니다. "
-                   "목록에 없는 항목은 Concur 경비 편집 화면에서 [화면 조사]를 하면 읽어 옵니다."),
+        fields = (("name", "항목 이름", "한글로 알아보기 쉬운 이름을 마음대로 적으세요. 예: 톨게이트, 택시, 주유. "
+                   "영수증 목록의 '분류' 칸에 이 이름이 나옵니다."),
                   ("keywords", "영수증에서 찾을 글자", "영수증에 이 글자가 있으면 이 항목. 쉼표로 여러 개. 예: 통행료, 톨게이트, 하이패스"),
                   ("comment", "Comment", "{hospital} 자리에 병원 영문명이 들어갑니다. 예: Toll fee for service in {hospital}"),
                   ("purpose", "Business Purpose", "예: For service"),
-                  ("etype", "Expense Type", "Concur의 Expense Type이 Undefined(비어 있음)일 때 고를 항목. Concur 목록에 보이는 이름 그대로."))
+                  ("etype", "Expense Type", "▼를 눌러 Concur 항목을 고르세요. Concur의 Expense Type이 Undefined(비어 있음)일 때 "
+                   "이 항목을 고릅니다. 목록에 없는 항목은 Concur 경비 편집 화면에서 [화면 조사]를 하면 읽어 옵니다."))
         r = 0
         for key, label, hint in fields:
             ttk.Label(right, text=label).grid(row=r, column=0, sticky="w", pady=(6, 0), padx=(0, 10))
@@ -3372,11 +3389,10 @@ class CategoryEditor:
             if key == "etype":
                 w = ttk.Combobox(right, textvariable=var, values=types)
                 w.bind("<<ComboboxSelected>>", lambda e: self.on_edit())
-            elif key == "name":
-                w = self.name_box = ttk.Combobox(right, textvariable=var, values=types)
-                w.bind("<<ComboboxSelected>>", lambda e: self.on_name_picked())
             else:
                 w = ttk.Entry(right, textvariable=var)
+                if key == "name":
+                    self.name_entry = w
             w.grid(row=r, column=1, sticky="ew", pady=(6, 0))
             w.bind("<KeyRelease>", lambda e: self.on_edit())
             ttk.Label(right, text=hint, foreground="#777", wraplength=420, justify="left").grid(row=r + 1, column=1, sticky="w")
@@ -3460,7 +3476,8 @@ class CategoryEditor:
             self.preview.configure(text="")
             return
         row = self.rows[self.current]
-        self.preview.configure(text=category_preview(row[2], row[3]))
+        etype = row[4] or f"{self.default_var.get().strip()} (비어 있어 아래 기본값)"
+        self.preview.configure(text=category_preview(row[2], row[3]) + f"\nExpense Type: {etype}")
         self.status.configure(text="" if row[1].strip() else
                               "아직 '영수증에서 찾을 글자'가 비어 있어 이 항목은 영수증에 맞춰지지 않습니다.")
 
@@ -3468,57 +3485,23 @@ class CategoryEditor:
         self.dirty = True
         self.win.title("자동 입력 편집 *")
 
-    def on_name_picked(self):
-        """항목 이름을 Concur 목록에서 고르면 Expense Type도 같은 이름으로(비어 있거나 예전 이름과 같을 때)"""
-        if self.current is None:
-            return
-        name = self.vars["name"].get().strip()
-        old_name, etype = self.rows[self.current][0], self.vars["etype"].get().strip()
-        if name in self.type_choices and (not etype or etype == old_name):
-            self.vars["etype"].set(name)
-        self.on_edit()
-
     def add(self):
-        """[새 항목]: Concur 항목 목록에서 고르는 작은 창"""
-        tk, ttk = self.tk, self.app.ttk
-        dlg = tk.Toplevel(self.win)
-        dlg.title("새 항목")
-        dlg.geometry("420x460")
-        dlg.transient(self.win)
-        frame = ttk.Frame(dlg, padding=10)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Concur 항목을 고르세요. (✓ = 이미 있는 항목)").pack(anchor="w")
-        used = {r[0] for r in self.rows} | {r[4] for r in self.rows if r[1].strip()}
-        box = tk.Listbox(frame, height=14, exportselection=False, font=("Malgun Gothic", 10))
-        box.pack(fill="both", expand=True, pady=6)
-        for t in self.type_choices:
-            box.insert("end", f"{'✓ ' if t in used else '   '}{t}")
-        ttk.Label(frame, text="목록에 없으면 직접 적기 (예: 톨게이트)").pack(anchor="w")
-        custom = tk.StringVar()
-        ttk.Entry(frame, textvariable=custom).pack(fill="x", pady=(2, 8))
-
-        def ok(_=None):
-            name = custom.get().strip()
-            if not name and box.curselection():
-                name = self.type_choices[box.curselection()[0]]
-            if name:
-                dlg.destroy()
-                self.add_named(name)
-
-        box.bind("<Double-Button-1>", ok)
-        bf = ttk.Frame(frame)
-        bf.pack(fill="x")
-        ttk.Button(bf, text="취소", command=dlg.destroy).pack(side="right", padx=3)
-        ttk.Button(bf, text="추가", command=ok).pack(side="right", padx=3)
-        self.add_dialog = dlg
-        return dlg
+        """[새 항목]: '새 항목' 줄을 더하고 이름 칸을 골라 둠 → 바로 한글 이름을 적으면 됨"""
+        names = {r[0] for r in self.rows}
+        name, n = "새 항목", 2
+        while name in names:
+            name, n = f"새 항목 {n}", n + 1
+        self.add_named(name)
+        self.name_entry.focus_set()
+        self.name_entry.select_range(0, "end")
+        return name
 
     def add_named(self, name: str):
-        """이름으로 항목을 더하고 고릅니다. Concur 항목이면 Expense Type도 같은 이름으로."""
+        """이름으로 항목을 더하고 고릅니다(이미 있으면 그 항목을 고름)."""
         existing = next((i for i, r in enumerate(self.rows) if r[0] == name), None)
         if existing is None:
             at = self.current + 1 if self.current is not None else 0
-            self.rows.insert(at, [name, "", "", "", name if name in self.type_choices else "", ""])
+            self.rows.insert(at, [name, "", "", "", "", ""])
             existing = at
             self.mark_dirty()
         self.current = existing
