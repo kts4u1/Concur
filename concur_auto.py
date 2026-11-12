@@ -45,7 +45,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-12 영어 화면 대응"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-12 영어 메일 대응"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORIES = ("주차", "카페", "식대")
@@ -125,8 +125,9 @@ def default_settings():
         "로그인_방법": "이메일 링크",
         "_로그인_이메일_설명": "로그인 화면의 이메일 칸이 비어 있을 때 넣을 회사 이메일. 비워 두면 Edge 창에서 직접 입력합니다.",
         "로그인_이메일": "",
-        "로그인_메일_제목": "SAP Concur 로그인 요청",
-        "로그인_메일_버튼": "SAP Concur 로그인",
+        "_로그인_메일_설명": "로그인 메일의 제목과 버튼 글자. '|'로 나눠 한국어·영어를 같이 적습니다. 보낸 사람이 concur이면 제목이 달라도 봅니다.",
+        "로그인_메일_제목": "SAP Concur 로그인 요청|Sign-In Request to SAP Concur",
+        "로그인_메일_버튼": "SAP Concur 로그인|Sign in to SAP Concur",
         "로그인_메일_대기_초": 120,
         "영수증_보정_사용": True,
         "보정_확대_배율": 2.0,
@@ -282,13 +283,16 @@ def load_settings(path: Path) -> tuple:
             merged[key] = sub
         else:
             merged[key] = value
-    # 화면 문구: 예전 기본값(한국어 하나)이 저장돼 있으면 새 기본값(한국어|영어)으로
+    # 예전 기본값(한국어 하나)이 저장돼 있으면 새 기본값(한국어|영어)으로 (사용자가 직접 바꾼 값은 그대로)
+    def upgraded(old, new):
+        return new if isinstance(old, str) and isinstance(new, str) and "|" in new and old == new.split("|")[0] else old
+    for k, v in user.items():
+        if isinstance(v, str):
+            merged[k] = upgraded(v, defaults.get(k))
     screen, old_screen = merged.get("화면_문구"), user.get("화면_문구")
     if isinstance(screen, dict) and isinstance(old_screen, dict):
         for k, v in old_screen.items():
-            new = defaults["화면_문구"].get(k, "")
-            if "|" in new and v == new.split("|")[0]:
-                screen[k] = new
+            screen[k] = upgraded(v, defaults["화면_문구"].get(k, ""))
     # 기본 도시를 대전 → 광주로 바꾼 것을 예전 설정 파일에도 한 번 반영
     if user.get("기본_도시") == OLD_DEFAULT_CITY and not user.get("_기본_도시_광주로_바꿈"):
         merged["기본_도시"] = defaults["기본_도시"]
@@ -1552,22 +1556,43 @@ HREF_ATTR = re.compile(r"""href\s*=\s*(["'])(.*?)\1""", re.I | re.S)
 SIGNIN_URL = re.compile(r"/nui/signin|/signin|/login|/sso|saml", re.I)
 
 
+SIGNIN_LINK_TEXT = re.compile(r"(로그인|sign[\s-]?in|log[\s-]?in).{0,20}concur|concur.{0,20}(로그인|sign[\s-]?in|log[\s-]?in)", re.I)
+
+
 def extract_login_link(html_body: str, button_text: str):
-    """메일 본문(HTML)에서 글자가 button_text인 링크의 주소. 글자가 똑같은 링크를 먼저 고릅니다."""
-    want = compact(button_text)
+    """메일 본문(HTML)에서 글자가 button_text(‘|’로 여러 개)인 링크의 주소.
+    글자가 똑같은 링크 → 글자를 포함하는 링크 → 'Concur'와 '로그인/Sign in'이 든 링크 순서로 고릅니다."""
+    wants = [compact(w).lower() for w in str(button_text or "").split("|") if compact(w)]
     found = []
     for m in A_TAG.finditer(html_body or ""):
-        text = compact(html_lib.unescape(re.sub(r"<[^>]+>", "", m.group(2))))
         h = HREF_ATTR.search(m.group(1))
-        if not (want and h and want in text):
+        if not h:
             continue
         url = html_lib.unescape(h.group(2)).strip()
-        if url.lower().startswith(("https://", "http://")):
-            found.append((text != want, url))
+        if not url.lower().startswith(("https://", "http://")):
+            continue
+        raw = html_lib.unescape(re.sub(r"<[^>]+>", " ", m.group(2)))
+        text = compact(raw).lower()
+        if text in wants:
+            found.append((0, url))
+        elif any(w in text for w in wants):
+            found.append((1, url))
+        elif SIGNIN_LINK_TEXT.search(" ".join(raw.split())):
+            found.append((2, url))
     return min(found)[1] if found else None
 
 
+def _is_login_mail(item, subjects: list) -> bool:
+    """제목이 로그인 메일 제목(한국어/영어 중 하나)이거나 보낸 사람이 concur"""
+    subject = compact(getattr(item, "Subject", "") or "").lower()
+    if any(s and s in subject for s in subjects):
+        return True
+    sender = str(getattr(item, "SenderEmailAddress", "") or "").lower()
+    return "concur" in sender
+
+
 def _newest_login_link(inbox, subject: str, button: str, since: datetime):
+    subjects = [compact(x).lower() for x in str(subject or "").split("|") if compact(x)]
     items = inbox.Items
     items.Sort("[ReceivedTime]", True)          # 최근 메일부터
     item = items.GetFirst()
@@ -1578,7 +1603,7 @@ def _newest_login_link(inbox, subject: str, button: str, since: datetime):
             received = item.ReceivedTime.replace(tzinfo=None)   # Outlook 시각(PC 기준)
             if received < since - timedelta(minutes=2):
                 break                                           # 더 오래된 메일만 남음
-            if getattr(item, "Class", None) == 43 and compact(subject) in compact(item.Subject or ""):
+            if getattr(item, "Class", None) == 43 and _is_login_mail(item, subjects):
                 link = extract_login_link(item.HTMLBody or "", button)
                 if link:
                     return link
@@ -1596,8 +1621,8 @@ def find_login_link_in_outlook(cfg: dict, since: datetime, log, check_stop=None,
     except ImportError:
         log("   Outlook 메일을 읽으려면 pywin32 가 필요합니다:  pip install -r requirements.txt")
         return None
-    subject = str(cfg.get("로그인_메일_제목", "SAP Concur 로그인 요청"))
-    button = str(cfg.get("로그인_메일_버튼", "SAP Concur 로그인"))
+    subject = str(cfg.get("로그인_메일_제목") or "SAP Concur 로그인 요청|Sign-In Request to SAP Concur")
+    button = str(cfg.get("로그인_메일_버튼") or "SAP Concur 로그인|Sign in to SAP Concur")
     timeout = float(cfg.get("로그인_메일_대기_초", 120))
     pythoncom.CoInitialize()
     try:
@@ -1623,7 +1648,7 @@ def find_login_link_in_outlook(cfg: dict, since: datetime, log, check_stop=None,
 
 
 PASTE_LINK_MSG = ("Outlook에서 로그인 메일을 찾지 못했습니다.\n\n"
-                  "메일의 [SAP Concur 로그인] 버튼을 마우스 오른쪽으로 눌러 [하이퍼링크 복사]를 고른 뒤 여기에 붙여 넣으세요.\n"
+                  "메일의 [SAP Concur 로그인](영어 메일은 [Sign in to SAP Concur]) 버튼을 마우스 오른쪽으로 눌러 [하이퍼링크 복사]를 고른 뒤 여기에 붙여 넣으세요.\n"
                   "버튼을 그냥 누르면 다른 Edge 창에서 열려서 이 프로그램 창은 로그인되지 않습니다.\n\n"
                   "[취소]를 누르면 열린 Edge 창에서 직접 로그인할 때까지 기다립니다.")
 

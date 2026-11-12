@@ -45,12 +45,13 @@ def test_extract_login_link_none():
 # ---------- 가짜 Outlook ----------
 
 class FakeMail:
-    def __init__(self, subject, minutes_ago, href, now):
+    def __init__(self, subject, minutes_ago, href, now, sender="noreply@concursolutions.com", body=None):
         self.Class = 43
         self.Subject = subject
+        self.SenderEmailAddress = sender
         # pywin32는 PC 시각에 UTC 표시를 붙여 돌려줌 → 프로그램은 tzinfo를 떼고 비교
         self.ReceivedTime = (now - timedelta(minutes=minutes_ago)).replace(tzinfo=timezone.utc)
-        self.HTMLBody = MAIL.format(href=href)
+        self.HTMLBody = (body or MAIL).format(href=href)
 
 
 class FakeItems:
@@ -107,7 +108,7 @@ def test_outlook_picks_newest_login_mail_after_request(fake_outlook):
     now = datetime.now().replace(microsecond=0)
     fake_outlook["inbox"] = FakeInbox([
         FakeMail("SAP Concur 로그인 요청", 30, "https://c.example/old", now),     # 예전 요청 메일
-        FakeMail("주간 회의", 0, "https://c.example/meeting", now),
+        FakeMail("주간 회의", 0, "https://c.example/meeting", now, sender="boss@example.com"),
         FakeMail("SAP Concur 로그인 요청", 0, "https://c.example/new", now),
     ])
     lines = []
@@ -416,3 +417,46 @@ def test_edge_opens_in_korean_without_translate_popup():
     opts = ca.ConcurBot(ca.default_settings(), lambda s="": None).launch_options()
     assert opts["locale"] == "ko-KR" and opts["channel"] == "msedge"
     assert "--lang=ko-KR" in opts["args"] and "--disable-features=Translate" in opts["args"]
+
+
+# ---------- 로그인 메일이 영어로 올 때 ----------
+
+MAIL_EN = """<html><body><div><h2>Sign-In Request to SAP Concur</h2></div><p>Hello Hong Gildong,</p>
+<p>You requested a one-time link to sign in to SAP Concur.</p>
+<a href="https://www.concur.com/privacy">Privacy Policy</a>
+<table><tr><td><a href="{href}"><span>Sign in to SAP Concur</span></a></td></tr></table>
+<p>This link will be active for an hour and can only be used once.</p></body></html>"""
+
+
+def test_extract_login_link_english_mail():
+    assert ca.extract_login_link(MAIL_EN.format(href="https://c.example/en"), ca.default_settings()["로그인_메일_버튼"]) == "https://c.example/en"
+    # 버튼 글자가 조금 달라도 'Concur'와 'Sign in'이 들어 있으면
+    other = MAIL_EN.replace("Sign in to SAP Concur", "Log in to Concur").format(href="https://c.example/x")
+    assert ca.extract_login_link(other, "SAP Concur 로그인|Sign in to SAP Concur") == "https://c.example/x"
+
+
+def test_outlook_finds_english_login_mail(fake_outlook):
+    now = datetime.now().replace(microsecond=0)
+    fake_outlook["inbox"] = FakeInbox([
+        FakeMail("Weekly meeting", 0, "https://c.example/meeting", now, sender="boss@example.com"),
+        FakeMail("Sign-In Request to SAP Concur", 0, "https://c.example/en", now, body=MAIL_EN),
+    ])
+    cfg = dict(ca.default_settings(), 로그인_메일_대기_초=0)
+    assert ca.find_login_link_in_outlook(cfg, now, lambda s: None) == "https://c.example/en"
+
+
+def test_outlook_finds_login_mail_from_concur_even_if_subject_changes(fake_outlook):
+    now = datetime.now().replace(microsecond=0)
+    fake_outlook["inbox"] = FakeInbox([FakeMail("Anmeldeanfrage", 0, "https://c.example/de", now, body=MAIL_EN)])
+    cfg = dict(ca.default_settings(), 로그인_메일_대기_초=0)
+    assert ca.find_login_link_in_outlook(cfg, now, lambda s: None) == "https://c.example/de"
+
+
+def test_old_saved_mail_settings_get_english_too(tmp_path):
+    import json
+    p = tmp_path / ca.SETTINGS_FILE_NAME
+    p.write_text(json.dumps({"로그인_메일_제목": "SAP Concur 로그인 요청", "로그인_메일_버튼": "SAP Concur 로그인"},
+                            ensure_ascii=False), encoding="utf-8")
+    cfg, _ = ca.load_settings(p)
+    assert cfg["로그인_메일_제목"] == "SAP Concur 로그인 요청|Sign-In Request to SAP Concur"
+    assert cfg["로그인_메일_버튼"] == "SAP Concur 로그인|Sign in to SAP Concur"
