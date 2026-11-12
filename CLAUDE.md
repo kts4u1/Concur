@@ -1,63 +1,80 @@
-# Concur 경비 자동 입력 — 작업 인계
+# Concur 경비 자동 입력 — 작업 인계 메모
 
-사용자는 개발자가 아닙니다. 답은 한국어로, 쉬운 말로 합니다.
+> 이 파일은 Claude가 이 저장소에서 작업을 시작할 때마다 자동으로 읽는 인계 메모입니다.
+> 파일 이름(CLAUDE.md)은 바꾸면 안 됩니다. 내용은 사람이 읽어도 되도록 한국어로 씁니다.
 
-## 무엇인가
+사용자는 개발자가 아닙니다. 답은 한국어로, 쉬운 말로 합니다. 작업 단계 설명도 한국어로 씁니다.
 
-Windows PC에서 돌리는 Python 프로그램 하나(`concur_auto.py`)입니다.
+## 무엇을 하는 프로그램인가
 
-1. iPhone 단축어가 iCloud 폴더에 올린 영수증 사진(`2026-10-22_123342.jpg`)을 지난달 것만 고름
-2. (선택) 이미지 보정 → Windows OCR(한국어) → 날짜·금액·분류(주차/카페/식대)·병원 추출
-3. `결과\영수증목록_YYYY-MM.csv`에 저장. 사용자가 엑셀로 고치면 다음 실행에도 유지
-4. Playwright로 PC의 Edge(전용 프로필)를 열어 SAP Concur에서 지난달 리포트 생성 → 지난달 경비 추가 → 경비마다 Comment·Business Purpose·Receipt·LCRT·Expense Type·도시 입력, 영수증 첨부 → 저장
-5. **제출은 하지 않음.** `결과\경비처리_YYYY-MM.csv`의 '확인 필요' 칸을 보고 사용자가 직접 제출
+회사 Windows PC에서 돌리는 Python 프로그램 하나(`concur_auto.py`)입니다.
 
-GUI(tkinter) 버튼 세 개: ① 영수증 분석만 / ② 전체 실행 / ③ 만든 리포트에 입력만. `--cli`로 명령 프롬프트 모드도 있음. `build_exe.bat`로 exe를 만듭니다.
+1. iPhone 단축어가 iCloud 폴더에 올린 영수증 사진(파일 이름 예: `2026-10-22_123342.jpg`) 중 지난달 것만 고릅니다.
+2. (선택) 사진을 선명하게 보정한 뒤, Windows에 들어 있는 한국어 글자 인식(OCR)으로 날짜·금액·분류(주차/카페/식대)·병원을 뽑습니다.
+3. 결과를 `결과\영수증목록_YYYY-MM.csv`에 저장합니다. 사용자가 엑셀로 고치면 다음 실행에도 고친 값이 쓰입니다.
+4. 이 프로그램 전용 Edge 창을 열어 Concur에서 다음을 합니다.
+   - 지난달 리포트 만들기
+   - 지난달 경비를 리포트에 넣기
+   - 경비마다 Comment, Business Purpose, Receipt, LCRT, Expense Type, 도시를 채우고 영수증 사진 첨부
+   - 저장
+5. **제출은 하지 않습니다.** `결과\경비처리_YYYY-MM.csv`의 '확인 필요' 칸을 보고 사용자가 직접 제출합니다.
 
-## 내력
+프로그램 창에는 버튼이 세 개 있습니다: ① 영수증 분석만 / ② 전체 실행 / ③ 만든 리포트에 입력만.
+창 없이 명령 프롬프트로 쓰는 방법(`--cli`)도 있고, `build_exe.bat`를 더블클릭하면 exe 파일로 만들어집니다.
 
-- 동료가 만든 Power Automate Desktop(PAD) 흐름과 `receipt_preprocess.py`(영수증 보정)가 출발점입니다.
-- claude.ai 채팅 "Power Automate로 Concur 작업 자동화"에서 둘을 Python 하나로 합쳤고, 동료 설명서를 반영해 GUI 버전을 만들었습니다. 2026-11-12에 그 결과물(4개 파일)을 이 저장소로 가져왔습니다.
-- PAD 흐름 원문(7.5MB 텍스트), `receipt_preprocess.py`, 동료 설명서는 저장소에 없습니다. 보정 로직은 `preprocess_receipt()`에 이미 들어 있습니다.
+## 지금까지의 경과
 
-## 정해진 것과 이유
+- 출발점은 동료가 만든 Power Automate Desktop 흐름과 영수증 보정 스크립트(`receipt_preprocess.py`)입니다.
+- claude.ai 채팅 "Power Automate로 Concur 작업 자동화"에서 둘을 Python 프로그램 하나로 합쳤고, 동료 설명서를 반영해 버튼으로 쓰는 창 버전을 만들었습니다.
+- 2026-11-12에 그 결과물(파일 4개)을 이 저장소로 가져왔습니다.
+- Power Automate 흐름 원문(7.5MB 텍스트), `receipt_preprocess.py`, 동료 설명서는 저장소에 없습니다. 보정 기능은 이미 `concur_auto.py` 안에 들어 있어서 따로 필요하지 않습니다.
 
-- **PAD 대신 Python**: 브라우저 내부에서 동작해 실행 중에도 PC를 쓸 수 있고, 파일 열기 창과 고정 대기가 없으며, exe로 나눠 줄 수 있습니다. Concur 공식 API는 회사 관리자가 앱을 등록해야 해서 브라우저 자동화를 씁니다.
-- **Concur 요소 ID**는 PAD UI 요소 저장소에 있던 실제 값입니다: `#name`, `#custom11-date-input-field-input`/`#custom12-…`(리포트 기간), `#businessPurpose`, `#comment`, `#transactionAmount`, `#transactionDate-date-input-field-input`, `#location`, `[name=receiptType]`, `[name=expenseType]`, `#custom32`(LCRT), `#upload-receipt-button`.
-- **경비 선택 버그 수정**: PAD는 날짜에 "10/"만 있으면 골라 11/10 같은 다른 달도 넣었습니다. `JS_SELECT_MONTH`가 월·연도를 정확히 비교합니다.
-- **연도 고정(2026) 제거**: 처리할 달은 날짜로 계산합니다.
-- **업로드는 원본 사진**: 보정본은 2배 확대 PNG라 4배 가까이 커지고 Concur는 1장 5MB 제한이 있습니다. 넘으면 JPEG로 줄인 사본을 올립니다.
-- **로그인**: 전용 Edge 프로필(`브라우저_프로필_폴더`)에서 처음 한 번 SSO 로그인하면 유지됩니다.
-- **동료 설명서와 일부러 다른 점** (모두 `concur_settings.json`에서 바꿀 수 있음):
-  - 같은 날짜·금액 영수증: 건너뛰지 않고 순서대로 첨부하고 '확인 필요'로 표시
-  - Undefined인 Expense Type: 주차는 `Parking & Toll`, 나머지는 `Other Staff Expenses`를 고르고 '확인 필요'로 표시
-  - 식대 Comment: 설명서 문구 "Overtime meal fee for service"를 따름 (흐름 파일은 "Overtime meal during service")
-- **한국어 화면 기준**: 버튼은 '리포트 생성', '경비 저장' 같은 글자로 찾습니다. Concur 언어가 바뀌면 설정의 `화면_문구`만 고칩니다.
-- OCR 키워드의 이상한 글자('주자', '메리카', '중남대' 등)는 OCR이 잘못 읽은 결과에 맞춘 것이라 일부러 둔 것입니다.
+## 정해 둔 것과 그 이유
 
-## 검증 상태
+- **Power Automate 대신 Python을 쓰는 이유**
+  - 마우스를 흉내 내지 않고 브라우저 안에서 직접 동작해서, 실행 중에도 PC를 쓸 수 있습니다.
+  - 파일 열기 창을 누르거나 정해진 시간만큼 기다리는 동작이 없어 덜 깨집니다.
+  - exe 파일로 만들어 동료에게 나눠 줄 수 있습니다.
+  - Concur 공식 연결 방법(API)은 회사 관리자가 따로 등록해 줘야 해서 개인이 쓰기 어렵습니다.
+- **Concur 화면의 입력칸 이름**은 Power Automate 흐름에 저장돼 있던 실제 값을 그대로 씁니다.
+  - 리포트: `#name`(이름), `#custom11-date-input-field-input`·`#custom12-date-input-field-input`(기간)
+  - 경비: `#businessPurpose`, `#comment`, `#transactionAmount`(금액), `#transactionDate-date-input-field-input`(날짜), `#location`(도시), `[name=receiptType]`(Receipt), `[name=expenseType]`(Expense Type), `#custom32`(LCRT), `#upload-receipt-button`(영수증 첨부 버튼)
+- **경비를 잘못 고르던 문제를 고쳤습니다.** Power Automate 흐름은 날짜에 "10/"만 들어 있으면 골라서, 11/10처럼 다른 달 경비까지 넣었습니다. 지금은 월과 연도를 정확히 비교합니다(`JS_SELECT_MONTH`).
+- **연도가 2026으로 고정돼 있던 문제를 고쳤습니다.** 처리할 달은 오늘 날짜로 계산합니다.
+- **영수증은 원본 사진을 올립니다.** 보정한 사진은 2배로 키운 PNG라 크기가 4배 가까이 커지는데, Concur는 1장에 5MB까지만 받습니다. 원본도 5MB를 넘으면 자동으로 줄인 사본을 올립니다.
+- **로그인:** 전용 Edge 창에서 처음 한 번 회사 계정으로 로그인하면 다음부터는 로그인 상태가 유지됩니다.
+- **동료 설명서와 일부러 다르게 한 부분** (모두 설정 파일 `concur_settings.json`에서 바꿀 수 있습니다)
+  - 같은 날짜·같은 금액 영수증이 여러 장이면: 건너뛰지 않고 순서대로 첨부한 뒤 '확인 필요'로 표시합니다.
+  - Expense Type이 Undefined이면: 주차는 `Parking & Toll`, 나머지는 `Other Staff Expenses`를 고르고 '확인 필요'로 표시합니다.
+  - 식대 Comment 문구: 흐름 파일("Overtime meal during service")과 설명서("Overtime meal fee for service")가 달라서 설명서 문구를 따랐습니다.
+- **Concur는 한국어 화면을 기준으로 합니다.** '리포트 생성', '경비 저장' 같은 버튼 글자로 찾습니다. Concur 언어가 바뀌면 설정 파일의 `화면_문구`만 고치면 됩니다.
+- 분류 키워드와 병원 표에 있는 이상한 글자('주자', '메리카', '중남대' 등)는 OCR이 잘못 읽은 글자에 맞춘 것이라 일부러 둔 것입니다. 지우면 안 됩니다.
 
-- 이전 채팅: 로직 테스트, 가짜 Concur 페이지에서 처음부터 저장까지, GUI 뜨는지 확인. 그 테스트 코드와 가짜 페이지는 넘어오지 않았습니다.
-- 이 저장소: `tests/`에 로직 테스트와 경비 선택 JavaScript 테스트(Chromium)가 있습니다.
+## 어디까지 확인했나
+
+- 이전 채팅에서: 글자 분석·매칭 테스트, Concur를 흉내 낸 가짜 화면에서 처음부터 저장까지 실행, 프로그램 창이 뜨는지 확인했습니다. 다만 그 테스트 코드와 가짜 화면은 넘어오지 않았습니다.
+- 이 저장소에서: `tests` 폴더에 테스트 23개가 있습니다. 날짜·금액·분류·병원 뽑기, 엑셀로 고친 내용 유지, 경비와 영수증 맞추기, 설정 파일, 지난달 경비만 고르기를 확인합니다. 모두 통과합니다.
 - **실제 Concur와 실제 Windows OCR에서는 아직 한 번도 돌려 보지 않았습니다.**
 
-## 다음 할 일
+## 다음에 할 일
 
-1. 사용자가 ①을 돌려 `영수증목록_YYYY-MM.csv`를 보내 주면, 식대 키워드(지금 '버터' 하나뿐이라 식당 영수증 대부분이 '분류 없음'이 될 수 있음)와 병원 표를 실제 OCR 결과에 맞춰 보강
-2. 첫 실제 ②/③ 실행의 `실행기록` 폴더(로그·화면 캡처)를 받아 셀렉터·대기 수정
-3. 회사 Edge 정책이 브라우저 자동화를 막으면 코드로는 해결할 수 없음 → IT 확인 안내
-4. 기본 병원 목록은 대전·충청권이고 기본 도시는 Daejeon. 담당 지역이 바뀌면 `병원목록.csv`와 `기본_도시`를 바꿈
+1. 사용자가 ①(영수증 분석만)을 돌려 `영수증목록_YYYY-MM.csv`를 보내 주면, 실제 OCR 결과에 맞춰 식대 키워드와 병원 표를 채웁니다. 지금 식대 키워드는 '버터' 하나뿐이라 식당 영수증 대부분이 '분류 없음'이 될 수 있습니다.
+2. 처음 실제로 ②나 ③을 돌린 뒤 `실행기록` 폴더(기록 파일과 화면 캡처)를 받아서, 버튼을 못 찾거나 너무 빨리 넘어가는 곳을 고칩니다.
+3. 회사 Edge 보안 정책이 자동 조작을 막으면 프로그램으로는 해결할 수 없으니 IT 부서에 확인하도록 안내합니다.
+4. 기본 병원 목록은 대전·충청권이고 기본 도시는 Daejeon입니다. 담당 지역이 바뀌면 `병원목록.csv`와 설정의 `기본_도시`를 바꿉니다.
 
-## 이 클라우드 환경(Linux)에서 작업할 때
+## 이 클라우드 작업 환경(Linux)에서 작업할 때
 
-- Windows에서만 되는 것: winrt OCR, Edge(`channel="msedge"`), `os.startfile`, exe 빌드. 여기서는 실행할 수 없습니다.
-- `concur_auto.py`는 맨 위에서 표준 라이브러리만 import합니다(cv2·winrt·playwright·tkinter는 쓸 때 import). 이 구조를 유지해야 Linux에서 테스트가 돌아갑니다.
-- 테스트:
+- 여기서는 실행할 수 없는 것: Windows OCR, Edge 창 조작, 탐색기·엑셀로 파일 열기, exe 만들기. 모두 Windows PC에서만 됩니다.
+- `concur_auto.py`는 맨 위에서 Python 기본 기능만 불러오고, 사진 보정·OCR·브라우저·창 기능은 쓸 때 불러옵니다. 이 구조를 지켜야 Linux에서도 테스트가 돌아갑니다.
+- 테스트 실행:
   ```bash
   pip install -r requirements-dev.txt
+  ```
+  ```bash
   python -m pytest
   ```
-  Chromium은 `/opt/pw-browsers/chromium`을 씁니다(`PW_CHROMIUM`으로 바꿀 수 있음). `playwright install`은 하지 않습니다.
-- `requirements.txt`는 Windows용(winrt 포함)이라 Linux에서 설치하지 않습니다.
-- **이 저장소는 공개(public)입니다.** 사번이 들어간 경로, 회사 계정, 실제 영수증 사진, 개인 설정 파일(`concur_settings.json`, `병원목록.csv`, `결과/`, `실행기록/`)은 커밋하지 않습니다.
-- `build_exe.bat`는 CRLF를 유지합니다(`.gitattributes`).
+  브라우저는 이 환경에 이미 설치된 Chromium(`/opt/pw-browsers/chromium`)을 씁니다. 다른 위치를 쓰려면 환경 변수 `PW_CHROMIUM`에 경로를 넣습니다. `playwright install`은 하지 않습니다.
+- `requirements.txt`는 Windows용(Windows OCR 패키지 포함)이라 Linux에서는 설치하지 않습니다.
+- **이 저장소는 누구나 볼 수 있는 공개 저장소입니다.** 사번이 들어간 경로, 회사 계정, 실제 영수증 사진, 개인 설정 파일(`concur_settings.json`, `병원목록.csv`, `결과` 폴더, `실행기록` 폴더)은 올리지 않습니다.
+- `build_exe.bat`는 Windows 줄바꿈(CRLF)을 유지해야 합니다. `.gitattributes`에 설정해 두었습니다.
