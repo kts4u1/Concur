@@ -2,8 +2,9 @@
 """
 Concur 경비 자동 입력 (Power Automate Desktop 흐름의 Python 버전)
 
-  영수증 사진(iPhone 단축어 → iCloud 폴더, 파일명 2026-10-22_123342.jpg)
-   → (선택) 이미지 보정 → Windows OCR → 날짜·금액·분류·병원 추출
+  영수증 사진(iPhone으로 찍기만 하면 됨. iCloud 사진 폴더 또는 iCloud Drive 폴더, 파일 이름·jpg/heic 상관없음)
+   → 지난달에 찍은 사진만 고름(파일 이름 날짜 → 사진 속 촬영 날짜 → 파일 날짜 순)
+   → Windows OCR → 영수증이 아닌 사진은 뺌 → (선택) 이미지 보정 → 날짜·금액·분류·병원 추출
    → 영수증 목록(엑셀로 열어 고칠 수 있음, 고친 내용은 다음 실행에도 유지)
    → Concur: 지난달 리포트 생성 → 지난달 경비 추가 → 경비마다 영수증 첨부·필드 입력 → 저장
    제출은 하지 않습니다. 결과를 확인한 뒤 직접 제출하세요.
@@ -28,7 +29,7 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # exe를 창 모드(--noconsole)로 만들면 stdout/stderr가 없어서 Playwright가 실패하므로 대체
@@ -75,6 +76,7 @@ def default_settings():
     source = home / "iCloudDrive" / "Concur_Expenses"
     return {
         "_안내": "메모장으로 고칠 수 있습니다. 경로의 \\ 는 \\\\ 처럼 두 번 씁니다. 병원 목록은 병원목록.csv 에서 고칩니다.",
+        "_영수증_폴더_설명": "iPhone으로 찍기만 한다면 iCloud 사진 폴더(보통 사진\\iCloud Photos\\Photos)를 고릅니다. 파일 이름·형식은 상관없습니다.",
         "영수증_원본_폴더": str(source),
         "보정본_폴더": str(source / "Concur_Expenses_Processed"),
         "Concur_주소": "https://us2.concursolutions.com",
@@ -95,6 +97,8 @@ def default_settings():
             "식대": ["버터"],
         },
         "분류_우선순위": ["식대", "카페", "주차"],
+        "_영수증_판별_설명": "폴더에 일반 사진이 섞여 있어도 됩니다. 금액이 보이고 아래 글자·OCR 날짜·분류 키워드 중 하나가 있으면 영수증으로 봅니다. 아니면 영수증 목록 맨 아래에 '사용 X'로 넣습니다.",
+        "영수증_판별_단어": ["합계", "결제", "승인", "카드", "영수증", "금액", "부가세", "사업자", "매출", "가맹점", "거래", "주차"],
         "_입력_문구_설명": "{hospital} 자리에 병원 영문명. 병원을 못 찾으면 ' in {hospital}' 부분은 빠집니다.",
         "입력_문구": {
             "주차": {"Comment": "Parking fee for service in {hospital}", "Business Purpose": "For service"},
@@ -292,7 +296,8 @@ def recent_months(count: int = 12, today=None) -> list:
 # 1. 영수증 보정 (receipt_preprocess.py 와 같은 처리)
 # ============================================================
 
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+HEIC_EXTENSIONS = {".heic", ".heif"}          # iPhone 기본 사진 형식
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"} | HEIC_EXTENSIONS
 PROCESSED_SUFFIX = "_보정됨"
 
 
@@ -305,8 +310,35 @@ def _cv2():
         raise RuntimeError("opencv-python, numpy 가 필요합니다:  pip install opencv-python numpy")
 
 
+_HEIF_READY = None
+
+
+def _register_heif() -> bool:
+    """HEIC 사진을 Pillow로 열 수 있게 합니다(pillow-heif)."""
+    global _HEIF_READY
+    if _HEIF_READY is None:
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+            _HEIF_READY = True
+        except ImportError:
+            _HEIF_READY = False
+    return _HEIF_READY
+
+
 def imread_unicode(path: Path):
+    """한글 경로도 읽습니다. jpg는 사진 회전 정보를 반영하고, heic는 pillow-heif로 읽습니다."""
     cv2, np = _cv2()
+    if path.suffix.lower() in HEIC_EXTENSIONS:
+        if not _register_heif():
+            raise RuntimeError("HEIC 사진을 읽으려면 pillow-heif 가 필요합니다:  pip install -r requirements.txt")
+        try:
+            from PIL import Image
+            with Image.open(path) as im:      # 회전은 pillow-heif가 이미 반영함
+                rgb = np.asarray(im.convert("RGB"))
+            return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        except Exception:
+            return None
     try:
         return cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
     except Exception:
@@ -334,46 +366,108 @@ def preprocess_receipt(image, scale: float):
     return np.clip(sharpened, 0, 255).astype(np.uint8)
 
 
-def list_originals(cfg: dict, tm: TargetMonth) -> list:
+NAME_DATETIME = re.compile(r"(20\d{2})-(\d{2})-(\d{2})(?:[_ T]?(\d{2})(\d{2})(\d{2}))?")
+EXIF_DATETIME = re.compile(r"\s*(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})")
+
+
+def file_name_datetime(name: str):
+    """단축어로 만든 파일 이름(2026-10-22_123342.jpg)의 촬영 시각"""
+    m = NAME_DATETIME.search(name)
+    if not m:
+        return None
+    try:
+        return datetime(*(int(v) for v in m.groups() if v is not None))
+    except ValueError:
+        return None
+
+
+def exif_taken_at(path: Path):
+    """사진 속에 저장된 촬영 시각(EXIF). 읽을 수 없으면 None"""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    if path.suffix.lower() in HEIC_EXTENSIONS and not _register_heif():
+        return None
+    try:
+        with Image.open(path) as im:
+            exif = im.getexif()
+            sub = exif.get_ifd(0x8769)
+            values = [sub.get(0x9003), sub.get(0x9004), exif.get(0x0132)]   # 촬영, 디지털화, 수정 시각
+    except Exception:
+        return None
+    for v in values:
+        if isinstance(v, bytes):
+            v = v.decode("ascii", errors="ignore")
+        m = EXIF_DATETIME.match(str(v or ""))
+        if m:
+            try:
+                return datetime(*(int(x) for x in m.groups()))
+            except ValueError:
+                continue
+    return None
+
+
+def photo_taken_at(path: Path, st, cache: dict) -> datetime:
+    """촬영 시각: 파일 이름 날짜 → 사진 속 촬영 시각 → 파일 수정 시각"""
+    from_name = file_name_datetime(path.name)
+    if from_name:
+        return from_name
+    c = cache.get(path.name)
+    if c and c.get("size") == st.st_size and c.get("mtime") == int(st.st_mtime):
+        try:
+            return datetime.fromisoformat(c["taken"])
+        except (KeyError, ValueError):
+            pass
+    taken = exif_taken_at(path) or datetime.fromtimestamp(st.st_mtime).replace(microsecond=0)
+    cache[path.name] = {"size": st.st_size, "mtime": int(st.st_mtime), "taken": taken.isoformat()}
+    return taken
+
+
+def list_originals(cfg: dict, tm: TargetMonth, cache=None) -> list:
+    """처리할 달에 찍은 사진 [(경로, 촬영 시각), ...] — 촬영 순서대로"""
     source = Path(cfg["영수증_원본_폴더"])
     if not source.is_dir():
         raise RuntimeError(f"영수증 폴더가 없습니다: {source}")
-    return sorted(
-        (p for p in source.iterdir()
-         if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
-         and not p.stem.endswith(PROCESSED_SUFFIX) and p.stem.startswith(tm.prefix + "-")),
-        key=lambda p: p.name.lower(),
-    )
+    cache = {} if cache is None else cache
+    start = datetime(tm.year, tm.month, 1)
+    end = datetime(tm.year + 1, 1, 1) if tm.month == 12 else datetime(tm.year, tm.month + 1, 1)
+    too_old = start - timedelta(days=2)
+    found = []
+    for p in source.iterdir():
+        if not (p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS) or p.name.startswith("."):
+            continue
+        if p.stem.endswith(PROCESSED_SUFFIX):
+            continue
+        st = p.stat()
+        # 파일 수정 시각은 촬영 시각과 같거나 늦으므로, 처리할 달보다 앞이면 열어 볼 필요가 없음
+        if not file_name_datetime(p.name) and datetime.fromtimestamp(st.st_mtime) < too_old:
+            continue
+        taken = photo_taken_at(p, st, cache)
+        if start <= taken < end:
+            found.append((p, taken))
+    return sorted(found, key=lambda x: (x[1], x[0].name.lower()))
 
 
 def processed_path(cfg: dict, original: Path) -> Path:
     return Path(cfg["보정본_폴더"]) / f"{original.stem}{PROCESSED_SUFFIX}.png"
 
 
-def preprocess_month(cfg: dict, originals: list, log: Log):
+def preprocess_one(cfg: dict, original: Path, out: Path, log: Log) -> str:
+    """영수증 한 장 보정 → 'made' 또는 'failed'"""
     cv2, _ = _cv2()
-    Path(cfg["보정본_폴더"]).mkdir(parents=True, exist_ok=True)
-    made = skipped = failed = 0
-    for p in originals:
-        out = processed_path(cfg, p)
-        if out.exists():
-            skipped += 1
-            continue
-        img = imread_unicode(p)
-        if img is None:
-            failed += 1
-            log(f"   읽기 실패: {p.name}")
-            continue
-        try:
-            if imwrite_unicode(out, preprocess_receipt(img, float(cfg["보정_확대_배율"])), ".png",
-                               [cv2.IMWRITE_PNG_COMPRESSION, 3]):
-                made += 1
-            else:
-                failed += 1
-        except Exception as e:
-            failed += 1
-            log(f"   보정 실패: {p.name} ({e})")
-    log(f"   보정: 새로 {made}장 / 이미 있음 {skipped}장 / 실패 {failed}장")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    img = imread_unicode(original)
+    if img is None:
+        log(f"   읽기 실패: {original.name}")
+        return "failed"
+    try:
+        ok = imwrite_unicode(out, preprocess_receipt(img, float(cfg["보정_확대_배율"])), ".png",
+                             [cv2.IMWRITE_PNG_COMPRESSION, 3])
+    except Exception as e:
+        log(f"   보정 실패: {original.name} ({e})")
+        return "failed"
+    return "made" if ok else "failed"
 
 
 # ============================================================
@@ -400,13 +494,19 @@ class WindowsOcr:
         temp_dir.mkdir(parents=True, exist_ok=True)
 
     def _fit_size(self, path: Path) -> Path:
+        """jpg는 사진 회전 정보를 반영하고 heic는 Windows가 못 읽을 수 있어서 png로 바꿔 OCR합니다."""
         cv2, _ = _cv2()
         img = imread_unicode(path)
-        if img is None or max(img.shape[:2]) <= self.max_dim:
+        if img is None:
             return path
-        ratio = (self.max_dim - 1) / max(img.shape[:2])
+        too_big = max(img.shape[:2]) > self.max_dim
+        if path.suffix.lower() == ".png" and not too_big:
+            return path
+        if too_big:
+            ratio = (self.max_dim - 1) / max(img.shape[:2])
+            img = cv2.resize(img, None, fx=ratio, fy=ratio, interpolation=cv2.INTER_AREA)
         tmp = self.temp_dir / f"ocr_{path.stem}.png"
-        imwrite_unicode(tmp, cv2.resize(img, None, fx=ratio, fy=ratio, interpolation=cv2.INTER_AREA))
+        imwrite_unicode(tmp, img)
         return tmp
 
     async def _read(self, path: Path) -> str:
@@ -447,6 +547,8 @@ class Receipt:
     use: bool = True
     edited: list = field(default_factory=list)      # 사용자가 고친 항목
     used_for: str = ""
+    taken: object = None                            # 촬영 시각(datetime)
+    is_receipt: bool = True                         # 영수증으로 보이는지(자동 판단)
 
     @property
     def main_date(self) -> str:
@@ -529,18 +631,31 @@ def detect_hospital(text_compact: str, mapping: list) -> tuple:
     return best
 
 
-def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, hospitals: list) -> Receipt:
-    rec = Receipt(original=original, ocr_file=ocr_file, ocr_text=ocr_text)
+def looks_like_receipt(text_compact: str, amounts: list, has_ocr_date: bool, category: str, words) -> bool:
+    """금액이 있고 (영수증 글자 / OCR 날짜 / 분류 키워드) 중 하나가 있으면 영수증.
+    금액을 못 읽었어도 영수증 글자가 두 개 이상이면 영수증으로 봅니다."""
+    hits = sum(1 for w in (words or []) if w and w in text_compact)
+    if amounts and (hits or has_ocr_date or category):
+        return True
+    return hits >= 2
+
+
+def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, hospitals: list,
+                    taken=None) -> Receipt:
+    rec = Receipt(original=original, ocr_file=ocr_file, ocr_text=ocr_text, taken=taken)
     rec.dates = find_ocr_dates(ocr_text)
     rec.date_from_ocr = bool(rec.dates)
-    fdate = file_name_date(original.name)
+    fdate = taken.date().isoformat() if taken else file_name_date(original.name)
     if fdate and fdate not in rec.dates:
-        rec.dates.append(fdate)          # OCR이 날짜를 못 읽으면 파일명 날짜 사용
+        rec.dates.append(fdate)          # OCR이 날짜를 못 읽으면 촬영 날짜 사용
     rec.amounts = find_amounts(ocr_text)
     rec.total = max(rec.amounts) if rec.amounts else 0
     text_c = compact(ocr_text)
     rec.category = detect_category(text_c, cfg["키워드"], cfg.get("분류_우선순위"))
     rec.hospital_key, rec.hospital_en = detect_hospital(text_c, hospitals)
+    rec.is_receipt = looks_like_receipt(text_c, rec.amounts, rec.date_from_ocr, rec.category,
+                                        cfg.get("영수증_판별_단어"))
+    rec.use = rec.is_receipt
     return rec
 
 
@@ -549,7 +664,7 @@ def receipt_issues(rec: Receipt, receipts: list) -> list:
     if not rec.use:
         return issues
     if not rec.date_from_ocr and "날짜" not in rec.edited:
-        issues.append("날짜 못 읽음(파일명 날짜 사용)")
+        issues.append("날짜 못 읽음(촬영 날짜 사용)")
     if not rec.total:
         issues.append("금액 못 읽음")
     if not rec.category:
@@ -567,19 +682,33 @@ def duplicate_count(rec: Receipt, receipts: list) -> int:
 
 # ---------- 영수증 목록 (엑셀로 고치면 다음 실행에도 유지) ----------
 
-LIST_HEADER = ["파일", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "확인 필요", "OCR 앞부분",
-               "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문", "날짜 후보", "금액 후보", "찾은 병원 글자"]
+LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "확인 필요", "OCR 앞부분",
+               "[자동] 사용", "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문",
+               "날짜 후보", "금액 후보", "찾은 병원 글자"]
+NOT_RECEIPT_NOTE = "영수증 아닌 것 같음(자동 제외)"
 
 
 def list_csv_path(results_dir: Path, tm: TargetMonth) -> Path:
     return results_dir / f"영수증목록_{tm.prefix}.csv"
 
 
+def parse_use_cell(text: str, default: bool) -> bool:
+    t = (text or "").strip().upper()
+    if t in ("X", "N", "NO", "아니오", "제외"):
+        return False
+    if t in ("O", "Y", "YES", "예", "사용"):
+        return True
+    return default
+
+
 def apply_user_edits(rec: Receipt, row: dict):
     """'[자동]' 칸과 다르게 바뀐 칸만 사용자가 고친 것으로 보고 반영합니다."""
     g = lambda k: str(row.get(k) or "").strip()
-    if g("사용(O/X)").upper() in ("X", "N", "NO", "아니오", "제외"):
-        rec.use = False
+    user_use = parse_use_cell(g("사용(O/X)"), rec.use)
+    auto_use = parse_use_cell(g("[자동] 사용"), True)     # 예전 목록에는 이 칸이 없음 → O로 봄
+    if user_use != auto_use:
+        rec.use = user_use
+        rec.edited.append("사용")
     user_date, auto_date = parse_date_cell(g("날짜")), parse_date_cell(g("[자동] 날짜"))
     if user_date and user_date != auto_date:
         rec.dates, rec.edited = [user_date], rec.edited + ["날짜"]
@@ -594,58 +723,95 @@ def apply_user_edits(rec: Receipt, row: dict):
         rec.edited.append("병원")
 
 
+def is_auto_excluded(rec: Receipt) -> bool:
+    return not rec.is_receipt and not rec.use
+
+
 def save_receipt_list(receipts: list, auto: dict, path: Path):
     rows = []
-    for r in receipts:
+    order = sorted(receipts, key=lambda r: (is_auto_excluded(r), r.taken or datetime.min, r.original.name.lower()))
+    for r in order:
         a = auto[r.original.name]
+        issues = receipt_issues(r, receipts) or ([NOT_RECEIPT_NOTE] if is_auto_excluded(r) else [])
         rows.append([
-            r.original.name, "O" if r.use else "X", r.main_date, r.total or "", r.category, r.hospital_en,
-            ", ".join(receipt_issues(r, receipts)), compact(r.ocr_text)[:100],
-            a.main_date, a.total or "", a.category, a.hospital_en,
+            r.original.name, f"{r.taken:%Y-%m-%d %H:%M}" if r.taken else "",
+            "O" if r.use else "X", r.main_date, r.total or "", r.category, r.hospital_en,
+            ", ".join(issues), compact(r.ocr_text)[:100],
+            "O" if a.use else "X", a.main_date, a.total or "", a.category, a.hospital_en,
             " ".join(a.dates), " ".join(str(x) for x in a.amounts), a.hospital_key,
         ])
     write_csv(path, LIST_HEADER, rows)
 
 
+def _load_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_json(path: Path, data: dict):
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
 def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Path, work_dir: Path, log: Log) -> list:
-    originals = list_originals(cfg, tm)
-    log(f"영수증 {tm.prefix}: {len(originals)}장")
+    date_cache_path = results_dir / "photo_date_cache.json"
+    date_cache = _load_json(date_cache_path)
+    originals = list_originals(cfg, tm, date_cache)
+    _save_json(date_cache_path, date_cache)
+    log(f"{tm.prefix}에 찍은 사진: {len(originals)}장")
     if not originals:
         return []
     use_pre = bool(cfg.get("영수증_보정_사용", True))
-    if use_pre:
-        preprocess_month(cfg, originals, log)
 
     cache_path = results_dir / "ocr_cache.json"
-    try:
-        cache = json.loads(cache_path.read_text(encoding="utf-8"))
-    except Exception:
-        cache = {}
+    cache = _load_json(cache_path)
+    engine = []
+    counts = {"made": 0, "failed": 0}
 
-    ocr = None
+    def read_text(path: Path, st) -> str:
+        c = cache.get(path.name)
+        if c and c.get("size") == st.st_size and c.get("mtime") == int(st.st_mtime) and "text" in c:
+            return c["text"]
+        if not engine:
+            log("OCR 중... (사진 1장에 1~2초)")
+            engine.append(WindowsOcr(work_dir))
+        try:
+            text = engine[0].read(path)
+        except Exception as e:
+            log(f"   OCR 실패: {path.name} ({e})")
+            text = ""
+        cache[path.name] = {"size": st.st_size, "mtime": int(st.st_mtime), "text": text}
+        return text
+
     auto, receipts = {}, []
-    for i, orig in enumerate(originals, 1):
-        ocr_file = processed_path(cfg, orig) if use_pre and processed_path(cfg, orig).exists() else orig
-        st = orig.stat()
-        key = orig.name
-        c = cache.get(key)
-        if c and c.get("size") == st.st_size and c.get("mtime") == int(st.st_mtime) and c.get("ocr_file") == ocr_file.name:
-            text = c["text"]
-        else:
-            if ocr is None:
-                log("OCR 중... (영수증 1장에 1~2초)")
-                ocr = WindowsOcr(work_dir)
-            try:
-                text = ocr.read(ocr_file)
-            except Exception as e:
-                log(f"   OCR 실패: {orig.name} ({e})")
-                text = ""
-            cache[key] = {"size": st.st_size, "mtime": int(st.st_mtime), "ocr_file": ocr_file.name, "text": text}
-        a = analyze_receipt(orig, ocr_file, text, cfg, hospitals)
-        auto[key] = a
-        rec = analyze_receipt(orig, ocr_file, text, cfg, hospitals)
-        receipts.append(rec)
-    cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    try:
+        for orig, taken in originals:
+            st = orig.stat()
+            ocr_file, text = orig, read_text(orig, st)
+            first_is_receipt = analyze_receipt(orig, orig, text, cfg, hospitals, taken).is_receipt
+            # 보정은 영수증으로 보이는 사진만 (일반 사진까지 보정하면 느리고 용량이 큼)
+            if use_pre and first_is_receipt:
+                out = processed_path(cfg, orig)
+                if not out.exists():
+                    counts[preprocess_one(cfg, orig, out, log)] += 1
+                if out.exists():
+                    better = read_text(out, st)
+                    if better.strip():
+                        ocr_file, text = out, better
+
+            def analyze():
+                r = analyze_receipt(orig, ocr_file, text, cfg, hospitals, taken)
+                if first_is_receipt and not r.is_receipt:
+                    r.is_receipt = r.use = True
+                return r
+
+            auto[orig.name] = analyze()
+            receipts.append(analyze())
+    finally:
+        _save_json(cache_path, cache)       # 중간에 멈춰도 읽은 결과는 남김
+    if counts["made"] or counts["failed"]:
+        log(f"   보정: 새로 {counts['made']}장 / 실패 {counts['failed']}장")
 
     list_path = list_csv_path(results_dir, tm)
     if list_path.exists():
@@ -661,11 +827,16 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
     except PermissionError:
         raise RuntimeError(f"영수증 목록 파일이 엑셀에 열려 있습니다. 엑셀을 닫고 다시 실행하세요.\n{list_path}")
 
+    excluded = sum(1 for r in receipts if is_auto_excluded(r))
     for rec in receipts:
+        if is_auto_excluded(rec):
+            continue
         flag = "" if rec.use else "  [사용 안 함]"
         edited = f"  (고침: {', '.join(rec.edited)})" if rec.edited else ""
         log(f"   {rec.original.name} | {rec.main_date or '-'} | {rec.total:,}원 | {rec.category or '분류없음'} | "
             f"{rec.hospital_en or '병원없음'}{edited}{flag}")
+    if excluded:
+        log(f"   영수증이 아닌 것 같은 사진 {excluded}장은 뺐습니다. (영수증 목록 맨 아래에 '사용 X'로 있음)")
     return receipts
 
 
@@ -710,14 +881,17 @@ def texts_for(rec: Receipt, cfg: dict) -> dict:
 
 
 def prepare_upload_file(rec: Receipt, cfg: dict, work_dir: Path) -> Path:
-    """원본(기본) 또는 보정본을 고르고, 5MB를 넘으면 JPEG로 줄인 사본을 만듭니다."""
+    """원본(기본) 또는 보정본을 고르고, 5MB를 넘거나 HEIC면 JPEG 사본을 만듭니다."""
     cv2, _ = _cv2()
     src = rec.ocr_file if str(cfg.get("업로드_이미지", "원본")).strip() == "보정본" else rec.original
     limit = float(cfg.get("업로드_최대_MB", 5)) * 1024 * 1024
-    if src.stat().st_size <= limit:
+    must_convert = src.suffix.lower() in HEIC_EXTENSIONS     # Concur가 HEIC를 못 받을 수 있음
+    if not must_convert and src.stat().st_size <= limit:
         return src
     img = imread_unicode(src)
     if img is None:
+        if must_convert:
+            raise RuntimeError(f"HEIC 사진을 JPEG로 바꾸지 못했습니다: {src.name}")
         return src
     work_dir.mkdir(parents=True, exist_ok=True)
     out = work_dir / f"{src.stem}_업로드용.jpg"
@@ -1121,17 +1295,21 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log)
         list_path = list_csv_path(results_dir, tm)
         need = [r for r in receipts if receipt_issues(r, receipts)]
-        log(f"영수증 {len(receipts)}장 분석 완료, 확인 필요 {len(need)}장 → {list_path.name}")
+        used = [r for r in receipts if r.use]
+        skipped = [r for r in receipts if is_auto_excluded(r)]
+        log(f"영수증 {len(used)}장 분석 완료(영수증이 아니라서 뺀 사진 {len(skipped)}장), 확인 필요 {len(need)}장 → {list_path.name}")
 
         if mode == "ocr":
             if receipts and cfg.get("결과_자동_열기", True):
                 ui.open(list_path)
             ui.info("영수증 분석 완료",
-                    f"영수증 {len(receipts)}장 중 확인 필요 {len(need)}장입니다.\n\n"
-                    f"영수증 목록 파일에서 날짜·금액·분류·병원을 고치거나 '사용'을 X로 바꿀 수 있습니다.\n"
-                    f"저장하면 다음 실행 때 고친 내용이 그대로 쓰입니다.")
+                    f"영수증 {len(used)}장 중 확인 필요 {len(need)}장입니다.\n"
+                    + (f"영수증이 아닌 것 같아 뺀 사진 {len(skipped)}장은 목록 맨 아래에 있습니다.\n" if skipped else "")
+                    + "\n"
+                    + "영수증 목록 파일에서 날짜·금액·분류·병원을 고치거나 '사용'을 O/X로 바꿀 수 있습니다.\n"
+                    "저장하면 다음 실행 때 고친 내용이 그대로 쓰입니다.")
             return
-        if not receipts and not ui.confirm("영수증 없음", f"{tm.prefix} 영수증이 없습니다. 영수증 없이 경비만 처리할까요?"):
+        if not used and not ui.confirm("영수증 없음", f"{tm.prefix} 영수증이 없습니다. 영수증 없이 경비만 처리할까요?"):
             raise Cancelled()
 
         if need and cfg.get("입력_전_확인", True):
@@ -1258,6 +1436,7 @@ class GuiApp:
             ttk.Button(sf, text=text, command=cmd).pack(side="left", padx=3)
 
         ttk.Label(f, foreground="#555", wraplength=760, justify="left", text=(
+            "영수증 폴더는 iCloud 사진 폴더나 iCloud Drive 폴더 모두 됩니다. 파일 이름·형식은 상관없고, 영수증이 아닌 사진은 자동으로 뺍니다.\n"
             "처음에는 ①로 OCR 결과를 확인하세요. 영수증 목록(엑셀)에서 고친 내용은 다음 실행에도 그대로 쓰입니다.\n"
             "②③ 실행 중에는 열린 Edge 창을 클릭하지 마세요. 다른 프로그램은 써도 됩니다. 제출은 직접 하세요."
         )).grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 6))
@@ -1270,6 +1449,7 @@ class GuiApp:
         root.after(100, self.poll)
         if created:
             self.append("처음 실행입니다. 영수증 폴더·기본 도시를 확인하고, [병원 목록 편집]에서 담당 병원을 넣어 주세요.")
+            self.append("iPhone으로 찍기만 한다면 영수증 폴더로 iCloud 사진 폴더(보통 사진\\iCloud Photos\\Photos)를 고르세요.")
             self.append("기본 병원 목록은 대전·충청권입니다. 짧은 글자는 다른 병원에도 걸립니다(예: '남대'는 '전남대'에도 맞음).")
 
     # ---------- 화면 동작 ----------

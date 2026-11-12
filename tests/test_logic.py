@@ -70,7 +70,7 @@ def test_analyze_receipt_falls_back_to_file_name_date():
     rec = ca.analyze_receipt(p, p, "건양대병원 주차 입차 3,000원", ca.default_settings(), ca.DEFAULT_HOSPITALS)
     assert rec.dates == ["2026-10-22"] and not rec.date_from_ocr
     assert (rec.total, rec.category, rec.hospital_en) == (3000, "주차", "KYUH")
-    assert ca.receipt_issues(rec, [rec]) == ["날짜 못 읽음(파일명 날짜 사용)"]
+    assert ca.receipt_issues(rec, [rec]) == ["날짜 못 읽음(촬영 날짜 사용)"]
 
 
 def test_analyze_receipt_ocr_date_comes_first():
@@ -116,7 +116,7 @@ def test_edits_exclude_category_hospital():
     ca.apply_user_edits(rec, _row(**{"사용(O/X)": "x", "분류": "식대", "병원 영문": ""}))
     assert rec.use is False
     assert rec.category == "식대" and rec.hospital_en == ""
-    assert rec.edited == ["분류", "병원"]
+    assert rec.edited == ["사용", "분류", "병원"]
 
 
 def test_edits_unknown_category_becomes_empty():

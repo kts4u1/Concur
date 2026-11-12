@@ -5,7 +5,7 @@ echo [1/2] 필요한 패키지 설치
 python -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 goto :fail
 echo [2/2] exe 만들기
-python -m PyInstaller --onefile --noconsole --name ConcurAuto --collect-all playwright concur_auto.py
+python -m PyInstaller --onefile --noconsole --name ConcurAuto --collect-all playwright --collect-all pillow_heif concur_auto.py
 if errorlevel 1 goto :fail
 echo.
 echo 완료: dist\ConcurAuto.exe
