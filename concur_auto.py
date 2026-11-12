@@ -46,7 +46,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 도시 찾기 보강"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 항목 고르기·빠른 입력"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -119,6 +119,9 @@ DEFAULT_ELEMENT_LABELS = {
     "Comment": "Comment|코멘트|의견",
     "Business Purpose": "Business Purpose|비즈니스 목적|업무 목적",
 }
+
+# 사용자 Concur의 Expense Type(화면에서 확인한 것). [화면 조사]가 Concur에서 전체 목록을 읽어 설정에 더합니다.
+KNOWN_EXPENSE_TYPES = ["Car mileage", "Meals & Drinks", "Other", "Other Staff Expenses", "Parking & Toll", "Training"]
 
 OLD_DEFAULT_CITY = "Daejeon (ex Taejon), KOREA, REPUBLIC OF"
 DEFAULT_CITIES = {
@@ -253,6 +256,10 @@ def default_settings():
             "NA": "NA",
             "Undefined": "Undefined",
         },
+        "_Concur_경비_유형_설명": "자동 입력 편집 창에서 고를 Concur Expense Type 목록. [화면 조사]를 경비 편집 화면에서 하면 Concur의 전체 목록을 읽어 여기에 더합니다.",
+        "Concur_경비_유형": list(KNOWN_EXPENSE_TYPES),
+        "_글자_입력_설명": "'한꺼번에': Comment 같은 글을 한 번에 넣습니다(칸이 안 받으면 한 글자씩). '한 글자씩': 예전처럼 한 글자씩 칩니다(느리지만 Concur가 글을 못 받을 때).",
+        "글자_입력_방식": "한꺼번에",
         "_화면_요소_설명": "Concur 화면의 입력칸 위치(CSS 선택자). Concur가 바뀌어 칸을 못 찾으면 창의 [화면 조사]로 만든 파일의 id·name을 보고 여기를 고칩니다. 예: 입력칸 id가 txtComment면 \"#txtComment\". 쉼표로 여러 개를 적으면 그중 하나를 찾습니다.",
         "화면_요소": dict(DEFAULT_ELEMENTS),
         "_화면_요소_라벨_설명": "위치로 못 찾을 때 화면에 보이는 칸 이름(라벨)으로 찾습니다. '|'로 여러 개.",
@@ -819,6 +826,17 @@ def category_problems(rows: list) -> list:
                 problems.append(f"'{k}' 글자가 '{owner[k]}'와 '{name}'에 다 있습니다(위쪽 '{owner[k]}'로 맞춰집니다).")
             owner.setdefault(k, name)
     return problems
+
+
+def remember_expense_types(settings_path: Path, types: list) -> int:
+    """Concur에서 읽은 Expense Type을 설정 'Concur_경비_유형'에 더합니다(편집 창에서 고르기용). → 새로 더한 수"""
+    cfg, _ = load_settings(settings_path)
+    known = list(cfg.get("Concur_경비_유형") or [])
+    new = [t for t in types if t and t not in known and t.lower() != "undefined"]
+    if new:
+        cfg["Concur_경비_유형"] = known + new
+        save_settings(settings_path, cfg)
+    return len(new)
 
 
 def add_expense_types_to_table(path: Path, types: list, cfg: dict) -> int:
@@ -2146,12 +2164,22 @@ class ConcurBot:
             locator.evaluate("el => el.click()")
 
     def type_text(self, locator, text: str):
+        """칸에 글을 넣습니다. 한꺼번에 넣고(fill), 칸이 받지 않으면 한 글자씩 칩니다.
+        설정 '글자_입력_방식'이 '한 글자씩'이면 처음부터 한 글자씩(예전 방식, 한 글자에 0.01초)."""
         locator.wait_for(state="visible")
         locator.click()
-        locator.press("Control+A")
-        locator.press("Delete")
-        if text:
-            locator.press_sequentially(text, delay=15)
+        typed = False
+        if str(self.cfg.get("글자_입력_방식", "한꺼번에")).strip() != "한 글자씩":
+            try:
+                locator.fill(text)
+                typed = locator.input_value() == text
+            except Exception:
+                typed = False
+        if not typed:
+            locator.press("Control+A")
+            locator.press("Delete")
+            if text:
+                locator.press_sequentially(text, delay=10)
         locator.press("Tab")
 
     def find_select(self, css: str):
@@ -2887,16 +2915,17 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
                 made.append(path)
                 log(f"화면 조사 파일: {path.name} (같은 이름의 .png 화면 캡처도 있습니다)")
                 if bot.last_expense_types:
-                    added = add_expense_types_to_table(base / CATEGORY_FILE_NAME, bot.last_expense_types, cfg)
-                    types_added += added
-                    log(f"Concur Expense Type {len(bot.last_expense_types)}개를 읽어 자동 입력표에 새로 {added}줄 더했습니다.")
+                    added = remember_expense_types(base / SETTINGS_FILE_NAME, bot.last_expense_types)
+                    types_added += len(bot.last_expense_types)
+                    log(f"Concur Expense Type {len(bot.last_expense_types)}개를 읽었습니다(새로 {added}개). "
+                        "자동 입력 편집 창의 항목 이름 목록에서 고를 수 있습니다.")
             if made:
                 ui.open(log.folder)
                 ui.info("화면 조사", f"화면 조사 파일 {len(made)}개를 '실행기록' 폴더에 만들었습니다.\n"
                                    "'없음'으로 나온 칸은 이 파일의 id·name을 보고 설정 파일의 '화면_요소'를 고치거나, "
                                    "파일을 Claude에게 보내 고쳐 달라고 하세요."
-                                   + (f"\n\nConcur Expense Type {types_added}개를 자동 입력표에 더했습니다. "
-                                      "쓰는 항목만 '영수증에서 찾을 글자'·Comment·Business Purpose를 채우면 됩니다." if types_added else ""))
+                                   + (f"\n\nConcur Expense Type {types_added}개를 읽었습니다. "
+                                      "[자동 입력 편집]의 [새 항목]이나 항목 이름 목록에서 고르면 됩니다." if types_added else ""))
         except Cancelled:
             log("중단했습니다.")
         except Exception as e:
@@ -3278,6 +3307,8 @@ class CategoryEditor:
         self.path = app.base / CATEGORY_FILE_NAME
         cfg, _ = load_settings(app.base / SETTINGS_FILE_NAME)
         self.rows, self.default_type = load_category_rows(self.path, cfg)
+        self.type_choices = sorted(set(cfg.get("Concur_경비_유형") or KNOWN_EXPENSE_TYPES)
+                                   | {r[4] for r in self.rows if r[4]} | {self.default_type}, key=str.lower)
         self.current, self.visible, self.dirty, self.loading = None, [], False, False
 
         win = self.win = tk.Toplevel(app.root)
@@ -3327,8 +3358,9 @@ class CategoryEditor:
         right.grid(row=1, column=1, sticky="nsew")
         right.columnconfigure(1, weight=1)
         self.vars = {}
-        types = sorted({r[4] for r in self.rows if r[4]} | {self.default_type}, key=str.lower)
-        fields = (("name", "항목 이름", "영수증 목록의 '분류' 칸에 보이는 이름. Concur 항목 이름을 그대로 써도 됩니다."),
+        types = self.type_choices
+        fields = (("name", "항목 이름", "▼를 눌러 Concur 항목을 고르세요(직접 적어도 됩니다). 고르면 아래 Expense Type도 같이 채워집니다. "
+                   "목록에 없는 항목은 Concur 경비 편집 화면에서 [화면 조사]를 하면 읽어 옵니다."),
                   ("keywords", "영수증에서 찾을 글자", "영수증에 이 글자가 있으면 이 항목. 쉼표로 여러 개. 예: 통행료, 톨게이트, 하이패스"),
                   ("comment", "Comment", "{hospital} 자리에 병원 영문명이 들어갑니다. 예: Toll fee for service in {hospital}"),
                   ("purpose", "Business Purpose", "예: For service"),
@@ -3340,6 +3372,9 @@ class CategoryEditor:
             if key == "etype":
                 w = ttk.Combobox(right, textvariable=var, values=types)
                 w.bind("<<ComboboxSelected>>", lambda e: self.on_edit())
+            elif key == "name":
+                w = self.name_box = ttk.Combobox(right, textvariable=var, values=types)
+                w.bind("<<ComboboxSelected>>", lambda e: self.on_name_picked())
             else:
                 w = ttk.Entry(right, textvariable=var)
             w.grid(row=r, column=1, sticky="ew", pady=(6, 0))
@@ -3433,15 +3468,64 @@ class CategoryEditor:
         self.dirty = True
         self.win.title("자동 입력 편집 *")
 
+    def on_name_picked(self):
+        """항목 이름을 Concur 목록에서 고르면 Expense Type도 같은 이름으로(비어 있거나 예전 이름과 같을 때)"""
+        if self.current is None:
+            return
+        name = self.vars["name"].get().strip()
+        old_name, etype = self.rows[self.current][0], self.vars["etype"].get().strip()
+        if name in self.type_choices and (not etype or etype == old_name):
+            self.vars["etype"].set(name)
+        self.on_edit()
+
     def add(self):
-        at = self.current + 1 if self.current is not None else 0
-        self.rows.insert(at, ["새 항목", "", "", "", "", ""])
-        self.current = at
+        """[새 항목]: Concur 항목 목록에서 고르는 작은 창"""
+        tk, ttk = self.tk, self.app.ttk
+        dlg = tk.Toplevel(self.win)
+        dlg.title("새 항목")
+        dlg.geometry("420x460")
+        dlg.transient(self.win)
+        frame = ttk.Frame(dlg, padding=10)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Concur 항목을 고르세요. (✓ = 이미 있는 항목)").pack(anchor="w")
+        used = {r[0] for r in self.rows} | {r[4] for r in self.rows if r[1].strip()}
+        box = tk.Listbox(frame, height=14, exportselection=False, font=("Malgun Gothic", 10))
+        box.pack(fill="both", expand=True, pady=6)
+        for t in self.type_choices:
+            box.insert("end", f"{'✓ ' if t in used else '   '}{t}")
+        ttk.Label(frame, text="목록에 없으면 직접 적기 (예: 톨게이트)").pack(anchor="w")
+        custom = tk.StringVar()
+        ttk.Entry(frame, textvariable=custom).pack(fill="x", pady=(2, 8))
+
+        def ok(_=None):
+            name = custom.get().strip()
+            if not name and box.curselection():
+                name = self.type_choices[box.curselection()[0]]
+            if name:
+                dlg.destroy()
+                self.add_named(name)
+
+        box.bind("<Double-Button-1>", ok)
+        bf = ttk.Frame(frame)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="취소", command=dlg.destroy).pack(side="right", padx=3)
+        ttk.Button(bf, text="추가", command=ok).pack(side="right", padx=3)
+        self.add_dialog = dlg
+        return dlg
+
+    def add_named(self, name: str):
+        """이름으로 항목을 더하고 고릅니다. Concur 항목이면 Expense Type도 같은 이름으로."""
+        existing = next((i for i, r in enumerate(self.rows) if r[0] == name), None)
+        if existing is None:
+            at = self.current + 1 if self.current is not None else 0
+            self.rows.insert(at, [name, "", "", "", name if name in self.type_choices else "", ""])
+            existing = at
+            self.mark_dirty()
+        self.current = existing
         self.filter.set("")
         self.only_on.set(False)
         self.refresh_list()
-        self.select_visible(self.visible.index(at))
-        self.mark_dirty()
+        self.select_visible(self.visible.index(existing))
 
     def remove(self):
         if self.current is None:

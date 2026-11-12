@@ -124,3 +124,10 @@ def test_wait_until_closed_waits_while_window_open(browser):
     page.wait_for_timeout = wait_then_user_closes
     bot.wait_until_closed()
     assert checks["n"] == 3                 # 창이 열려 있는 동안은 계속 기다림
+
+
+def test_remember_expense_types_in_settings(tmp_path):
+    s = tmp_path / ca.SETTINGS_FILE_NAME
+    assert ca.remember_expense_types(s, ["Car mileage", "Taxi", "Hotel", "Undefined"]) == 2
+    assert ca.load_settings(s)[0]["Concur_경비_유형"][-2:] == ["Taxi", "Hotel"]
+    assert ca.remember_expense_types(s, ["Taxi"]) == 0

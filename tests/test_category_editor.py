@@ -81,8 +81,7 @@ def test_editor_window(tmp_path):
         ed.refresh_list()
         ed.select_visible([ed.rows[i][0] for i in ed.visible].index("Fuel"))
         ed.remove()
-        ed.add()
-        ed.vars["name"].set("주유")
+        ed.add_named("주유")
         ed.vars["keywords"].set("주유, 휘발유")
         ed.vars["comment"].set("Fuel for service")
         ed.on_edit()
@@ -92,5 +91,51 @@ def test_editor_window(tmp_path):
         assert rows[2][1] == "택시, 콜택시"
         ed.close()
         assert not ed.win.winfo_exists()
+    finally:
+        app.root.destroy()
+
+
+def find_button(widget, text):
+    for child in widget.winfo_children():
+        if getattr(child, "cget", None) and child.winfo_class() in ("TButton", "Button") and child.cget("text") == text:
+            return child
+        found = find_button(child, text)
+        if found is not None:
+            return found
+    return None
+
+
+@pytest.mark.skipif(tkinter is None, reason="창을 띄울 화면이 없음")
+def test_pick_names_and_types_from_concur_list(tmp_path):
+    cfg = ca.default_settings()
+    cfg["Concur_경비_유형"] = ca.KNOWN_EXPENSE_TYPES + ["Taxi"]           # [화면 조사]로 읽어 온 것처럼
+    ca.save_settings(tmp_path / ca.SETTINGS_FILE_NAME, cfg)
+    app = ca.GuiApp(tmp_path)
+    try:
+        app.open_category_table()
+        ed = app.editor
+        for t in ("Car mileage", "Meals & Drinks", "Other", "Training", "Parking & Toll", "Taxi"):
+            assert t in ed.name_box.cget("values")                          # 항목 이름에서 고르기
+        etype_box = next(w for w in ed.name_box.master.winfo_children()
+                         if w.winfo_class() == "TCombobox" and w is not ed.name_box)
+        assert "Meals & Drinks" in etype_box.cget("values")                 # Expense Type에서도 같은 목록
+
+        dlg = ed.add()                                                      # [새 항목] → 고르는 창
+        box = next(w for w in dlg.winfo_children()[0].winfo_children() if w.winfo_class() == "Listbox")
+        box.selection_set(ed.type_choices.index("Taxi"))
+        find_button(dlg, "추가").invoke()
+        assert ed.rows[ed.current][:5] == ["Taxi", "", "", "", "Taxi"]      # Expense Type도 같은 이름
+        assert ed.vars["etype"].get() == "Taxi"
+
+        ed.vars["name"].set("Meals & Drinks")                                # 이름을 목록에서 바꾸면
+        ed.on_name_picked()
+        assert ed.vars["etype"].get() == "Meals & Drinks"                    # Expense Type도 따라감
+        ed.vars["etype"].set("Other")
+        ed.on_edit()
+        ed.vars["name"].set("Training")
+        ed.on_name_picked()
+        assert ed.vars["etype"].get() == "Other"                             # 직접 바꾼 Expense Type은 그대로
+        ed.dirty = False
+        ed.close()
     finally:
         app.root.destroy()
