@@ -55,7 +55,7 @@ def test_processing_this_month(tmp_path, monkeypatch):
     lines = []
     log = ca.Log(tmp_path / "log", sink=lines.append)
     try:
-        recs = ca.build_receipts(cfg, NOV, ca.DEFAULT_HOSPITALS, results, tmp_path / "w", log)
+        recs = ca.build_receipts(cfg, NOV, ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
     finally:
         log.close()
     assert "2026-10-31_200000.jpg" not in read

@@ -83,13 +83,14 @@ def test_read_hospital_names_errors(tmp_path):
 def test_import_adds_only_new_hospitals_and_keeps_user_edits(tmp_path):
     xlsx = make_excel(tmp_path / "mr.xlsx")
     csv_path = tmp_path / ca.HOSPITAL_FILE_NAME
+    ca.write_csv(csv_path, ca.HOSPITAL_HEADER, [["건양대", "Konyang University Hospital", "직접 넣음"]])
     cfg = {"병원_엑셀_파일": str(xlsx), "병원_엑셀_탭": "MR System Information", "병원_엑셀_열": ""}
     lines = []
     assert ca.import_hospitals_from_excel(cfg, csv_path, lines.append) == (4, 3)   # 건양대는 이미 있음
     rows = ca.load_hospital_rows(csv_path)
-    added = {r[0]: r for r in rows[len(ca.DEFAULT_HOSPITALS):]}
+    added = {r[0]: r for r in rows[1:]}
     assert added["원광대"][1] == "Wongwang University Hospital" and "자동 변환" in added["원광대"][2]
-    assert [r[1] for r in rows if r[0] == "건양대"] == ["KYUH"]
+    assert [r[1] for r in rows if r[0] == "건양대"] == ["Konyang University Hospital"]
     assert "병원 엑셀: 4곳 읽음, 병원 목록에 새로 3곳 추가" in lines[0]
 
     # 사용자가 영문 이름을 고친 뒤 다시 가져와도 그대로
@@ -109,6 +110,7 @@ def test_import_without_file_setting_does_nothing(tmp_path):
 def test_imported_hospital_is_found_on_receipt(tmp_path):
     xlsx = make_excel(tmp_path / "mr.xlsx")
     csv_path = tmp_path / ca.HOSPITAL_FILE_NAME
+    ca.write_csv(csv_path, ca.HOSPITAL_HEADER, [["건양대", "Konyang University Hospital", "직접 넣음"]])
     ca.import_hospitals_from_excel({"병원_엑셀_파일": str(xlsx)}, csv_path, lambda s: None)
     p = Path("IMG_0001.JPG")
     rec = ca.analyze_receipt(p, p, "원광대학교병원 주차장 입차 출차 3,000원", ca.default_settings(),
@@ -122,6 +124,7 @@ def test_run_job_imports_excel(tmp_path):
     src.mkdir()
     base = tmp_path / "app"
     base.mkdir()
+    ca.write_csv(base / ca.HOSPITAL_FILE_NAME, ca.HOSPITAL_HEADER, [["건양대", "Konyang University Hospital", "직접 넣음"]])
     ca.save_settings(base / ca.SETTINGS_FILE_NAME,
                      {"영수증_원본_폴더": str(src), "결과_자동_열기": False, "병원_엑셀_파일": str(xlsx)})
 
@@ -207,7 +210,7 @@ def test_receipt_list_shows_hospital_source(tmp_path, monkeypatch):
     results.mkdir()
     log = ca.Log(tmp_path / "log", sink=lambda s: None)
     try:
-        recs = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), ca.DEFAULT_HOSPITALS, results, tmp_path / "w", log)
+        recs = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
     finally:
         log.close()
     assert [(r.hospital_en, r.hospital_src) for r in recs] == [("KYUH", "영수증 글자"), ("KYUH", "같은 날 영수증")]

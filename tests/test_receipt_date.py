@@ -11,7 +11,7 @@ OCT = ca.TargetMonth(2026, 10)
 
 def placed(text, taken, name="IMG_0001.JPG"):
     p = Path(name)
-    rec = ca.analyze_receipt(p, p, text, ca.default_settings(), ca.DEFAULT_HOSPITALS, taken)
+    rec = ca.analyze_receipt(p, p, text, ca.default_settings(), ca.OLD_DEFAULT_HOSPITALS, taken)
     ca.place_in_month(rec, OCT)
     return rec
 
@@ -73,7 +73,7 @@ def test_writing_a_date_brings_receipt_back(tmp_path, monkeypatch):
     results.mkdir()
     log = ca.Log(tmp_path / "log", sink=lambda s: None)
     try:
-        ca.build_receipts(cfg, OCT, ca.DEFAULT_HOSPITALS, results, tmp_path / "w", log)
+        ca.build_receipts(cfg, OCT, ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
         list_path = ca.list_csv_path(results, OCT)
         rows = ca.read_csv_dicts(list_path)
         assert [(r["파일"], r["사용(O/X)"], r["확인 필요"]) for r in rows] == [
@@ -84,7 +84,7 @@ def test_writing_a_date_brings_receipt_back(tmp_path, monkeypatch):
         rows[1]["날짜"] = "2026-10-20"          # 영수증 아님으로 빠졌던 것도 날짜를 적으면 영수증으로 봄
         ca.write_csv(list_path, ca.LIST_HEADER, [[r[h] for h in ca.LIST_HEADER] for r in rows])
 
-        recs = ca.build_receipts(cfg, OCT, ca.DEFAULT_HOSPITALS, results, tmp_path / "w", log)
+        recs = ca.build_receipts(cfg, OCT, ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
         assert [(r.original.name, r.use, r.main_date) for r in recs] == [
             ("2026-11-09_120000.jpg", True, "2026-10-15"),
             ("2026-11-10_120000.jpg", True, "2026-10-20"),

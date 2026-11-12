@@ -16,7 +16,7 @@ import concur_auto as ca
 def judge(text):
     cfg = ca.default_settings()
     p = Path("IMG_0001.JPG")
-    return ca.analyze_receipt(p, p, text, cfg, ca.DEFAULT_HOSPITALS, datetime(2026, 10, 5, 12, 0))
+    return ca.analyze_receipt(p, p, text, cfg, ca.OLD_DEFAULT_HOSPITALS, datetime(2026, 10, 5, 12, 0))
 
 
 @pytest.mark.parametrize("text", [
@@ -164,7 +164,7 @@ def test_list_puts_excluded_photos_last_and_user_can_bring_back(tmp_path, monkey
     log = ca.Log(tmp_path / "log", sink=lambda s: None)
     tm = ca.TargetMonth(2026, 10)
     try:
-        ca.build_receipts(cfg, tm, ca.DEFAULT_HOSPITALS, results, tmp_path / "w", log)
+        ca.build_receipts(cfg, tm, ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
         list_path = ca.list_csv_path(results, tm)
         rows = ca.read_csv_dicts(list_path)
         assert [r["파일"] for r in rows] == ["2026-10-06_090000.jpg", "2026-10-07_090000.jpg", "2026-10-05_090000.jpg"]
@@ -174,7 +174,7 @@ def test_list_puts_excluded_photos_last_and_user_can_bring_back(tmp_path, monkey
 
         last["사용(O/X)"] = "O"                      # 사실은 영수증이었음
         ca.write_csv(list_path, ca.LIST_HEADER, [[r[h] for h in ca.LIST_HEADER] for r in rows])
-        recs = ca.build_receipts(cfg, tm, ca.DEFAULT_HOSPITALS, results, tmp_path / "w", log)
+        recs = ca.build_receipts(cfg, tm, ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
         family = next(r for r in recs if r.original.name == "2026-10-05_090000.jpg")
         assert family.use and family.edited == ["사용"]
         assert ca.read_csv_dicts(list_path)[0]["파일"] == "2026-10-05_090000.jpg"   # 이제 촬영 순서대로 맨 위
@@ -207,7 +207,7 @@ def test_only_receipts_are_corrected_and_corrected_text_is_used(tmp_path, monkey
     results.mkdir()
     log = ca.Log(tmp_path / "log", sink=lambda s: None)
     try:
-        recs = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), ca.DEFAULT_HOSPITALS, results, tmp_path / "w", log)
+        recs = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
     finally:
         log.close()
     assert sorted(p.name for p in (src / "p").iterdir()) == ["2026-10-06_090000_보정됨.png"]

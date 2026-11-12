@@ -45,12 +45,34 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-12 영어 메일 대응"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-13 영수증 첨부 보강"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORIES = ("주차", "카페", "식대")
 
+# 광주·전라권 기본 병원 목록 (영문명은 병원 공식 영문명을 참고했습니다. 다르면 병원목록.csv에서 고치세요)
 DEFAULT_HOSPITALS = [
+    ["전남대", "Chonnam National University Hospital"],
+    ["화순전남대", "Chonnam National University Hwasun Hospital"],
+    ["빛고을전남대", "Bitgoeul Chonnam National University Hospital"],
+    ["조선대", "Chosun University Hospital"],
+    ["광주기독", "Kwangju Christian Hospital"],
+    ["광주보훈", "Gwangju Veterans Hospital"],
+    ["원광대", "Wonkwang University Hospital"],
+    ["전북대", "Jeonbuk National University Hospital"],
+    ["예수병원", "Jeonju Jesus Hospital"],
+    ["목포한국", "Mokpo Hankook Hospital"],
+    ["목포중앙", "Mokpo Jung-Ang Hospital"],
+    ["성가롤로", "St. Carollo Hospital"],
+    ["군산의료원", "Gunsan Medical Center"],
+    ["남원의료원", "Namwon Medical Center"],
+    ["강진의료원", "Gangjin Medical Center"],
+    ["순천의료원", "Suncheon Medical Center"],
+    ["목포시의료원", "Mokpo Medical Center"],
+]
+
+# 예전 기본 목록(동료분 흐름의 대전·충청권). 예전 병원목록.csv를 광주·전라권으로 바꿀 때 알아보는 데 씁니다.
+OLD_DEFAULT_HOSPITALS = [
     ["국립소방", "National Fire Hospital"],
     ["건양대", "KYUH"],
     ["속편", "Nonsan Sok Hospital"],
@@ -139,6 +161,8 @@ def default_settings():
         "기본_도시": "Gwangju (ex Kwangju), KOREA, REPUBLIC OF",
         "_도시_설명": "영수증 주소(예: 익산시, 광주광역시)나 병원 이름(예: 목포한국병원)에서 도시를 찾아 Concur 도시를 고릅니다. 못 찾으면 기본_도시. 왼쪽은 영수증에서 찾을 한글, 오른쪽은 Concur 도시 목록에 보이는 이름 그대로.",
         "도시_목록": dict(DEFAULT_CITIES),
+        "_도시_낮은_우선순위_설명": "주차 회사·카드사 본사 주소처럼 영수증에 자주 찍히지만 실제 장소가 아닌 도시. 다른 도시가 없을 때만 씁니다.",
+        "도시_낮은_우선순위": ["서울"],
         "_영수증_병원_설명": "병원 목록에 없어도 영수증에 'OO병원'이 보이면 그 이름을 쓰고 병원 목록에 더합니다(영문 이름은 자동 변환).",
         "영수증에서_병원_찾기": True,
         "리포트_이름_형식": "{month_name} Expenses",
@@ -182,6 +206,8 @@ def default_settings():
             "편집": "편집|Edit",
             "다음 경비": "다음 경비|Next Expense",
             "경비 저장": "경비 저장|Save Expense",
+            "영수증 업로드": "새 영수증 업로드|영수증 업로드|Upload New Receipt|Upload Receipt",
+            "첨부된 영수증": "영수증 분리|영수증 삭제|영수증 제거|Detach Receipt|Delete Receipt|Remove Receipt",
             "No Receipt": "No Receipt",
             "Receipt": "Receipt",
             "NA": "NA",
@@ -309,17 +335,27 @@ def save_settings(path: Path, cfg: dict):
 
 
 HOSPITAL_HEADER = ["OCR에서 찾을 글자", "Concur에 쓸 영문명", "비고"]
+DEFAULT_HOSPITAL_NOTE = "기본 목록(광주·전라권)"
 
 
 def load_hospital_rows(path: Path) -> list:
-    """[[찾을 글자, 영문명, 비고], ...]"""
+    """[[찾을 글자, 영문명, 비고], ...]. 예전 기본 목록(대전·충청권)이 그대로 남아 있으면 광주·전라권으로 바꿉니다."""
     if not path.exists():
-        write_csv(path, HOSPITAL_HEADER, [pair + ["기본 목록(동료분 흐름)"] for pair in DEFAULT_HOSPITALS])
+        write_csv(path, HOSPITAL_HEADER, [pair + [DEFAULT_HOSPITAL_NOTE] for pair in DEFAULT_HOSPITALS])
     rows = []
     for row in read_csv_dicts(path):
         vals = [str(v or "").strip() for v in row.values()] + ["", ""]
         if vals[0] and vals[1]:
             rows.append(vals[:3])
+    old = {(k, e) for k, e in OLD_DEFAULT_HOSPITALS}
+    if any((r[0], r[1]) in old for r in rows):
+        rows = [r for r in rows if (r[0], r[1]) not in old]          # 고치지 않은 예전 기본 줄만 지움
+        keys = {compact(r[0]) for r in rows}
+        rows = [k_e + [DEFAULT_HOSPITAL_NOTE] for k_e in DEFAULT_HOSPITALS if compact(k_e[0]) not in keys] + rows
+        try:
+            write_csv(path, HOSPITAL_HEADER, rows)
+        except PermissionError:
+            pass
     return rows
 
 
@@ -1014,18 +1050,18 @@ def resolve_city(text: str, cities: dict) -> str:
     return t if "KOREA" in t.upper() else f"{t}, KOREA, REPUBLIC OF"
 
 
-def detect_city(text_compact: str, cities: dict, hospital_key: str = "") -> str:
-    """영수증 주소의 'OO시/OO광역시/OO군' → 병원 이름 앞의 도시 이름 순서로 찾습니다. 못 찾으면 빈칸."""
-    best_pos, best = None, ""
+def detect_city(text_compact: str, cities: dict, hospital_key: str = "", low_priority=("서울",)) -> str:
+    """영수증 주소의 'OO시/OO광역시/OO군' → 병원 이름 앞의 도시 이름 순서로 찾습니다. 못 찾으면 빈칸.
+    서울처럼 본사 주소로 자주 찍히는 도시(low_priority)는 다른 도시가 없을 때만 씁니다."""
+    found = []                                                        # (낮은 우선순위인지, 위치, 도시)
     for ko, full in (cities or {}).items():
         for m in re.finditer(re.escape(ko) + r"(?:광역시|특별시|특별자치시|시|군)", text_compact or ""):
             if ko == "광주" and "경기" in text_compact[max(0, m.start() - 4):m.start()]:
                 continue                                              # 경기도 광주시
-            if best_pos is None or m.start() < best_pos:
-                best_pos, best = m.start(), full
+            found.append((ko in (low_priority or ()), m.start(), full))
             break
-    if best:
-        return best
+    if found:
+        return min(found)[2]
     key = compact(hospital_key)
     for ko in sorted(cities or {}, key=len, reverse=True):
         if key.startswith(ko) and not key[len(ko):].startswith("향"):   # 순천향대는 순천이 아님
@@ -1109,7 +1145,8 @@ def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, ho
         if name:
             rec.hospital_key, rec.hospital_en, rec.hospital_new = hospital_key(name), hospital_english_name(name), name
     rec.hospital_src = HOSP_FROM_OCR if rec.hospital_en else ""
-    rec.city = detect_city(text_c, cfg.get("도시_목록") or DEFAULT_CITIES, rec.hospital_key)
+    rec.city = detect_city(text_c, cfg.get("도시_목록") or DEFAULT_CITIES, rec.hospital_key,
+                           cfg.get("도시_낮은_우선순위", ["서울"]))
     rec.is_receipt = looks_like_receipt(text_c, rec.amounts, rec.date_from_ocr, rec.category,
                                         cfg.get("영수증_판별_단어"))
     rec.use = rec.is_receipt
@@ -1412,13 +1449,13 @@ def find_receipt_by_date_only(receipts: list, iso_date: str):
 
 
 def city_to_choose(rec, current: str, default: str):
-    """Concur 도시 칸에 고를 도시. 영수증 도시가 있고 지금 값과 다르면 그 도시, 비어 있으면 영수증 도시 또는 기본 도시."""
-    want = rec.city if rec is not None and rec.city else ""
-    if want and city_name(current).lower() != city_name(want).lower():
-        return want
-    if not (current or "").strip():
-        return want or default
-    return None
+    """Concur 도시 칸에 고를 도시(바꿀 필요가 없으면 None).
+    영수증이 있으면 영수증에서 찾은 도시, 못 찾았으면 기본 도시(광주)로 맞춥니다(카드 정보로 서울 등이 미리 들어가 있어도).
+    영수증이 없는 경비는 칸이 비어 있을 때만 기본 도시를 넣습니다."""
+    if rec is None:
+        return default if not (current or "").strip() else None
+    want = rec.city or default
+    return want if city_name(current).lower() != city_name(want).lower() else None
 
 
 def texts_for(rec: Receipt, cfg: dict) -> dict:
@@ -1666,6 +1703,8 @@ class ConcurBot:
         self.poll_s = 1.0
         self.login_timeout_s = 600
         self.diagnose_after_s = 15
+        self.upload_wait_s = 15          # 영수증 칸(업로드 버튼)이 뜰 때까지 기다리는 시간
+        self.upload_done_s = 30          # 올린 뒤 끝날 때까지 기다리는 시간
         self.find_mail_link = find_login_link_in_outlook
         self.hospitals = []          # 가게 이름으로 병원을 찾을 때 씀
         self.entries = []            # 리포트 경비 목록 [(날짜, 금액, 줄 글자)]
@@ -2135,27 +2174,70 @@ class ConcurBot:
                 self.choose_city(trigger, city)
                 done.append(f"도시={city_name(city)}")
 
-        upload_btn = page.locator("#upload-receipt-button:visible").first
-        if rec and upload and self._visible(upload_btn, 1500):
+        if rec and upload:
+            self.attach_receipt(upload, done, checks)
+        return done
+
+    def _upload_control(self):
+        page = self.page
+        return self._first_shown([
+            page.locator("#upload-receipt-button"),
+            page.get_by_role("button", name=self._re("영수증 업로드", exact=False)),
+            page.locator("button, [role=button], a").filter(has_text=self._re("영수증 업로드", exact=False)),
+        ])
+
+    def _attached_mark(self):
+        page = self.page
+        return self._first_shown([
+            page.get_by_role("button", name=self._re("첨부된 영수증", exact=False)),
+            page.locator("button, [role=button], a").filter(has_text=self._re("첨부된 영수증", exact=False)),
+        ])
+
+    def attach_receipt(self, upload: Path, done: list, checks: list):
+        """영수증 칸이 뜰 때까지 기다렸다가(최대 upload_wait_s초) [영수증 업로드]로 올립니다.
+        예전에는 버튼을 1.5초 안에 못 찾으면 '이미 첨부됨'으로 보고 건너뛰어, 영수증 칸이 늦게 뜨면 첨부가 빠졌습니다."""
+        page = self.page
+        control = attached = None
+        deadline = time.time() + self.upload_wait_s
+        while True:
+            control = self._upload_control()
+            attached = None if control is not None else self._attached_mark()
+            if control is not None or attached is not None or time.time() >= deadline:
+                break
+            time.sleep(0.5)
+        if control is None and attached is not None:
+            done.append("이미 첨부됨(건너뜀)")
+            return
+        files = page.locator("input[type=file]")
+        if control is not None:
             try:
                 with page.expect_file_chooser(timeout=15000) as chooser:
-                    upload_btn.click()
+                    control.click()
                 chooser.value.set_files(str(upload))
             except Exception:
-                file_input = page.locator("input[type=file]")
-                if file_input.count() == 0:
+                if files.count() == 0:
                     raise
-                file_input.last.set_input_files(str(upload))
-            try:
-                upload_btn.wait_for(state="hidden", timeout=30000)
-            except Exception:
-                self.log("   업로드 완료 표시를 확인하지 못해 10초 더 기다립니다.")
-                time.sleep(10)
-            time.sleep(2)
-            done.append(f"영수증 첨부({upload.name})")
-        elif rec:
-            done.append("이미 첨부됨(건너뜀)")
-        return done
+                files.last.set_input_files(str(upload))
+        elif files.count() > 0:
+            files.last.set_input_files(str(upload))       # 버튼은 못 찾았지만 숨은 파일 칸이 있음
+        else:
+            checks.append("영수증 첨부 버튼을 못 찾음(첨부됐는지 확인)")
+            self.log("   영수증 첨부 버튼을 찾지 못했습니다. 화면을 저장합니다.")
+            self.screenshot("upload_button")
+            return
+        # 올라가면 [영수증 업로드] 버튼이 사라짐
+        finished = False
+        end = time.time() + self.upload_done_s
+        while time.time() < end:
+            if self._upload_control() is None:
+                finished = True
+                break
+            time.sleep(0.5)
+        if not finished:
+            checks.append("영수증이 올라갔는지 확인")
+            self.log("   업로드가 끝났는지 확인하지 못했습니다. Concur 화면에서 영수증이 붙었는지 확인하세요.")
+        time.sleep(1)
+        done.append(f"영수증 첨부({upload.name})")
 
     # ---------- 전체 경비 반복 ----------
     def process_expenses(self, receipts: list, work_dir: Path, stop_flag=None) -> list:
@@ -2466,7 +2548,7 @@ class GuiApp:
         if created:
             self.append("처음 실행입니다. 영수증 폴더·기본 도시를 확인하고, [병원 목록 편집]에서 담당 병원을 넣어 주세요.")
             self.append("iPhone으로 찍기만 한다면 영수증 폴더로 iCloud 사진 폴더(보통 사진\\iCloud Photos\\Photos)를 고르세요.")
-            self.append("기본 병원 목록은 대전·충청권입니다. 짧은 글자는 다른 병원에도 걸립니다(예: '남대'는 '전남대'에도 맞음).")
+            self.append("기본 병원 목록은 광주·전라권입니다. 짧은 글자(2글자)는 다른 병원·주소에도 걸릴 수 있으니 3글자 이상으로 적어 주세요.")
 
     # ---------- 화면 동작 ----------
     def append(self, line):

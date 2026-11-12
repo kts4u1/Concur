@@ -40,7 +40,7 @@ def test_dates(text, dates):
 def test_receipt_with_bare_amount_is_kept():
     p = Path("IMG_0001.JPG")
     rec = ca.analyze_receipt(p, p, "목포한국병원 주차장\n주차요금 6000\n26.11.03 14:22", ca.default_settings(),
-                             ca.DEFAULT_HOSPITALS, datetime(2026, 11, 20, 9, 0))
+                             ca.OLD_DEFAULT_HOSPITALS, datetime(2026, 11, 20, 9, 0))
     assert rec.is_receipt and rec.total == 6000 and rec.ocr_dates == ["2026-11-03"]
 
 
@@ -100,6 +100,7 @@ def test_hospital_not_in_list_is_found_and_added(tmp_path, monkeypatch):
     results = tmp_path / "결과"
     results.mkdir()
     csv_path = tmp_path / ca.HOSPITAL_FILE_NAME
+    ca.write_csv(csv_path, ca.HOSPITAL_HEADER, [["건양대", "Konyang University Hospital", "테스트"]])   # 두 병원이 없는 목록
     lines = []
     log = ca.Log(tmp_path / "log", sink=lines.append)
     tm = ca.TargetMonth(2026, 11)
@@ -164,7 +165,8 @@ def test_city_to_choose():
     no_city = ca.Receipt(original=Path("b"), ocr_file=Path("b"))
     assert ca.city_to_choose(no_city, "", gwangju) == gwangju               # 못 찾으면 기본 광주
     assert ca.city_to_choose(None, "", gwangju) == gwangju                  # 영수증 없는 경비도 기본 도시
-    assert ca.city_to_choose(no_city, "Iksan, KOREA, REPUBLIC OF", gwangju) is None   # 이미 있으면 그대로
+    assert ca.city_to_choose(no_city, "Seoul, KOREA, REPUBLIC OF", gwangju) == gwangju   # 영수증이 있으면 기본 광주로 맞춤
+    assert ca.city_to_choose(None, "Seoul, KOREA, REPUBLIC OF", gwangju) is None       # 영수증 없는 경비는 그대로
 
 
 def test_default_city_is_gwangju_and_old_settings_are_moved_once(tmp_path):

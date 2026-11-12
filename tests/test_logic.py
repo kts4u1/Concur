@@ -59,7 +59,7 @@ def test_detect_category_uses_priority():
 
 
 def test_detect_hospital_prefers_longest_key():
-    hs = ca.DEFAULT_HOSPITALS
+    hs = ca.OLD_DEFAULT_HOSPITALS
     assert ca.detect_hospital("세종충남대학교병원주차장", hs) == ("세종충남대", "SCNUH")
     assert ca.detect_hospital("충남대학교병원", hs) == ("남대", "CNUH")
     assert ca.detect_hospital("스타벅스", hs) == ("", "")
@@ -67,7 +67,7 @@ def test_detect_hospital_prefers_longest_key():
 
 def test_analyze_receipt_falls_back_to_file_name_date():
     p = Path("2026-10-22_123342.jpg")
-    rec = ca.analyze_receipt(p, p, "건양대병원 주차 입차 3,000원", ca.default_settings(), ca.DEFAULT_HOSPITALS)
+    rec = ca.analyze_receipt(p, p, "건양대병원 주차 입차 3,000원", ca.default_settings(), ca.OLD_DEFAULT_HOSPITALS)
     assert rec.dates == ["2026-10-22"] and not rec.date_from_ocr
     assert (rec.total, rec.category, rec.hospital_en) == (3000, "주차", "KYUH")
     assert ca.receipt_issues(rec, [rec]) == ["날짜 못 읽음(촬영 날짜 사용)"]
@@ -75,7 +75,7 @@ def test_analyze_receipt_falls_back_to_file_name_date():
 
 def test_analyze_receipt_ocr_date_comes_first():
     p = Path("2026-10-22_090000.jpg")
-    rec = ca.analyze_receipt(p, p, "2026/10/21 카페 4,500", ca.default_settings(), ca.DEFAULT_HOSPITALS)
+    rec = ca.analyze_receipt(p, p, "2026/10/21 카페 4,500", ca.default_settings(), ca.OLD_DEFAULT_HOSPITALS)
     assert rec.dates == ["2026-10-21", "2026-10-22"]
     assert rec.main_date == "2026-10-21"
 
@@ -84,7 +84,7 @@ def test_analyze_receipt_ocr_date_comes_first():
 
 def _auto_receipt():
     p = Path("2026-10-22_123342.jpg")
-    return ca.analyze_receipt(p, p, "건양대병원 주차 3,000원", ca.default_settings(), ca.DEFAULT_HOSPITALS)
+    return ca.analyze_receipt(p, p, "건양대병원 주차 3,000원", ca.default_settings(), ca.OLD_DEFAULT_HOSPITALS)
 
 
 def _row(**changes):
@@ -149,7 +149,7 @@ def test_receipt_list_edits_survive_rerun(tmp_path, monkeypatch):
     log = ca.Log(tmp_path / "log", sink=lambda s: None)
     tm = ca.TargetMonth(2026, 10)
     try:
-        recs = ca.build_receipts(cfg, tm, ca.DEFAULT_HOSPITALS, results, tmp_path / "w", log)
+        recs = ca.build_receipts(cfg, tm, ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
         assert [r.original.name for r in recs] == list(texts)
         assert recs[1].category == "카페" and recs[1].hospital_en == ""
         assert not recs[2].use and recs[2].skip_reason == "다른 달 영수증(2026-11-01)(자동 제외)"
@@ -165,7 +165,7 @@ def test_receipt_list_edits_survive_rerun(tmp_path, monkeypatch):
                 raise AssertionError("두 번째 실행은 OCR 캐시를 써야 합니다")
 
         monkeypatch.setattr(ca, "WindowsOcr", NoOcr)
-        recs = ca.build_receipts(cfg, tm, ca.DEFAULT_HOSPITALS, results, tmp_path / "w", log)
+        recs = ca.build_receipts(cfg, tm, ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
         assert recs[0].use is False
         assert recs[1].hospital_en == "KYUH" and recs[1].edited == ["병원"]
 
