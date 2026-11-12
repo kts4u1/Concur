@@ -45,7 +45,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-12 병원 찾기"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-12 도시·금액·병원"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORIES = ("주차", "카페", "식대")
@@ -72,6 +72,28 @@ DEFAULT_HOSPITALS = [
     ["세종중남대", "SCNUH"],
     ["예수", "Jeonju Jesus hospital"],
 ]
+
+
+OLD_DEFAULT_CITY = "Daejeon (ex Taejon), KOREA, REPUBLIC OF"
+DEFAULT_CITIES = {
+    # Concur 화면에서 확인한 이름
+    "광주": "Gwangju (ex Kwangju), KOREA, REPUBLIC OF",
+    "대전": "Daejeon (ex Taejon), KOREA, REPUBLIC OF",
+    "전주": "Jeonju, KOREA, REPUBLIC OF",
+    "익산": "Iksan, KOREA, REPUBLIC OF",
+    "목포": "Mokpo, KOREA, REPUBLIC OF",
+    # 아래는 Concur 이름을 확인하지 못함(정확히 안 맞으면 앞 단어로 검색해서 고름)
+    "서울": "Seoul, KOREA, REPUBLIC OF", "군산": "Gunsan, KOREA, REPUBLIC OF",
+    "정읍": "Jeongeup, KOREA, REPUBLIC OF", "남원": "Namwon, KOREA, REPUBLIC OF",
+    "김제": "Gimje, KOREA, REPUBLIC OF", "순천": "Suncheon, KOREA, REPUBLIC OF",
+    "여수": "Yeosu, KOREA, REPUBLIC OF", "나주": "Naju, KOREA, REPUBLIC OF",
+    "광양": "Gwangyang, KOREA, REPUBLIC OF", "무안": "Muan, KOREA, REPUBLIC OF",
+    "해남": "Haenam, KOREA, REPUBLIC OF", "화순": "Hwasun, KOREA, REPUBLIC OF",
+    "영광": "Yeonggwang, KOREA, REPUBLIC OF", "청주": "Cheongju, KOREA, REPUBLIC OF",
+    "천안": "Cheonan, KOREA, REPUBLIC OF", "세종": "Sejong, KOREA, REPUBLIC OF",
+    "부산": "Busan, KOREA, REPUBLIC OF", "대구": "Daegu, KOREA, REPUBLIC OF",
+    "인천": "Incheon, KOREA, REPUBLIC OF",
+}
 
 
 def default_receipt_folder(home: Path) -> Path:
@@ -113,7 +135,11 @@ def default_settings():
         "_업로드_설명": "원본 또는 보정본. Concur는 1장당 5MB 제한이 있어 넘으면 자동으로 줄여서 올립니다.",
         "업로드_이미지": "원본",
         "업로드_최대_MB": 5,
-        "기본_도시": "Daejeon (ex Taejon), KOREA, REPUBLIC OF",
+        "기본_도시": "Gwangju (ex Kwangju), KOREA, REPUBLIC OF",
+        "_도시_설명": "영수증 주소(예: 익산시, 광주광역시)나 병원 이름(예: 목포한국병원)에서 도시를 찾아 Concur 도시를 고릅니다. 못 찾으면 기본_도시. 왼쪽은 영수증에서 찾을 한글, 오른쪽은 Concur 도시 목록에 보이는 이름 그대로.",
+        "도시_목록": dict(DEFAULT_CITIES),
+        "_영수증_병원_설명": "병원 목록에 없어도 영수증에 'OO병원'이 보이면 그 이름을 쓰고 병원 목록에 더합니다(영문 이름은 자동 변환).",
+        "영수증에서_병원_찾기": True,
         "리포트_이름_형식": "{month_name} Expenses",
         "_키워드_설명": "OCR 결과(띄어쓰기 무시)에 이 글자가 있으면 해당 분류. 여러 분류가 맞으면 분류_우선순위 앞쪽이 이깁니다.",
         "키워드": {
@@ -256,6 +282,14 @@ def load_settings(path: Path) -> tuple:
             merged[key] = sub
         else:
             merged[key] = value
+    # 기본 도시를 대전 → 광주로 바꾼 것을 예전 설정 파일에도 한 번 반영
+    if user.get("기본_도시") == OLD_DEFAULT_CITY and not user.get("_기본_도시_광주로_바꿈"):
+        merged["기본_도시"] = defaults["기본_도시"]
+        merged["_기본_도시_광주로_바꿈"] = True
+        try:
+            save_settings(path, merged)
+        except OSError:
+            pass
     return merged, False
 
 
@@ -327,7 +361,8 @@ def romanize_korean(text: str) -> str:
 HOSPITAL_SUFFIX_RE = r"(병원|의료원|의료센터|메디컬센터|의원)"
 _PREFIX_EN = [("국립", "National"), ("도립", "Provincial"), ("시립", "Municipal")]
 _SUFFIX_EN = [("대학교병원", "University Hospital"), ("대학병원", "University Hospital"),
-              ("대학교의료원", "University Medical Center"), ("성모병원", "St. Mary's Hospital"),
+              ("대학교의료원", "University Medical Center"), ("대병원", "University Hospital"),
+              ("성모병원", "St. Mary's Hospital"),
               ("기독병원", "Christian Hospital"), ("한방병원", "Korean Medicine Hospital"),
               ("요양병원", "Care Hospital"), ("메디컬센터", "Medical Center"), ("의료센터", "Medical Center"),
               ("의료원", "Medical Center"), ("병원", "Hospital"), ("의원", "Clinic"), ("센터", "Center")]
@@ -367,7 +402,10 @@ def hospital_english_name(name) -> str:
             tail, n = en, n[:-len(ko)]
             break
     words = [head] if head else []
-    for part in re.split(r"(대학교|대학)", n):
+    city = next((c for c in sorted(DEFAULT_CITIES, key=len, reverse=True)
+                 if n.startswith(c) and len(n) > len(c) + 1), "")
+    parts = ([city] if city else []) + re.split(r"(대학교|대학)", n[len(city):])
+    for part in parts:
         if part in ("대학교", "대학"):
             words.append("University")
         elif part:
@@ -828,6 +866,8 @@ class Receipt:
     use: bool = True
     edited: list = field(default_factory=list)      # 사용자가 고친 항목
     used_for: str = ""
+    city: str = ""                                  # 영수증에서 찾은 Concur 도시(없으면 기본 도시)
+    hospital_new: str = ""                          # 병원 목록에 없어 영수증 글자에서 찾은 병원 이름
     taken: object = None                            # 촬영 시각(datetime)
     is_receipt: bool = True                         # 영수증으로 보이는지(자동 판단)
     ocr_dates: list = field(default_factory=list)   # 영수증 글자에서 읽은 날짜
@@ -843,6 +883,11 @@ DATE_IN_TEXT = re.compile(r"(?<!\d)(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s
 DATE_IN_NAME = re.compile(r"(20\d{2})-(\d{2})-(\d{2})")
 AMOUNT_WITH_SEP = re.compile(r"(?<![\d.,])\d{1,3}(?:[,.]\d{3})+(?![\d,]|\.\d)")
 AMOUNT_WON = re.compile(r"(?<![\d,.])(\d{3,7})\s*원")
+# 쉼표 없이 찍힌 금액(예: 주차요금 6000)은 금액 글자 바로 뒤에 있을 때만
+AMOUNT_NEAR_WORD = re.compile(r"(?:합계|총액|금액|요금|결제|받을|청구|판매|주차료|이용료)[^\d\n]{0,8}(\d{3,7})(?![\d,.\-/:년월])")
+# 연도 두 자리(26.11.03), 날짜 글자 뒤 8자리(거래일시 20261103)
+DATE_SHORT_YEAR = re.compile(r"(?<![\d.])(2\d)\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})(?![\d.])")
+DATE_COMPACT = re.compile(r"(?:일시|일자|날짜|거래일|승인일|판매일|결제일|입차|출차)\D{0,6}(20\d{2})(\d{2})(\d{2})(?!\d)")
 
 
 def normalize_date(y, m, d):
@@ -871,8 +916,11 @@ def parse_amount_cell(text: str):
 
 def find_ocr_dates(ocr_text: str) -> list:
     found = []
-    for m in DATE_IN_TEXT.finditer(ocr_text):
-        iso = normalize_date(*m.groups())
+    candidates = [m.groups() for m in DATE_IN_TEXT.finditer(ocr_text)]
+    candidates += [m.groups() for m in DATE_COMPACT.finditer(ocr_text)]
+    candidates += [("20" + y, mo, d) for y, mo, d in (m.groups() for m in DATE_SHORT_YEAR.finditer(ocr_text))]
+    for y, mo, d in candidates:
+        iso = normalize_date(y, mo, d)
         if iso and iso not in found:
             found.append(iso)
     return found
@@ -883,9 +931,19 @@ def file_name_date(name: str):
     return normalize_date(*m.groups()) if m else None
 
 
+def _fix_amount_text(text: str) -> str:
+    """OCR이 0을 O로 읽은 것(6,0OO)과 쉼표 앞뒤 띄어쓰기(6, 000)를 바로잡습니다."""
+    t = text or ""
+    for _ in range(3):
+        t = re.sub(r"(?<=[\d,])[Oo]|[Oo](?=[\d,])", "0", t)
+    return re.sub(r"(\d)\s*([,.])\s*(\d{3})(?!\d)", r"\1\2\3", t)
+
+
 def find_amounts(ocr_text: str) -> list:
+    ocr_text = _fix_amount_text(ocr_text)
     values = [int(re.sub(r"\D", "", m.group(0))) for m in AMOUNT_WITH_SEP.finditer(ocr_text)]
     values += [int(m.group(1)) for m in AMOUNT_WON.finditer(ocr_text)]
+    values += [int(m.group(1)) for m in AMOUNT_NEAR_WORD.finditer(ocr_text)]
     uniq = []
     for v in values:
         if v > 0 and v not in uniq:
@@ -901,6 +959,66 @@ def detect_category(text_compact: str, keywords: dict, priority=None) -> str:
     for cat in (priority or ["식대", "카페", "주차"]):
         if any(k and k in text_compact for k in keywords.get(cat, [])):
             return cat
+    return ""
+
+
+_ORG_WORDS = ("사회복지법인", "의료법인", "의료재단", "재단법인", "학교법인", "법인", "재단")
+
+
+def find_hospital_name_in_text(ocr_text: str) -> str:
+    """병원 목록에 없어도 영수증에 'OO병원'·'OO의료원'이 찍혀 있으면 그 이름. 예: '의료법인 OO재단 목포한국병원' → 목포한국병원"""
+    for line in (ocr_text or "").splitlines():
+        tokens = [re.sub(r"\(주\)|㈜|\(재\)|\(의\)", "", t) for t in line.split()]
+        for i, tok in enumerate(tokens):
+            word = re.sub(r"[^가-힣]", "", tok)
+            if word in ("병원", "의료원") and i > 0:                  # '원광대학교 병원'처럼 띄어 쓴 경우
+                word = re.sub(r"[^가-힣]", "", tokens[i - 1]) + word
+            m = re.match(r"^([가-힣]*?(?:병원|의료원))", word)
+            if not m:
+                continue
+            name = m.group(1)
+            for org in _ORG_WORDS:
+                if org in name:
+                    name = name.split(org)[-1]
+            if len(name) >= 4 and not name.endswith("동물병원"):
+                return name
+    return ""
+
+
+def city_name(full: str) -> str:
+    """'Gwangju (ex Kwangju), KOREA, REPUBLIC OF' → 'Gwangju (ex Kwangju)'"""
+    return (full or "").split(",")[0].strip()
+
+
+def resolve_city(text: str, cities: dict) -> str:
+    """사용자가 적은 도시(광주, Gwangju, 전체 이름)를 Concur 도시 이름으로"""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if t in (cities or {}):
+        return cities[t]
+    for full in (cities or {}).values():
+        if city_name(full).lower() == t.lower() or city_name(full).split(" (")[0].lower() == t.lower():
+            return full
+    return t if "KOREA" in t.upper() else f"{t}, KOREA, REPUBLIC OF"
+
+
+def detect_city(text_compact: str, cities: dict, hospital_key: str = "") -> str:
+    """영수증 주소의 'OO시/OO광역시/OO군' → 병원 이름 앞의 도시 이름 순서로 찾습니다. 못 찾으면 빈칸."""
+    best_pos, best = None, ""
+    for ko, full in (cities or {}).items():
+        for m in re.finditer(re.escape(ko) + r"(?:광역시|특별시|특별자치시|시|군)", text_compact or ""):
+            if ko == "광주" and "경기" in text_compact[max(0, m.start() - 4):m.start()]:
+                continue                                              # 경기도 광주시
+            if best_pos is None or m.start() < best_pos:
+                best_pos, best = m.start(), full
+            break
+    if best:
+        return best
+    key = compact(hospital_key)
+    for ko in sorted(cities or {}, key=len, reverse=True):
+        if key.startswith(ko) and not key[len(ko):].startswith("향"):   # 순천향대는 순천이 아님
+            return cities[ko]
     return ""
 
 
@@ -947,6 +1065,20 @@ def fill_same_day_hospitals(receipts: list) -> int:
     return filled
 
 
+def fill_same_day_cities(receipts: list) -> int:
+    """도시를 못 찾은 영수증에 같은 날 다른 영수증의 도시를 채웁니다(한 곳일 때만)."""
+    by_day = {}
+    for r in receipts:
+        if r.use and r.city and r.main_date:
+            by_day.setdefault(r.main_date, set()).add(r.city)
+    filled = 0
+    for r in receipts:
+        if r.use and not r.city and "도시" not in r.edited and len(by_day.get(r.main_date, ())) == 1:
+            r.city = next(iter(by_day[r.main_date]))
+            filled += 1
+    return filled
+
+
 def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, hospitals: list,
                     taken=None) -> Receipt:
     rec = Receipt(original=original, ocr_file=ocr_file, ocr_text=ocr_text, taken=taken)
@@ -961,7 +1093,12 @@ def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, ho
     text_c = compact(ocr_text)
     rec.category = detect_category(text_c, cfg["키워드"], cfg.get("분류_우선순위"))
     rec.hospital_key, rec.hospital_en = detect_hospital(text_c, hospitals)
+    if not rec.hospital_en and cfg.get("영수증에서_병원_찾기", True):
+        name = find_hospital_name_in_text(ocr_text)
+        if name:
+            rec.hospital_key, rec.hospital_en, rec.hospital_new = hospital_key(name), hospital_english_name(name), name
     rec.hospital_src = HOSP_FROM_OCR if rec.hospital_en else ""
+    rec.city = detect_city(text_c, cfg.get("도시_목록") or DEFAULT_CITIES, rec.hospital_key)
     rec.is_receipt = looks_like_receipt(text_c, rec.amounts, rec.date_from_ocr, rec.category,
                                         cfg.get("영수증_판별_단어"))
     rec.use = rec.is_receipt
@@ -991,8 +1128,8 @@ def duplicate_count(rec: Receipt, receipts: list) -> int:
 
 # ---------- 영수증 목록 (엑셀로 고치면 다음 실행에도 유지) ----------
 
-LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "병원 근거", "확인 필요", "OCR 앞부분",
-               "[자동] 사용", "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문",
+LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "병원 근거", "도시", "확인 필요",
+               "OCR 앞부분", "[자동] 사용", "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문", "[자동] 도시",
                "날짜 후보", "금액 후보", "찾은 병원 글자"]
 NOT_RECEIPT_NOTE = "영수증 아닌 것 같음(자동 제외)"
 UNDATED_NOTE = "날짜 못 읽음: 영수증 날짜를 적어 주세요(자동 제외)"
@@ -1033,7 +1170,7 @@ def parse_use_cell(text: str, default: bool) -> bool:
     return default
 
 
-def apply_user_edits(rec: Receipt, row: dict, tm=None):
+def apply_user_edits(rec: Receipt, row: dict, tm=None, cities=None):
     """'[자동]' 칸과 다르게 바뀐 칸만 사용자가 고친 것으로 보고 반영합니다."""
     g = lambda k: str(row.get(k) or "").strip()
     user_use = parse_use_cell(g("사용(O/X)"), rec.use)
@@ -1051,6 +1188,9 @@ def apply_user_edits(rec: Receipt, row: dict, tm=None):
         rec.hospital_en = g("병원 영문")
         rec.hospital_src = HOSP_FROM_USER if rec.hospital_en else ""
         rec.edited.append("병원")
+    if "도시" in row and g("도시") != g("[자동] 도시"):
+        rec.city = resolve_city(g("도시"), cities or DEFAULT_CITIES)
+        rec.edited.append("도시")
     if tm is not None and "날짜" in rec.edited:
         place_in_month(rec, tm)          # 고친 날짜로 이 달 영수증인지 다시 정함
     if user_use != auto_use:
@@ -1084,8 +1224,8 @@ def save_receipt_list(receipts: list, auto: dict, path: Path):
         rows.append([
             r.original.name, f"{r.taken:%Y-%m-%d %H:%M}" if r.taken else "",
             "O" if r.use else "X", r.main_date, r.total or "", r.category, r.hospital_en, r.hospital_src,
-            ", ".join(issues), compact(r.ocr_text)[:100],
-            "O" if a.use else "X", a.main_date, a.total or "", a.category, a.hospital_en,
+            city_name(r.city), ", ".join(issues), compact(r.ocr_text)[:100],
+            "O" if a.use else "X", a.main_date, a.total or "", a.category, a.hospital_en, city_name(a.city),
             " ".join(a.dates), " ".join(str(x) for x in a.amounts), a.hospital_key,
         ])
     write_csv(path, LIST_HEADER, rows)
@@ -1102,7 +1242,24 @@ def _save_json(path: Path, data: dict):
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
-def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Path, work_dir: Path, log: Log) -> list:
+def add_found_hospitals(receipts: list, csv_path: Path, log) -> int:
+    """영수증 글자에서 새로 찾은 병원을 병원목록.csv에 더합니다(다음부터는 목록에서 찾음)."""
+    rows = load_hospital_rows(csv_path)
+    keys = {compact(r[0]) for r in rows}
+    added = []
+    for r in receipts:
+        if r.use and r.hospital_new and r.hospital_src == HOSP_FROM_OCR and compact(r.hospital_key) not in keys:
+            keys.add(compact(r.hospital_key))
+            added.append([r.hospital_key, r.hospital_en, f"영수증에서 찾음: {r.hospital_new} (영문 이름 확인)"])
+    if added:
+        write_csv(csv_path, HOSPITAL_HEADER, rows + added)
+        log(f"   영수증에서 새 병원 {len(added)}곳을 찾아 병원 목록에 더했습니다: "
+            + ", ".join(f"{a[0]}→{a[1]}" for a in added) + " (영문 이름은 [병원 목록 편집]에서 확인)")
+    return len(added)
+
+
+def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Path, work_dir: Path, log: Log,
+                   hospital_csv=None) -> list:
     date_cache_path = results_dir / "photo_date_cache.json"
     date_cache = _load_json(date_cache_path)
     originals = list_originals(cfg, tm, date_cache)
@@ -1164,8 +1321,9 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
     if counts["made"] or counts["failed"]:
         log(f"   보정: 새로 {counts['made']}장 / 실패 {counts['failed']}장")
 
-    fill_same_day_hospitals(list(auto.values()))
-    fill_same_day_hospitals(receipts)
+    for group in (list(auto.values()), receipts):
+        fill_same_day_hospitals(group)
+        fill_same_day_cities(group)
     list_path = list_csv_path(results_dir, tm)
     if list_path.exists():
         try:
@@ -1174,8 +1332,14 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             raise RuntimeError(f"영수증 목록 파일이 열려 있어 읽을 수 없습니다. 엑셀을 닫고 다시 실행하세요.\n{list_path}")
         for rec in receipts:
             if rec.original.name in rows:
-                apply_user_edits(rec, rows[rec.original.name], tm)
+                apply_user_edits(rec, rows[rec.original.name], tm, cfg.get("도시_목록"))
         fill_same_day_hospitals(receipts)
+        fill_same_day_cities(receipts)
+    if hospital_csv is not None:
+        try:
+            add_found_hospitals(receipts, Path(hospital_csv), log)
+        except PermissionError:
+            log("   병원 목록 파일이 열려 있어 새 병원을 더하지 못했습니다. 엑셀을 닫고 다시 실행하세요.")
     try:
         save_receipt_list(receipts, auto, list_path)
     except PermissionError:
@@ -1187,7 +1351,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         flag = "" if rec.use else "  [사용 안 함]"
         edited = f"  (고침: {', '.join(rec.edited)})" if rec.edited else ""
         log(f"   {rec.original.name} | {rec.main_date or '-'} | {rec.total:,}원 | {rec.category or '분류없음'} | "
-            f"{rec.hospital_en or '병원없음'}{edited}{flag}")
+            f"{rec.hospital_en or '병원없음'} | {city_name(rec.city) or '기본 도시'}{edited}{flag}")
     excluded = [r for r in receipts if is_auto_excluded(r)]
     if excluded:
         other = sum(1 for r in excluded if r.skip_reason.startswith("다른 달"))
@@ -1227,6 +1391,22 @@ def find_receipt(receipts: list, iso_date: str, amount: int):
         for r in candidates:
             if amount in r.amounts:
                 return r
+    return None
+
+
+def find_receipt_by_date_only(receipts: list, iso_date: str):
+    """금액을 못 읽은 영수증이 그날 한 장뿐이면 그 영수증(확인 필요로 표시)"""
+    pool = [r for r in receipts if r.use and not r.used_for and not r.total and r.main_date == iso_date]
+    return pool[0] if len(pool) == 1 else None
+
+
+def city_to_choose(rec, current: str, default: str):
+    """Concur 도시 칸에 고를 도시. 영수증 도시가 있고 지금 값과 다르면 그 도시, 비어 있으면 영수증 도시 또는 기본 도시."""
+    want = rec.city if rec is not None and rec.city else ""
+    if want and city_name(current).lower() != city_name(want).lower():
+        return want
+    if not (current or "").strip():
+        return want or default
     return None
 
 
@@ -1524,6 +1704,25 @@ class ConcurBot:
             except Exception:
                 continue
         return None, ""
+
+    def choose_city(self, trigger, city_text: str):
+        """도시 드롭다운: 정확한 이름이 보이면 고르고, 없으면 앞 단어(예: Mokpo)로 검색해 그 단어와 KOREA가 든 항목을 고릅니다."""
+        page = self.page
+        items = page.locator(".sapcnqr-listbox-item__wrapper:visible")
+        trigger.click()
+        exact = items.filter(has_text=self._exact(city_text))
+        if not self._visible(exact.first, 3000):
+            head = city_name(city_text).split(" (")[0].strip()
+            page.keyboard.press("Control+A")
+            page.keyboard.type(head, delay=30)
+            exact = items.filter(has_text=self._exact(city_text))
+            if not self._visible(exact.first, 3000):
+                exact = items.filter(has_text=re.compile(r"\b" + re.escape(head) + r"\b.*KOREA", re.I))
+                if not self._visible(exact.first, 5000):
+                    page.keyboard.press("Escape")
+                    raise RuntimeError(f"도시 목록에서 '{head}'를 찾지 못했습니다.")
+        exact.first.click()
+        time.sleep(0.5)
 
     def choose_option(self, trigger, option_text: str):
         page = self.page
@@ -1876,9 +2075,11 @@ class ConcurBot:
                 checks.append(f"Expense Type 자동 선택({new_type})")
 
         trigger, value = self.find_select("#location")
-        if trigger is not None and not value:
-            self.choose_option(trigger, self.cfg["기본_도시"])
-            done.append("도시 선택")
+        if trigger is not None:
+            city = city_to_choose(rec, value, self.cfg["기본_도시"])
+            if city:
+                self.choose_city(trigger, city)
+                done.append(f"도시={city_name(city)}")
 
         upload_btn = page.locator("#upload-receipt-button:visible").first
         if rec and upload and self._visible(upload_btn, 1500):
@@ -1918,7 +2119,7 @@ class ConcurBot:
                     self.log("   저장 버튼을 누르지 못했습니다. Concur 화면에서 직접 저장하세요.")
                 break
             row = {"순번": i, "Concur 날짜": "", "Concur 금액": "", "가게 이름": "", "영수증": "", "분류": "",
-                   "병원": "", "병원 근거": "", "처리": "", "확인 필요": "", "오류": ""}
+                   "병원": "", "병원 근거": "", "도시": "", "처리": "", "확인 필요": "", "오류": ""}
             checks = []
             try:
                 self.wait_progress(i)
@@ -1927,6 +2128,10 @@ class ConcurBot:
                 row["Concur 날짜"], row["Concur 금액"] = date_text, amount_text
                 iso, amount = concur_date_to_iso(date_text), concur_amount_to_int(amount_text)
                 rec = find_receipt(receipts, iso, amount) if iso and amount is not None else None
+                by_date_only = False
+                if rec is None and iso:
+                    rec = find_receipt_by_date_only(receipts, iso)
+                    by_date_only = rec is not None
                 try:
                     row["가게 이름"] = self.vendor_text(iso, amount)
                 except Exception:
@@ -1939,6 +2144,9 @@ class ConcurBot:
                     apply_vendor_hospital(rec, row["가게 이름"], self.hospitals)
                     row["영수증"], row["분류"] = rec.original.name, rec.category
                     row["병원"], row["병원 근거"] = rec.hospital_en, rec.hospital_src
+                    row["도시"] = city_name(rec.city) or f"기본({city_name(self.cfg['기본_도시'])})"
+                    if by_date_only:
+                        checks.append("금액 못 읽은 영수증을 날짜로 첨부")
                     if not rec.category:
                         checks.append("분류 없음(영수증만 첨부)")
                     elif not rec.hospital_en:
@@ -2027,7 +2235,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         except Exception as e:
             log(f"병원 엑셀을 읽지 못해 지금 병원 목록으로 진행합니다: {e}")
         hospitals = load_hospitals(base / HOSPITAL_FILE_NAME)
-        receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log)
+        receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log, base / HOSPITAL_FILE_NAME)
         list_path = list_csv_path(results_dir, tm)
         need = [r for r in receipts if receipt_issues(r, receipts) or r.skip_reason == UNDATED_NOTE]
         used = [r for r in receipts if r.use]
@@ -2063,7 +2271,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
                 ui.open(list_path)
                 if not ui.confirm("영수증 목록 수정", "엑셀에서 고친 뒤 저장하고 엑셀을 닫았으면 [확인]을 누르세요.\n([취소]는 중단)"):
                     raise Cancelled()
-                receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log)
+                receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log, base / HOSPITAL_FILE_NAME)
 
         bot = ConcurBot(cfg, log, ui, stop_flag)
         bot.hospitals = hospitals
