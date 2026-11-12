@@ -45,7 +45,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-12 도시·금액·병원"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-12 영어 화면 대응"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORIES = ("주차", "카페", "식대")
@@ -171,16 +171,16 @@ def default_settings():
             "식대": "Other Staff Expenses",
             "분류없음": "Other Staff Expenses",
         },
-        "_화면_문구_설명": "Concur 화면에 보이는 글자. Concur 언어 설정이 바뀌면 여기만 고칩니다.",
+        "_화면_문구_설명": "Concur 화면에 보이는 글자. '|'로 나눠 여러 개를 적으면 그중 하나가 보이면 됩니다(예: 다음|Next). 화면이 영어로 바뀌어도 되도록 영어도 같이 적어 두었습니다.",
         "화면_문구": {
-            "리포트 생성": "리포트 생성",
-            "다음": "다음",
-            "이메일 링크로 로그인": "이메일 링크로 로그인",
-            "사용 가능한 경비": "사용 가능한 경비",
-            "리포트에 추가": "리포트에 추가",
-            "편집": "편집",
-            "다음 경비": "다음 경비",
-            "경비 저장": "경비 저장",
+            "리포트 생성": "리포트 생성|Create Report",
+            "다음": "다음|Next|Continue",
+            "이메일 링크로 로그인": "이메일 링크로 로그인|Sign in with email link|Email me a sign in link|Email sign in link|Email link",
+            "사용 가능한 경비": "사용 가능한 경비|Available Expenses",
+            "리포트에 추가": "리포트에 추가|Add To Report",
+            "편집": "편집|Edit",
+            "다음 경비": "다음 경비|Next Expense",
+            "경비 저장": "경비 저장|Save Expense",
             "No Receipt": "No Receipt",
             "Receipt": "Receipt",
             "NA": "NA",
@@ -282,6 +282,13 @@ def load_settings(path: Path) -> tuple:
             merged[key] = sub
         else:
             merged[key] = value
+    # 화면 문구: 예전 기본값(한국어 하나)이 저장돼 있으면 새 기본값(한국어|영어)으로
+    screen, old_screen = merged.get("화면_문구"), user.get("화면_문구")
+    if isinstance(screen, dict) and isinstance(old_screen, dict):
+        for k, v in old_screen.items():
+            new = defaults["화면_문구"].get(k, "")
+            if "|" in new and v == new.split("|")[0]:
+                screen[k] = new
     # 기본 도시를 대전 → 광주로 바꾼 것을 예전 설정 파일에도 한 번 반영
     if user.get("기본_도시") == OLD_DEFAULT_CITY and not user.get("_기본_도시_광주로_바꿈"):
         merged["기본_도시"] = defaults["기본_도시"]
@@ -1650,11 +1657,17 @@ class ConcurBot:
         profile = Path(self.cfg["브라우저_프로필_폴더"])
         profile.mkdir(parents=True, exist_ok=True)
         self.pw = sync_playwright().start()
-        self.ctx = self.pw.chromium.launch_persistent_context(
-            str(profile), channel="msedge", headless=False, no_viewport=True, args=["--start-maximized"],
-            chromium_sandbox=True)      # '--no-sandbox' 경고줄이 뜨지 않게
+        self.ctx = self.pw.chromium.launch_persistent_context(str(profile), **self.launch_options())
         self.ctx.set_default_timeout(self.timeout_ms)
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+
+    def launch_options(self) -> dict:
+        return dict(
+            channel="msedge", headless=False, no_viewport=True,
+            locale="ko-KR",                  # Concur 화면이 한국어로 나오게(영어로 바뀌어 버튼을 못 찾던 문제)
+            args=["--start-maximized", "--lang=ko-KR", "--disable-features=Translate"],   # 번역 창도 안 뜨게
+            chromium_sandbox=True,           # '--no-sandbox' 경고줄이 뜨지 않게
+        )
 
     def stop(self):
         for closer in (lambda: self.ctx and self.ctx.close(), lambda: self.pw and self.pw.stop()):
@@ -1666,6 +1679,14 @@ class ConcurBot:
     # ---------- 도우미 ----------
     def _exact(self, text: str):
         return re.compile(r"^\s*" + re.escape(text) + r"\s*$")
+
+    def _alts(self, key: str) -> list:
+        """화면 문구의 여러 글자(한국어|영어)"""
+        return [a.strip() for a in str(self.t.get(key, key)).split("|") if a.strip()]
+
+    def _re(self, key: str, exact: bool = True):
+        body = "|".join(re.escape(a) for a in self._alts(key))
+        return re.compile(r"^\s*(?:" + body + r")\s*$", re.I) if exact else re.compile(body, re.I)
 
     def _visible(self, locator, timeout_ms: int = 3000) -> bool:
         try:
@@ -1767,15 +1788,20 @@ class ConcurBot:
                     pass
         return None
 
-    def _button_like(self, text: str, exact: bool = True):
+    def _button_like(self, texts, exact: bool = True, pattern=None):
+        """글자(여러 개 가능)가 보이는 버튼. pattern을 주면 그 정규식으로 찾습니다."""
         page = self.page
-        pattern = re.compile(r"^\s*" + re.escape(text) + r"\s*$") if exact else re.compile(re.escape(text))
-        value = text.replace("'", "\\'")
+        texts = [texts] if isinstance(texts, str) else list(texts)
+        if pattern is None:
+            body = "|".join(re.escape(t) for t in texts)
+            pattern = re.compile(r"^\s*(?:" + body + r")\s*$", re.I) if exact else re.compile(body, re.I)
+        values = ", ".join(f"input[type=submit][value='{v}'], input[type=button][value='{v}']"
+                           for v in (t.replace("'", "\\'") for t in texts)) or "input[type=submit][value='']"
         return self._first_shown([
             page.get_by_role("button", name=pattern),
             page.get_by_role("link", name=pattern),
             page.locator("button, [role=button], a, div[tabindex], span[tabindex]").filter(has_text=pattern),
-            page.locator(f"input[type=submit][value='{value}'], input[type=button][value='{value}']"),
+            page.locator(values),
             page.get_by_text(pattern),
         ])
 
@@ -1789,10 +1815,13 @@ class ConcurBot:
         ])
 
     def _next_button(self):
-        return self._button_like(self.t["다음"])
+        return self._button_like(self._alts("다음"))
 
     def _email_link_button(self):
-        return self._button_like(self.t["이메일 링크로 로그인"])
+        found = self._button_like(self._alts("이메일 링크로 로그인"))
+        if found is None:      # 글자가 조금 달라도 '이메일 … 링크' / 'email … link'가 든 버튼
+            found = self._button_like([], pattern=re.compile(r"이메일.{0,6}링크|e-?mail.{0,20}link|link.{0,20}e-?mail", re.I))
+        return found
 
     def on_signin_screen(self) -> bool:
         return (self._next_button() is not None and self._email_box() is not None) or self._email_link_button() is not None
@@ -1818,8 +1847,8 @@ class ConcurBot:
         url = self.page.url or ""
         if "concursolutions.com" not in url or SIGNIN_URL.search(url) or self.on_signin_screen():
             return False
-        for loc in (self.page.get_by_role("link", name=self.t["리포트 생성"]),
-                    self.page.get_by_text(self.t["리포트 생성"]),
+        for loc in (self.page.get_by_role("link", name=self._re("리포트 생성", exact=False)),
+                    self.page.get_by_text(self._re("리포트 생성", exact=False)),
                     self.page.locator("#cnqr-app-content")):
             try:
                 if loc.count() > 0:
@@ -1934,7 +1963,7 @@ class ConcurBot:
         name = tm.report_name(self.cfg["리포트_이름_형식"])
         self.log(f"리포트 생성: {name} ({tm.first_day_us} ~ {tm.last_day_us})")
         try:
-            page.get_by_role("link", name=self.t["리포트 생성"]).first.click(timeout=15000)
+            page.get_by_role("link", name=self._re("리포트 생성", exact=False)).first.click(timeout=15000)
         except Exception:
             page.goto(self.base + "/nui/expense?modal=header&context=new-report")
         page.locator("#name").wait_for(state="visible")
@@ -1943,16 +1972,16 @@ class ConcurBot:
         self.type_text(page.locator("#custom12-date-input-field-input"), tm.last_day_us)
         self.type_text(page.locator("#businessPurpose:visible").first, name)
         self.type_text(page.locator("#comment:visible").first, name)
-        page.get_by_role("button", name=self.t["리포트 생성"], exact=True).last.click()
+        page.get_by_role("button", name=self._re("리포트 생성")).last.click()
         page.wait_for_url(re.compile(r"/nui/expense/reports/"))
         time.sleep(3)
 
     # ---------- 지난달 경비 추가 ----------
     def add_available_expenses(self, tm: TargetMonth):
         page = self.page
-        card = page.locator(".report-empty-state-actions__card-body").filter(has_text=self.t["사용 가능한 경비"])
+        card = page.locator(".report-empty-state-actions__card-body").filter(has_text=self._re("사용 가능한 경비", exact=False))
         if not self._visible(card.first, 20000):
-            card = page.get_by_text(self.t["사용 가능한 경비"])
+            card = page.get_by_text(self._re("사용 가능한 경비", exact=False))
         card.first.click()
         page.wait_for_url(re.compile(r"view=available_expenses"))
         page.locator("input[type=checkbox].sapcnqr-checkbox__input").first.wait_for(state="attached")
@@ -1963,7 +1992,7 @@ class ConcurBot:
             self.log("   지난달 경비를 찾지 못했습니다. 목록 예시: " + " / ".join(r["samples"]))
             self.screenshot("available_expenses")
             raise RuntimeError("추가할 경비가 없습니다.")
-        page.get_by_role("button", name=self.t["리포트에 추가"], exact=True).click()
+        page.get_by_role("button", name=self._re("리포트에 추가")).click()
         page.locator(".entries-list").first.wait_for(state="visible")
         time.sleep(3)
 
@@ -2014,15 +2043,15 @@ class ConcurBot:
             self.click_checkbox(boxes.first)
         except Exception:
             self.click_checkbox(page.locator(".entries-list input.sapcnqr-checkbox__input").nth(1))
-        toolbar_edit = page.locator(".sapcnqr-toolbar__toolbar").get_by_role("button", name=self.t["편집"], exact=True)
+        toolbar_edit = page.locator(".sapcnqr-toolbar__toolbar").get_by_role("button", name=self._re("편집"))
         if self._visible(toolbar_edit.first, 5000):
             toolbar_edit.first.click()
         else:
-            page.get_by_role("button", name=self.t["편집"], exact=True).first.click()
+            page.get_by_role("button", name=self._re("편집")).first.click()
         page.locator("#transactionAmount").first.wait_for(state="attached")
 
     def progress(self) -> tuple:
-        el = self.page.get_by_text(re.compile(r"^\s*\d+\s*/\s*\d+\s*개\s*$")).first
+        el = self.page.get_by_text(re.compile(r"^\s*\d+\s*(?:/|of)\s*\d+\s*(?:개)?\s*$")).first
         el.wait_for(state="visible")
         a, b = re.findall(r"\d+", el.inner_text())[:2]
         return int(a), int(b)
@@ -2113,7 +2142,7 @@ class ConcurBot:
             if stop_flag and stop_flag.is_set():
                 self.log(f"사용자가 중지했습니다. {i}번째 경비 화면에서 저장하고 멈춥니다.")
                 try:
-                    page.get_by_role("button", name=self.t["경비 저장"], exact=True).first.click()
+                    page.get_by_role("button", name=self._re("경비 저장")).first.click()
                     time.sleep(3)
                 except Exception:
                     self.log("   저장 버튼을 누르지 못했습니다. Concur 화면에서 직접 저장하세요.")
@@ -2167,11 +2196,11 @@ class ConcurBot:
             results.append(row)
             try:
                 if i == total:
-                    page.get_by_role("button", name=self.t["경비 저장"], exact=True).first.click()
+                    page.get_by_role("button", name=self._re("경비 저장")).first.click()
                     time.sleep(3)
                     self.log("마지막 경비 저장 완료")
                 else:
-                    page.get_by_role("button", name=self.t["다음 경비"]).first.click()
+                    page.get_by_role("button", name=self._re("다음 경비", exact=False)).first.click()
             except Exception as e:
                 self.log(f"   다음 경비로 넘어가지 못해 중단합니다: {e}")
                 self.screenshot("next_failed")

@@ -354,3 +354,65 @@ def test_unknown_signin_screen_is_written_to_log(browser):
     with pytest.raises(RuntimeError):
         bot.wait_login()
     assert any("화면의 버튼" in line and "계속" in line for line in lines)
+
+
+# ---------- 로그인 화면이 영어로 바뀌었을 때 ----------
+
+SIGNIN_EN = """<!doctype html><meta charset="utf-8"><h1>Sign In</h1>
+<label for="u">Username, verified email address, or SSO code</label>
+<input id="u" type="text" value="{value}">
+<button onclick="location.href='https://www.concursolutions.com/nui/signin/hrd?email='+encodeURIComponent(document.getElementById('u').value)">Next</button>
+<label><input type="checkbox" checked> Remember me</label><a href="#">Forgot username</a>"""
+
+HRD_EN = """<!doctype html><meta charset="utf-8"><h1>Sign In</h1><p>Sign in with:</p>
+<button>Company SSO</button><button>SAP Concur Password</button><p>OR</p>
+<button onclick="document.cookie='linkreq=1; path=/'">{link_text}</button>"""
+
+
+class EnglishConcur(FakeConcur):
+    def __init__(self, link_text, **kw):
+        super().__init__(**kw)
+        self.link_text = link_text
+
+    def handle(self, route, request):
+        u = urlparse(request.url)
+        if u.path == "/nui/signin":
+            body = SIGNIN_EN.format(value=self.saved_email)
+        elif u.path == "/nui/signin/hrd":
+            self.typed_email = parse_qs(u.query).get("email", [""])[0]
+            body = HRD_EN.format(link_text=self.link_text)
+        else:
+            return super().handle(route, request)
+        route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
+
+
+@pytest.mark.parametrize("link_text", ["Sign in with email link", "Email me a sign-in link", "Send Email Link"])
+def test_english_signin_screens(browser, link_text):
+    site = EnglishConcur(link_text, saved_email="saved@example.com")
+    bot, ctx, calls, lines = make_bot(browser, site)
+    bot.wait_login()
+    assert site.typed_email == "saved@example.com"
+    assert link_requested(ctx) and len(calls) == 1
+    assert bot.page.url == "https://us2.concursolutions.com/home"
+
+
+def test_screen_text_alternatives():
+    bot = ca.ConcurBot(ca.default_settings(), lambda s="": None)
+    assert bot._alts("다음") == ["다음", "Next", "Continue"]
+    assert bot._re("편집").match(" Edit ") and bot._re("편집").match("편집") and not bot._re("편집").match("편집하기")
+    assert bot._re("리포트 생성", exact=False).search("경비 리포트 생성")
+
+
+def test_old_saved_screen_texts_get_english_too(tmp_path):
+    import json
+    p = tmp_path / ca.SETTINGS_FILE_NAME
+    p.write_text(json.dumps({"화면_문구": {"다음": "다음", "편집": "수정"}}, ensure_ascii=False), encoding="utf-8")
+    cfg, _ = ca.load_settings(p)
+    assert cfg["화면_문구"]["다음"] == "다음|Next|Continue"     # 예전 기본값 → 새 기본값
+    assert cfg["화면_문구"]["편집"] == "수정"                   # 사용자가 직접 바꾼 값은 그대로
+
+
+def test_edge_opens_in_korean_without_translate_popup():
+    opts = ca.ConcurBot(ca.default_settings(), lambda s="": None).launch_options()
+    assert opts["locale"] == "ko-KR" and opts["channel"] == "msedge"
+    assert "--lang=ko-KR" in opts["args"] and "--disable-features=Translate" in opts["args"]
