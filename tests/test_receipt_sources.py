@@ -150,7 +150,7 @@ def test_receipt_sources_tab(tmp_path):
     app = ca.GuiApp(tmp_path)
     try:
         tabs = [app.notebook.tab(t, "text").strip() for t in app.notebook.tabs()]
-        assert tabs == ["실행", "영수증 불러오기"]
+        assert tabs[:2] == ["실행", "영수증 불러오기"]
         src = app.sources
         assert src.folders == [str(icloud)]
         assert app.folder_summary.cget("text") == "1곳: iCloud"

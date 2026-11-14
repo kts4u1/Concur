@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import calendar
 import csv
+import hashlib
 import html as html_lib
 import json
 import os
@@ -31,6 +32,7 @@ import sys
 import threading
 import time
 import traceback
+import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -46,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-13 영수증 불러오기 탭"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-14 백업·되살리기"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -203,6 +205,9 @@ def default_settings():
         "_영수증_추가_폴더_설명": ("영수증 사진이 있는 다른 폴더들(하위 폴더 포함). 아이폰이 아닌 휴대폰의 사진 폴더(OneDrive·구글 드라이브), "
                           "카카오톡 받은 파일, 프로그램이 사진을 복사해 두는 '가져온 영수증' 폴더 등. 창의 [영수증 불러오기] 탭에서 고칩니다."),
         "영수증_추가_폴더": [],
+        "_백업_폴더_설명": ("자동 입력 규칙·병원 목록·설정을 자동으로 백업해 두는 폴더. 비워 두면 문서\\Concur 경비 자동 입력 백업. "
+                       "프로그램 폴더와 따로 두어야 프로그램을 새로 받아도 남습니다."),
+        "백업_폴더": "",
         "_영수증_날짜_설명": "어느 달 영수증인지는 영수증에 적힌 날짜로 정하고, 날짜를 못 읽은 영수증만 촬영 날짜를 참고합니다. 처리할 달이 끝나고 아래 일수 안에 찍은 사진까지 봅니다.",
         "영수증_촬영_허용_일수": 60,
         "보정본_폴더": str(source / "Concur_Expenses_Processed"),
@@ -306,6 +311,144 @@ def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+# ---------- 백업·되살리기 ----------
+BACKUP_INFO_NAME = "백업정보.json"
+AUTO_BACKUP_PREFIX = "자동백업_"
+AUTO_BACKUP_KEEP = 20
+RESULT_BACKUP_SUFFIXES = (".csv", ".json")
+
+
+def backup_dir(cfg=None) -> Path:
+    """백업 폴더: 설정 '백업_폴더' → 문서\\Concur 경비 자동 입력 백업 (프로그램 폴더와 따로 있어 새 판을 받아도 남음)"""
+    env = os.environ.get("CONCUR_BACKUP_DIR")
+    if env:
+        return Path(env)
+    custom = str((cfg or {}).get("백업_폴더") or "").strip()
+    return Path(custom) if custom else Path.home() / "Documents" / "Concur 경비 자동 입력 백업"
+
+
+def backup_members(base: Path) -> list:
+    """백업할 개인 파일 [(백업 안의 이름, 경로), ...]: 설정, 자동입력표, 병원목록, 결과 폴더의 목록·기억 파일"""
+    out = []
+    for name in (SETTINGS_FILE_NAME, CATEGORY_FILE_NAME, HOSPITAL_FILE_NAME):
+        if (base / name).is_file():
+            out.append((name, base / name))
+    results = base / "결과"
+    if results.is_dir():
+        for f in sorted(results.iterdir()):
+            if f.is_file() and f.suffix.lower() in RESULT_BACKUP_SUFFIXES:
+                out.append((f"결과/{f.name}", f))
+    return out
+
+
+def _members_hash(members) -> str:
+    h = hashlib.sha256()
+    for name, path in members:
+        h.update(name.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def make_backup(base: Path, dest: Path, note: str = "") -> dict:
+    """개인 파일을 zip 하나로 묶습니다. → 백업 정보"""
+    members = backup_members(base)
+    if not members:
+        raise RuntimeError("백업할 것이 없습니다(아직 설정·자동 입력표·병원 목록이 없음).")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    info = {"프로그램": APP_VERSION, "만든_시각": datetime.now().isoformat(timespec="microseconds"),
+            "프로그램_폴더": str(base), "메모": note, "파일": [n for n, _ in members], "내용_해시": _members_hash(members)}
+    tmp = dest.with_name(dest.name + ".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(BACKUP_INFO_NAME, json.dumps(info, ensure_ascii=False, indent=1))
+        for name, path in members:
+            z.write(path, name)
+    os.replace(tmp, dest)
+    return info
+
+
+def read_backup_info(path: Path) -> dict:
+    try:
+        with zipfile.ZipFile(path) as z:
+            return json.loads(z.read(BACKUP_INFO_NAME).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def list_backups(folder: Path) -> list:
+    """이 프로그램이 만든 백업 [(경로, 정보), ...] — 최근 것부터"""
+    try:
+        items = [(f, read_backup_info(f)) for f in folder.glob("*.zip")] if folder.is_dir() else []
+    except OSError:
+        items = []
+    items = [(f, i) for f, i in items if i]
+    return sorted(items, key=lambda x: (str(x[1].get("만든_시각", "")), x[0].name), reverse=True)
+
+
+def _unique_path(folder: Path, stem: str) -> Path:
+    path, n = folder / f"{stem}.zip", 2
+    while path.exists():
+        path, n = folder / f"{stem}_{n}.zip", n + 1
+    return path
+
+
+def auto_backup(base: Path, folder: Path, note: str = "자동 백업"):
+    """바뀐 것이 있을 때만 자동 백업(최근 AUTO_BACKUP_KEEP개만 남김). → 만든 백업 경로 또는 None"""
+    members = backup_members(base)
+    if not members:
+        return None
+    autos = [(f, i) for f, i in list_backups(folder) if f.name.startswith(AUTO_BACKUP_PREFIX)]
+    if autos and autos[0][1].get("내용_해시") == _members_hash(members):
+        return None
+    path = _unique_path(folder, f"{AUTO_BACKUP_PREFIX}{datetime.now():%Y%m%d_%H%M%S}")
+    make_backup(base, path, note)
+    for old, _ in autos[AUTO_BACKUP_KEEP - 1:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return path
+
+
+def _restorable(name: str) -> bool:
+    if name in (SETTINGS_FILE_NAME, CATEGORY_FILE_NAME, HOSPITAL_FILE_NAME):
+        return True
+    parts = name.split("/")
+    return (len(parts) == 2 and parts[0] == "결과" and parts[1] not in ("", ".", "..")
+            and "\\" not in parts[1] and Path(parts[1]).suffix.lower() in RESULT_BACKUP_SUFFIXES)
+
+
+def restore_backup(path: Path, base: Path, folder: Path) -> list:
+    """백업을 프로그램 폴더에 되살립니다. 되살리기 전 상태도 자동 백업해 두어 되돌릴 수 있습니다. → 되살린 파일 이름들"""
+    info = read_backup_info(path)
+    if not info:
+        raise RuntimeError(f"이 프로그램이 만든 백업 파일이 아닙니다: {path.name}")
+    with zipfile.ZipFile(path) as z:
+        listed = set(info.get("파일") or [])
+        names = [n for n in z.namelist() if n in listed and _restorable(n)]
+        if not names:
+            raise RuntimeError("백업 파일에 되살릴 내용이 없습니다.")
+        auto_backup(base, folder, "되살리기 전")
+        for name in names:
+            target = base.joinpath(*name.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(target.name + ".tmp")
+            tmp.write_bytes(z.read(name))
+            try:
+                os.replace(tmp, target)
+            except PermissionError:
+                tmp.unlink()
+                raise RuntimeError(f"{name} 파일이 엑셀 등에 열려 있습니다. 닫고 다시 되살리세요.")
+    return names
+
+
+def backup_label(path: Path, info: dict) -> tuple:
+    """백업 목록에 보일 (만든 시각, 종류, 프로그램 판, 파일 수)"""
+    when = str(info.get("만든_시각", "")).replace("T", " ")[:16]
+    kind = "자동" if path.name.startswith(AUTO_BACKUP_PREFIX) else "직접"
+    if info.get("메모") and info["메모"] not in ("자동 백업", "직접 백업"):
+        kind += f" ({info['메모']})"
+    return when, kind, str(info.get("프로그램", "")), str(len(info.get("파일") or []))
 
 
 def open_path(path: Path, notepad: bool = False):
@@ -3260,14 +3403,15 @@ class GuiApp:
         self.editor = None
         self.tk, self.mb, self.fd = tk, messagebox, filedialog
         self.base = base
+        root = self.root = tk.Tk()
+        root.title(f"Concur 경비 자동 입력 ({APP_VERSION})")
+        self.restored = self.offer_restore_on_first_run() if not (base / SETTINGS_FILE_NAME).exists() else None
         self.cfg, created = load_settings(base / SETTINGS_FILE_NAME)
         load_hospitals(base / HOSPITAL_FILE_NAME)
         self.q = queue.Queue()
         self.worker = None
         self.stop_flag = threading.Event()
 
-        root = self.root = tk.Tk()
-        root.title(f"Concur 경비 자동 입력 ({APP_VERSION})")
         root.geometry("880x820")
         root.minsize(780, 680)
         style = ttk.Style()
@@ -3286,6 +3430,8 @@ class GuiApp:
         nb.add(f, text="  실행  ")
         self.sources_frame = ttk.Frame(nb, padding=10)
         nb.add(self.sources_frame, text="  영수증 불러오기  ")
+        self.backup_frame = ttk.Frame(nb, padding=10)
+        nb.add(self.backup_frame, text="  백업·되살리기  ")
 
         ttk.Label(f, text="처리할 달").grid(row=0, column=0, sticky="w", pady=3)
         months = recent_months(include_current=True)                     # 맨 위가 이번 달
@@ -3349,9 +3495,13 @@ class GuiApp:
         self.text = scrolledtext.ScrolledText(outer, height=12, state="disabled", font=("Malgun Gothic", 9))
         self.text.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         self.sources = ReceiptSourcesTab(self, self.sources_frame)
+        self.backups = BackupTab(self, self.backup_frame)
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self.poll)
+        if self.restored:
+            self.append(f"백업에서 되살렸습니다: {self.restored} (자동 입력 규칙·병원 목록·설정)")
+        self.auto_backup("켤 때")
         if created:
             self.append("처음 실행입니다. 영수증 폴더·기본 도시를 확인하고, [병원 목록 편집]에서 담당 병원을 넣어 주세요.")
             self.append("영수증 사진이 있는 곳은 [영수증 불러오기] 탭에서 넣습니다. 아이폰은 iCloud 사진 폴더, "
@@ -3365,6 +3515,53 @@ class GuiApp:
         self.text.insert("end", line + "\n")
         self.text.see("end")
         self.text.configure(state="disabled")
+
+    # ---------- 백업 ----------
+    def offer_restore_on_first_run(self):
+        """새 폴더에 받은 프로그램을 처음 켤 때: 문서 폴더의 최근 백업을 되살릴지 묻습니다. → 되살린 백업 이름 또는 None"""
+        folder = backup_dir()
+        backups = list_backups(folder)
+        if not backups:
+            return None
+        path, info = backups[0]
+        when, kind, version, _ = backup_label(path, info)
+        self.root.withdraw()
+        try:
+            if not self.mb.askyesno("예전 설정 되살리기", (
+                    f"예전에 쓰던 설정 백업이 있습니다.\n\n만든 시각: {when} ({kind})\n프로그램: {version}\n\n"
+                    "자동 입력 규칙·병원 목록·설정·영수증 목록을 되살릴까요?\n"
+                    "(아니요를 눌러도 나중에 [백업·되살리기] 탭에서 되살릴 수 있습니다)")):
+                return None
+            restore_backup(path, self.base, folder)
+            return f"{when} ({path.name})"
+        except Exception as e:
+            self.mb.showerror("예전 설정 되살리기", str(e))
+            return None
+        finally:
+            self.root.deiconify()
+
+    def auto_backup(self, note="자동 백업"):
+        try:
+            made = auto_backup(self.base, backup_dir(load_settings(self.base / SETTINGS_FILE_NAME)[0]), note)
+        except Exception as e:
+            self.append(f"자동 백업 실패: {e}")
+            return None
+        if made is not None and getattr(self, "backups", None) is not None:
+            self.backups.refresh()
+        return made
+
+    def reload_from_settings(self):
+        """되살린 설정을 창에 다시 보여 줌"""
+        self.cfg, _ = load_settings(self.base / SETTINGS_FILE_NAME)
+        load_hospitals(self.base / HOSPITAL_FILE_NAME)
+        self.city.set(self.cfg["기본_도시"])
+        self.login_email.set(str(self.cfg.get("로그인_이메일") or ""))
+        self.auto_login.set(str(self.cfg.get("로그인_방법", "이메일 링크")).strip() == "이메일 링크")
+        self.pre.set(bool(self.cfg.get("영수증_보정_사용", True)))
+        self.review.set(bool(self.cfg.get("입력_전_확인", True)))
+        self.sources.folders = [str(f) for f in receipt_folders(self.cfg)]
+        self.sources.counts = {}
+        self.sources.refresh()
 
     def update_folder_summary(self, folders: list):
         if not folders:
@@ -3500,8 +3697,10 @@ class GuiApp:
         if self.worker and self.worker.is_alive():
             if not self.mb.askyesno("종료", "작업 중입니다. 종료하면 Edge 창도 닫힙니다. 종료할까요?"):
                 return
+            self.auto_backup("끌 때")
             self.root.destroy()
             os._exit(0)
+        self.auto_backup("끌 때")
         self.root.destroy()
 
     def run(self):
@@ -3715,6 +3914,124 @@ class ReceiptSourcesTab:
         self.import_status.configure(text=msg)
         self.app.append(f"사진 가져오기: {msg} → {dest}")
         return result
+
+
+class BackupTab:
+    """[백업·되살리기] 탭: 자동 입력 규칙·병원 목록·설정·영수증 목록을 zip 하나로 백업하고 되살리기"""
+
+    def __init__(self, app, parent):
+        tk, ttk = app.tk, app.ttk
+        self.app = app
+        self.items = []
+        parent.columnconfigure(0, weight=1)
+        ttk.Label(parent, foreground="#555", wraplength=820, justify="left", text=(
+            "자동 입력 규칙(자동 입력 편집에서 만든 것), 병원 목록, 설정, 영수증 목록을 파일 하나(zip)로 묶어 둡니다.\n"
+            "• 자동 백업: 프로그램을 켤 때·끌 때·자동 입력을 저장할 때, 바뀐 것이 있으면 아래 백업 폴더에 저장합니다(최근 20개).\n"
+            "• 새 판으로 바꿀 때: 같은 폴더에 프로그램 파일만 바꾸면 규칙이 그대로 쓰입니다. "
+            "새 폴더에 두었다면 처음 켤 때 최근 백업을 되살릴지 물어봅니다.\n"
+            "• 되살리기 전 상태도 자동으로 백업하므로, 잘못 되살렸으면 바로 위의 '되살리기 전' 백업을 다시 되살리면 됩니다.")
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        folder_row = ttk.Frame(parent)
+        folder_row.grid(row=1, column=0, sticky="ew")
+        ttk.Label(folder_row, text="백업 폴더:").pack(side="left")
+        self.folder_label = ttk.Label(folder_row, text="", foreground="#1a4d8f")
+        self.folder_label.pack(side="left", padx=6)
+        ttk.Button(folder_row, text="폴더 열기", command=self.open_folder).pack(side="right")
+
+        box = ttk.Frame(parent)
+        box.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        box.columnconfigure(0, weight=1)
+        self.tree = ttk.Treeview(box, columns=("when", "kind", "version", "files"), show="headings", height=9,
+                                 selectmode="browse")
+        for col, text, width in (("when", "만든 시각", 140), ("kind", "종류", 260), ("version", "프로그램 판", 260),
+                                 ("files", "파일 수", 70)):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="ew")
+        sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=sb.set)
+
+        bf = ttk.Frame(parent)
+        bf.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        for text, cmd in (("지금 백업하기", self.backup_now), ("고른 백업 되살리기", self.restore_selected),
+                          ("다른 백업 파일에서 되살리기…", self.restore_from_file), ("새로 고침", self.refresh)):
+            ttk.Button(bf, text=text, command=cmd).pack(side="left", padx=3)
+        self.status = ttk.Label(parent, text="", foreground="#1a4d8f", wraplength=820, justify="left")
+        self.status.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        self.refresh()
+
+    def folder(self) -> Path:
+        return backup_dir(load_settings(self.app.base / SETTINGS_FILE_NAME)[0])
+
+    def refresh(self):
+        folder = self.folder()
+        self.folder_label.configure(text=str(folder))
+        self.items = list_backups(folder)
+        self.tree.delete(*self.tree.get_children())
+        for i, (path, info) in enumerate(self.items):
+            self.tree.insert("", "end", iid=str(i), values=backup_label(path, info))
+
+    def open_folder(self):
+        self.folder().mkdir(parents=True, exist_ok=True)
+        open_path(self.folder())
+
+    def backup_now(self):
+        path = _unique_path(self.folder(), f"직접백업_{datetime.now():%Y%m%d_%H%M%S}")
+        try:
+            make_backup(self.app.base, path, "직접 백업")
+        except Exception as e:
+            self.app.mb.showerror("백업", str(e))
+            return None
+        self.status.configure(text=f"백업했습니다: {path}")
+        self.app.append(f"백업했습니다: {path}")
+        self.refresh()
+        return path
+
+    def _can_restore(self) -> bool:
+        if self.app.worker and self.app.worker.is_alive():
+            self.app.mb.showinfo("되살리기", "작업 중에는 되살릴 수 없습니다. 작업이 끝난 뒤 다시 누르세요.")
+            return False
+        if self.app.editor is not None and self.app.editor.win.winfo_exists():
+            self.app.mb.showinfo("되살리기", "자동 입력 편집 창을 닫고 다시 누르세요.")
+            return False
+        return True
+
+    def restore(self, path: Path, ask=True) -> bool:
+        if not self._can_restore():
+            return False
+        info = read_backup_info(path)
+        when, kind, version, files = backup_label(path, info) if info else ("", "", "", "0")
+        if ask and not self.app.mb.askyesno("되살리기", (
+                f"이 백업으로 되살릴까요?\n\n만든 시각: {when} ({kind})\n프로그램: {version}\n파일 {files}개\n\n"
+                "지금 상태는 되살리기 전에 자동으로 백업해 둡니다.")):
+            return False
+        try:
+            names = restore_backup(path, self.app.base, self.folder())
+        except Exception as e:
+            self.app.mb.showerror("되살리기", str(e))
+            return False
+        self.app.reload_from_settings()
+        msg = f"되살렸습니다: {when} 백업, 파일 {len(names)}개 (자동 입력 규칙·병원 목록·설정·영수증 목록)"
+        self.status.configure(text=msg)
+        self.app.append(msg)
+        self.refresh()
+        return True
+
+    def restore_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            self.app.mb.showinfo("되살리기", "되살릴 백업을 목록에서 고르세요.")
+            return False
+        return self.restore(self.items[int(sel[0])][0])
+
+    def restore_from_file(self):
+        picked = self.app.fd.askopenfilename(title="되살릴 백업 파일 고르기", initialdir=str(self.folder()),
+                                             filetypes=[("백업 파일", "*.zip"), ("모든 파일", "*.*")])
+        if picked:
+            return self.restore(Path(picked))
+        return False
 
 
 class CategoryEditor:
@@ -3961,6 +4278,7 @@ class CategoryEditor:
         on = sum(1 for r in self.rows if r[1].strip())
         self.app.append(f"자동 입력을 저장했습니다: 설정된 항목 {on}개 (다음 실행부터 씁니다)")
         self.status.configure(text=f"저장했습니다. 설정된 항목 {on}개.")
+        self.app.auto_backup("자동 입력 저장 때")
         return True
 
     def open_excel(self):
