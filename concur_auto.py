@@ -48,10 +48,11 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 식대·숙박 찾을 글자"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 가게 기억"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
+STORE_MEMORY_FILE_NAME = "가게기억.json"       # 사업자등록번호 → 사용자가 고른 분류·병원·도시
 CATEGORIES = ("주차", "카페", "식대")
 
 # 기본 병원 목록: 사용자 영수증에서 확인한 병원만 (2026-11-13 사용자 요청. 나머지는 영수증·회사 엑셀에서 더해짐)
@@ -160,9 +161,19 @@ MEAL_MORE_WORDS = ["중식", "일식", "양식", "분식", "백반", "국밥", "
 ACCOM_USER_WORDS = ["모텔", "호텔"]
 ACCOM_MORE_WORDS = ["숙박", "여관", "여인숙", "리조트", "펜션", "게스트하우스", "레지던스", "콘도", "객실", "입실", "퇴실",
                     "체크인", "체크아웃", "야놀자", "여기어때", "에어비앤비", "hotel", "motel", "resort"]
-# 예전 자동입력표에 한 번만 더할 글자(사용자가 나중에 지운 글자는 다시 넣지 않음)
-DEFAULT_WORDS_VERSION = 1
-DEFAULT_WORDS_TO_ADD = {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS}
+CAFE_WORDS = ["메리카", "리카노", "테이크", "카페"]           # 앞 3개는 OCR이 '아메리카노·테이크아웃'을 끊어 읽은 것
+CAFE_MORE_WORDS = ["커피", "라떼", "카푸치노", "에스프레소", "프라푸치노", "스무디", "디저트", "베이커리",
+                   "스타벅스", "이디야", "투썸", "메가커피", "메가엠지씨", "컴포즈", "빽다방", "할리스", "파스쿠찌",
+                   "엔제리너스", "커피빈", "폴바셋", "탐앤탐스", "공차", "매머드", "더벤티", "블루보틀", "파리바게뜨",
+                   "뚜레쥬르", "coffee", "cafe", "starbucks", "latte"]
+PARKING_WORDS = ["주차", "입차", "출차", "주자"]              # '주자'는 OCR이 '주차'를 잘못 읽은 것
+PARKING_MORE_WORDS = ["입출차", "파킹", "발렛", "parking", "valet"]
+# 예전 자동입력표에 판마다 한 번씩만 더할 글자(사용자가 나중에 지운 글자는 다시 넣지 않음)
+DEFAULT_WORDS_VERSION = 2
+DEFAULT_WORDS_BY_VERSION = {
+    1: {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS},
+    2: {"카페": CAFE_WORDS + CAFE_MORE_WORDS, "주차": PARKING_WORDS + PARKING_MORE_WORDS},
+}
 DEFAULT_CITIES = {
     # Concur 화면에서 확인한 이름
     "광주": "Gwangju (ex Kwangju), KOREA, REPUBLIC OF",
@@ -263,8 +274,8 @@ def default_settings():
         "리포트_찾기_대기_초": 8,
         "_키워드_설명": "아래 키워드·분류_우선순위·입력_문구·Undefined일_때_선택할_유형은 자동입력표.csv를 처음 만들 때만 씁니다. 그 뒤로는 자동입력표.csv(창의 [자동 입력표 편집])에서 고치세요.",
         "키워드": {
-            "주차": ["주차", "입차", "출차", "주자"],
-            "카페": ["메리카", "리카노", "테이크", "카페"],
+            "주차": PARKING_WORDS + PARKING_MORE_WORDS,
+            "카페": CAFE_WORDS + CAFE_MORE_WORDS,
             "식대": MEAL_USER_WORDS + MEAL_MORE_WORDS + ["버터"],
             "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS,
         },
@@ -354,7 +365,7 @@ def backup_dir(cfg=None) -> Path:
 def backup_members(base: Path) -> list:
     """백업할 개인 파일 [(백업 안의 이름, 경로), ...]: 설정, 자동입력표, 병원목록, 결과 폴더의 목록·기억 파일"""
     out = []
-    for name in (SETTINGS_FILE_NAME, CATEGORY_FILE_NAME, HOSPITAL_FILE_NAME):
+    for name in (SETTINGS_FILE_NAME, CATEGORY_FILE_NAME, HOSPITAL_FILE_NAME, STORE_MEMORY_FILE_NAME):
         if (base / name).is_file():
             out.append((name, base / name))
     results = base / "결과"
@@ -433,7 +444,7 @@ def auto_backup(base: Path, folder: Path, note: str = "자동 백업"):
 
 
 def _restorable(name: str) -> bool:
-    if name in (SETTINGS_FILE_NAME, CATEGORY_FILE_NAME, HOSPITAL_FILE_NAME):
+    if name in (SETTINGS_FILE_NAME, CATEGORY_FILE_NAME, HOSPITAL_FILE_NAME, STORE_MEMORY_FILE_NAME):
         return True
     parts = name.split("/")
     return (len(parts) == 2 and parts[0] == "결과" and parts[1] not in ("", ".", "..")
@@ -960,12 +971,17 @@ def upgrade_category_table(table_path: Path, settings_path: Path, log=None) -> i
     if not table_path.exists():
         return 0                                          # 새로 만들 때는 기본값에 이미 들어 있음
     cfg, _ = load_settings(settings_path)
-    if int(cfg.get("_기본_찾을_글자_판") or 0) >= DEFAULT_WORDS_VERSION:
+    done_version = int(cfg.get("_기본_찾을_글자_판") or 0)
+    if done_version >= DEFAULT_WORDS_VERSION:
         return 0
+    to_add = {}
+    for version in range(done_version + 1, DEFAULT_WORDS_VERSION + 1):
+        for name, words in DEFAULT_WORDS_BY_VERSION.get(version, {}).items():
+            to_add.setdefault(name, []).extend(words)
     rows = load_category_rows(table_path, cfg)
     added = 0
     for row in rows:
-        words = DEFAULT_WORDS_TO_ADD.get(row[C_NAME])
+        words = to_add.get(row[C_NAME])
         if not words:
             continue
         have = [k.strip() for k in re.split(r"[,，/]", row[C_KEYWORDS]) if k.strip()]
@@ -974,7 +990,7 @@ def upgrade_category_table(table_path: Path, settings_path: Path, log=None) -> i
         if new:
             row[C_KEYWORDS] = ", ".join(have + new)
             added += len(new)
-    if not any(r[C_NAME] == "숙박" for r in rows):
+    if done_version < 1 and not any(r[C_NAME] == "숙박" for r in rows):
         defaults = {r[C_NAME]: r for r in category_rows_from_cfg(default_settings())}
         at = next((i + 1 for i, r in enumerate(rows) if r[C_NAME] == "식대"), len(rows))
         rows.insert(at, _category_row(defaults["숙박"][:C_NOTE] + [""]))
@@ -982,7 +998,7 @@ def upgrade_category_table(table_path: Path, settings_path: Path, log=None) -> i
     if added:
         save_category_rows(table_path, rows)
         if log:
-            log(f"자동 입력표에 기본 찾을 글자 {added}개를 더했습니다(식대·숙박). [자동 입력 편집]에서 고칠 수 있습니다.")
+            log(f"자동 입력표에 기본 찾을 글자 {added}개를 더했습니다({'·'.join(to_add)}). [자동 입력 편집]에서 고칠 수 있습니다.")
     cfg["_기본_찾을_글자_판"] = DEFAULT_WORDS_VERSION
     save_settings(settings_path, cfg)
     return added
@@ -1635,6 +1651,8 @@ class Receipt:
     ocr_dates: list = field(default_factory=list)   # 영수증 글자에서 읽은 날짜
     skip_reason: str = ""                           # 이 달 목록에서 자동으로 뺀 이유
     hospital_src: str = ""                          # 병원을 어디서 찾았는지
+    biz_no: str = ""                                # 사업자등록번호(가게 기억에 씀)
+    remembered: bool = False                        # 가게 기억으로 분류·병원·도시를 채웠는지
 
     @property
     def main_date(self) -> str:
@@ -1829,13 +1847,14 @@ def looks_like_receipt(text_compact: str, amounts: list, has_ocr_date: bool, cat
 
 
 HOSP_FROM_OCR, HOSP_FROM_DAY, HOSP_FROM_VENDOR, HOSP_FROM_USER = "영수증 글자", "같은 날 영수증", "Concur 가게 이름", "직접 고침"
+HOSP_FROM_MEMORY = "가게 기억"
 
 
 def fill_same_day_hospitals(receipts: list) -> int:
     """병원을 못 찾은 영수증에 같은 날 다른 영수증(주차 등)의 병원을 채웁니다. 같은 날 병원이 여러 곳이면 주차 영수증 것만."""
     by_day = {}
     for r in receipts:
-        if r.use and r.hospital_en and r.hospital_src in (HOSP_FROM_OCR, HOSP_FROM_USER):
+        if r.use and r.hospital_en and r.hospital_src in (HOSP_FROM_OCR, HOSP_FROM_USER, HOSP_FROM_MEMORY):
             by_day.setdefault(r.main_date, []).append(r)
     filled = 0
     for r in receipts:
@@ -1889,7 +1908,90 @@ def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, ho
     rec.is_receipt = looks_like_receipt(text_c, rec.amounts, rec.date_from_ocr, rec.category,
                                         cfg.get("영수증_판별_단어"))
     rec.use = rec.is_receipt
+    rec.biz_no = find_business_number(ocr_text)
     return rec
+
+
+# ---------- 가게 기억: 영수증의 사업자등록번호로 같은 가게를 알아봄 ----------
+BIZ_NO_LABELED = re.compile(r"사업자(?:등록)?\s*(?:번호|No\.?)?\s*[:：]?\s*(\d{3})\s*-?\s*(\d{2})\s*-?\s*(\d{5})(?!\d)")
+BIZ_NO_DASHED = re.compile(r"(?<![\d-])(\d{3})\s?-\s?(\d{2})\s?-\s?(\d{5})(?![\d-])")
+
+
+def valid_business_number(digits: str) -> bool:
+    """사업자등록번호 끝자리 검사(국세청 계산법)"""
+    if not re.fullmatch(r"\d{10}", digits):
+        return False
+    d = [int(x) for x in digits]
+    total = sum(a * b for a, b in zip(d[:9], (1, 3, 7, 1, 3, 7, 1, 3, 5))) + (d[8] * 5) // 10
+    return (10 - total % 10) % 10 == d[9]
+
+
+def find_business_number(ocr_text: str) -> str:
+    """영수증 글자의 사업자등록번호(123-45-67890). '사업자' 글자 옆에 있으면 그대로, 아니면 끝자리 검사가 맞을 때만"""
+    text = ocr_text or ""
+    m = BIZ_NO_LABELED.search(text)
+    if m:
+        return "-".join(m.groups())
+    for m in BIZ_NO_DASHED.finditer(text):
+        if valid_business_number("".join(m.groups())):
+            return "-".join(m.groups())
+    return ""
+
+
+def load_store_memory(path: Path) -> dict:
+    data = _load_json(path) if path is not None and path.exists() else {}
+    return data if isinstance(data, dict) else {}
+
+
+def remember_stores(path: Path, rows: list) -> int:
+    """영수증 목록에서 사용자가 고친 분류·병원·도시를 사업자등록번호별로 기억합니다. → 새로 기억하거나 바꾼 가게 수"""
+    memory, changed = load_store_memory(path), 0
+    for row in rows:
+        g = lambda k: str(row.get(k) or "").strip()
+        biz = g("사업자번호")
+        if not biz or not parse_use_cell(g("사용(O/X)"), True):
+            continue
+        entry = dict(memory.get(biz) or {})
+        before = dict(entry)
+        for name in ("분류", "병원 영문", "도시"):
+            if g(name) != g(f"[자동] {name}"):            # 사용자가 고른 칸만
+                entry[name] = g(name)
+        if entry != before:
+            entry["가게 글자"] = g("OCR 앞부분")[:30]
+            entry["기억한 날"] = f"{date.today():%Y-%m-%d}"
+            memory[biz] = entry
+            changed += 1
+    if changed:
+        try:
+            path.write_text(json.dumps(memory, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            return 0
+    return changed
+
+
+def apply_store_memory(rec: Receipt, memory: dict, cfg: dict) -> bool:
+    """기억해 둔 가게(같은 사업자등록번호)면 그때 고른 분류·병원·도시를 씁니다(사용자가 정한 것이라 글자 찾기보다 먼저)."""
+    entry = memory.get(rec.biz_no) if rec.biz_no else None
+    if not entry:
+        return False
+    applied = False
+    category = entry.get("분류") or ""
+    if category and category in (cfg.get("분류_우선순위") or CATEGORIES):
+        rec.category, applied = category, True
+    if entry.get("병원 영문"):
+        rec.hospital_en, rec.hospital_src, applied = entry["병원 영문"], HOSP_FROM_MEMORY, True
+    if entry.get("도시"):
+        rec.city, applied = resolve_city(entry["도시"], cfg.get("도시_목록") or DEFAULT_CITIES), True
+    if applied:
+        rec.remembered = True
+        if not rec.is_receipt:                     # 기억한 가게의 영수증이면 영수증으로 봄
+            rec.is_receipt = rec.use = True
+    return applied
+
+
+def category_from_vendor(vendor: str, cfg: dict) -> str:
+    """Concur 카드 경비의 가맹점 이름(예: STARBUCKS KOREA, OO PARKING)으로 분류"""
+    return detect_category(compact(vendor), cfg.get("키워드") or {}, cfg.get("분류_우선순위")) if vendor else ""
 
 
 def receipt_issues(rec: Receipt, receipts: list) -> list:
@@ -1916,7 +2018,7 @@ def duplicate_count(rec: Receipt, receipts: list) -> int:
 
 LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "병원 근거", "도시", "확인 필요",
                "OCR 앞부분", "[자동] 사용", "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문", "[자동] 도시",
-               "날짜 후보", "금액 후보", "찾은 병원 글자", "사진 위치"]
+               "날짜 후보", "금액 후보", "찾은 병원 글자", "사진 위치", "사업자번호", "가게 기억"]
 NOT_RECEIPT_NOTE = "영수증 아닌 것 같음(자동 제외)"
 UNDATED_NOTE = "날짜 못 읽음: 영수증 날짜를 적어 주세요(자동 제외)"
 OTHER_MONTH_NOTE = "다른 달 영수증({date})(자동 제외)"
@@ -2013,6 +2115,7 @@ def save_receipt_list(receipts: list, auto: dict, path: Path):
             city_name(r.city), ", ".join(issues), compact(r.ocr_text)[:100],
             "O" if a.use else "X", a.main_date, a.total or "", a.category, a.hospital_en, city_name(a.city),
             " ".join(a.dates), " ".join(str(x) for x in a.amounts), a.hospital_key, str(r.original),
+            r.biz_no, "O" if a.remembered else "",
         ])
     write_csv(path, LIST_HEADER, rows)
 
@@ -2123,6 +2226,16 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
 
     cache_path = results_dir / "ocr_cache.json"
     cache = _load_json(cache_path)
+    memory_path = results_dir.parent / STORE_MEMORY_FILE_NAME
+    old_list = list_csv_path(results_dir, tm)
+    if old_list.exists():                                  # 지난번에 고친 가게를 먼저 기억(엑셀로 고친 것도)
+        try:
+            learned = remember_stores(memory_path, read_csv_dicts(old_list))
+            if learned:
+                log(f"   고친 영수증에서 가게 {learned}곳을 기억했습니다(다음부터 같은 가게 영수증은 자동으로 맞춤).")
+        except (OSError, PermissionError):
+            pass
+    memory = load_store_memory(memory_path)
     engine = []
     counts = {"보정": 0, "나아짐": 0}
     note = old_processed_note(cfg)
@@ -2181,6 +2294,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
                 r = analyze_receipt(orig, ocr_file, text, cfg, hospitals, taken)
                 if first_is_receipt and not r.is_receipt:
                     r.is_receipt = True
+                apply_store_memory(r, memory, cfg)
                 place_in_month(r, tm)
                 return r
 
@@ -2190,6 +2304,9 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         _save_json(cache_path, cache)       # 중간에 멈춰도 읽은 결과는 남김
     if counts["보정"]:
         log(f"   금액·날짜를 못 읽어 보정해서 다시 읽은 영수증 {counts['보정']}장, 그중 더 잘 읽힌 것 {counts['나아짐']}장")
+    remembered = sum(1 for r in receipts if r.remembered)
+    if remembered:
+        log(f"   기억해 둔 가게의 영수증 {remembered}장은 그때 고른 분류·병원·도시로 맞췄습니다.")
 
     for group in (list(auto.values()), receipts):
         fill_same_day_hospitals(group)
@@ -3364,6 +3481,10 @@ class ConcurBot:
                 else:
                     rec.used_for = f"{i}번 {date_text} {amount_text}"
                     apply_vendor_hospital(rec, row["가게 이름"], self.hospitals)
+                    if not rec.category and "분류" not in rec.edited:
+                        rec.category = category_from_vendor(row["가게 이름"], self.cfg)
+                        if rec.category:
+                            self.log(f"   가맹점 이름 '{row['가게 이름']}'으로 분류: {rec.category}")
                     row["영수증"], row["분류"] = rec.original.name, rec.category
                     row["병원"], row["병원 근거"] = rec.hospital_en, rec.hospital_src
                     row["도시"] = city_name(rec.city) or f"기본({city_name(self.cfg['기본_도시'])})"
@@ -4797,7 +4918,10 @@ class ReceiptReview:
         self.vars["hosp"].set(g("병원 영문"))
         self.vars["city"].set(g("도시") or self.DEFAULT_CITY_TEXT)
         self.loading = False
-        self.issue_label.configure(text=g("확인 필요") or "없음")
+        issue = g("확인 필요") or "없음"
+        if g("가게 기억") == "O":
+            issue += "  (기억해 둔 가게라 예전에 고른 분류·병원·도시로 맞춤)"
+        self.issue_label.configure(text=issue)
         self.ocr_label.configure(text=g("OCR 앞부분") or "(읽은 글자 없음)")
         self.status.configure(text="")
         self.show_photo(row)
@@ -4867,6 +4991,9 @@ class ReceiptReview:
             return False
         self.dirty = False
         self.win.title(f"영수증 확인 {self.month_text}")
+        learned = remember_stores(self.app.base / STORE_MEMORY_FILE_NAME, self.rows)
+        if learned:
+            self.app.append(f"가게 {learned}곳을 기억했습니다. 다음부터 같은 가게 영수증은 이번에 고른 대로 맞춥니다.")
         edited = sum(1 for r in self.rows if review_row_edited(r))
         self.status.configure(text=f"저장했습니다. 고친 영수증 {edited}장 (다음 실행부터 씁니다)", style="AccentText.TLabel")
         self.app.append(f"영수증 확인: 저장했습니다(고친 영수증 {edited}장). 다음 실행부터 고친 내용을 씁니다.")
