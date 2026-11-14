@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 간결하게"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 아이콘"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -364,6 +364,31 @@ def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+ICON_FILE_NAME = "concur_auto.ico"
+
+
+def resource_path(name: str) -> Path:
+    """프로그램과 함께 들어 있는 파일(아이콘 등). exe 안에 넣은 파일은 exe가 풀어 둔 임시 폴더에 있습니다."""
+    return Path(getattr(sys, "_MEIPASS", "") or Path(__file__).resolve().parent) / name
+
+
+def set_window_icon(root):
+    """창 제목 줄·작업 표시줄 아이콘 (Windows). 없으면 기본 아이콘 그대로."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ConcurAuto")   # 작업 표시줄에 이 아이콘
+    except Exception:
+        pass
+    ico = resource_path(ICON_FILE_NAME)
+    try:
+        if ico.is_file():
+            root.iconbitmap(default=str(ico))                  # default: 나중에 여는 창(영수증 확인 등)에도
+    except Exception:
+        pass
 
 
 DATA_FOLDER_NAME = "Concur 경비 자동 입력"
@@ -2646,6 +2671,7 @@ def parse_entry_rows(rows: list) -> list:
     """리포트 경비 목록의 줄 글자들 → [(날짜, 금액, 줄 글자)]"""
     out = []
     for texts in rows or []:
+        texts = [t for t in texts if not re.match(r"(?i)select\s+expense\b", t)]
         iso = next((d for d in (concur_date_to_iso(t) for t in texts) if d), None)
         amount = next((a for a in (_amount_in_cell(t) for t in texts) if a is not None), None)
         if iso and amount is not None:
@@ -3721,6 +3747,16 @@ def unfinished_month_note(tm: TargetMonth) -> str:
             f"달이 끝난 뒤 남은 경비를 Concur에서 리포트에 추가하고 ③으로 이어서 넣으면 됩니다.")
 
 
+def check_lines(checks: list, limit: int = 8) -> str:
+    """완료 안내에 보여 줄 '확인 필요' 경비 (경비처리 파일을 열지 않아도 되게)"""
+    if not checks:
+        return ""
+    lines = [f"· {r.get('Concur 날짜', '')} {r.get('Concur 금액', '')}원: {r.get('확인 필요', '')}" for r in checks[:limit]]
+    if len(checks) > limit:
+        lines.append(f"· 그 밖에 {len(checks) - limit}건 (실행 기록 참고)")
+    return "\n" + "\n".join(lines) + "\n"
+
+
 def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
     """mode: ocr(영수증 분석만) / full(전체) / edit(만든 리포트에 입력만)"""
     cfg, _ = load_settings(base / SETTINGS_FILE_NAME)
@@ -3871,12 +3907,13 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         log(f"완료: 경비 {len(results)}건, 영수증 연결 {matched}건, 확인 필요 {len(checks)}건")
         if unused:
             log(f"어느 경비와도 맞지 않은 영수증 {len(unused)}장: {', '.join(unused)}")
-        if cfg.get("결과_자동_열기", True):
+        if cfg.get("결과_자동_열기", True) and not hasattr(ui, "review"):    # 창에서는 엑셀을 열지 않음
             ui.open(results_path)
         ui.info("완료",
                 f"경비 {len(results)}건 중 영수증 연결 {matched}건, 확인 필요 {len(checks)}건\n"
                 + (f"맞는 경비가 없던 영수증 {len(unused)}장\n" if unused else "")
-                + "\n경비처리 결과 파일의 '확인 필요' 칸을 보고 Concur에서 확인한 뒤 직접 제출하세요.\n"
+                + check_lines(checks)
+                + "\n확인 필요 경비를 Concur에서 확인한 뒤 직접 제출하세요.\n"
                 + ("Edge 창은 열어 둡니다. 확인·수정이 끝나면 Edge 창을 닫으세요(닫아야 다음 작업을 할 수 있습니다)."
                    if keep_open else "[확인]을 누르면 Edge 창이 닫힙니다."))
     except Cancelled:
@@ -4174,6 +4211,7 @@ class GuiApp:
         enable_dpi_awareness()
         root = self.root = tk.Tk()
         root.title(f"Concur 경비 자동 입력 ({APP_VERSION})")
+        set_window_icon(root)
         self.theme = apply_theme(root, ttk, tkfont)
         self.px, self.font = self.theme["px"], self.theme["font"]
         px, font, c = self.px, self.font, THEME
