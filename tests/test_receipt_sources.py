@@ -165,7 +165,7 @@ def test_receipt_sources_tab(tmp_path):
         assert app.folder_summary.cget("text") == "1곳: iCloud"
         buttons = button_texts(app.notebook.nametowidget(app.notebook.tabs()[0]))
         assert buttons == ["① 영수증 분석만", "② 전체 실행",                     # ③·중지 버튼은 없앰
-                           "영수증 목록 열기", "병원 목록 편집", "자동 입력 편집", "결과 폴더 열기"]
+                           "영수증 확인", "병원 목록 편집", "자동 입력 편집", "결과 폴더 열기"]
 
         usb = tmp_path / "USB"
         r = src.import_files([photo(usb / "20261104_101010.jpg", b"usb"), usb / "없는.jpg"])

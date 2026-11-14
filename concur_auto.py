@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-14 새 디자인"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-14 영수증 확인 창"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -1843,7 +1843,7 @@ def duplicate_count(rec: Receipt, receipts: list) -> int:
 
 LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "병원 근거", "도시", "확인 필요",
                "OCR 앞부분", "[자동] 사용", "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문", "[자동] 도시",
-               "날짜 후보", "금액 후보", "찾은 병원 글자"]
+               "날짜 후보", "금액 후보", "찾은 병원 글자", "사진 위치"]
 NOT_RECEIPT_NOTE = "영수증 아닌 것 같음(자동 제외)"
 UNDATED_NOTE = "날짜 못 읽음: 영수증 날짜를 적어 주세요(자동 제외)"
 OTHER_MONTH_NOTE = "다른 달 영수증({date})(자동 제외)"
@@ -1939,9 +1939,73 @@ def save_receipt_list(receipts: list, auto: dict, path: Path):
             "O" if r.use else "X", r.main_date, r.total or "", r.category, r.hospital_en, r.hospital_src,
             city_name(r.city), ", ".join(issues), compact(r.ocr_text)[:100],
             "O" if a.use else "X", a.main_date, a.total or "", a.category, a.hospital_en, city_name(a.city),
-            " ".join(a.dates), " ".join(str(x) for x in a.amounts), a.hospital_key,
+            " ".join(a.dates), " ".join(str(x) for x in a.amounts), a.hospital_key, str(r.original),
         ])
     write_csv(path, LIST_HEADER, rows)
+
+
+# ---------- 영수증 확인 창(엑셀 대신)에서 쓰는 도우미 ----------
+REVIEW_USER_COLUMNS = ("사용(O/X)", "날짜", "금액", "분류", "병원 영문", "도시")
+
+
+def review_row_edited(row: dict) -> bool:
+    """영수증 목록 한 줄을 사용자가 고쳤는지('[자동]' 칸과 비교, apply_user_edits와 같은 기준)"""
+    g = lambda k: str(row.get(k) or "").strip()
+    if parse_use_cell(g("사용(O/X)"), True) != parse_use_cell(g("[자동] 사용"), True):
+        return True
+    if parse_date_cell(g("날짜")) and parse_date_cell(g("날짜")) != parse_date_cell(g("[자동] 날짜")):
+        return True
+    if parse_amount_cell(g("금액")) is not None and parse_amount_cell(g("금액")) != parse_amount_cell(g("[자동] 금액")):
+        return True
+    return any(g(k) != g(f"[자동] {k}") for k in ("분류", "병원 영문", "도시"))
+
+
+def review_status(row: dict) -> str:
+    """영수증 확인 창 목록의 상태: ✕ 뺌 / ✎ 고침 / ⚠ 확인 / ✓"""
+    if not parse_use_cell(str(row.get("사용(O/X)") or ""), True):
+        return "✕ 뺌"
+    if review_row_edited(row):
+        return "✎ 고침"
+    if str(row.get("확인 필요") or "").strip():
+        return "⚠ 확인"
+    return "✓"
+
+
+def save_review_rows(path: Path, rows: list):
+    header = LIST_HEADER + [k for k in (rows[0].keys() if rows else []) if k not in LIST_HEADER]
+    write_csv(path, header, [[row.get(h, "") for h in header] for row in rows])
+
+
+def find_receipt_photo(row: dict, cfg: dict, index: dict = None):
+    """영수증 목록 한 줄의 사진 파일: '사진 위치' 칸 → 영수증 폴더들에서 같은 이름"""
+    where = str(row.get("사진 위치") or "").strip()
+    if where and Path(where).is_file():
+        return Path(where)
+    if index is None:
+        index = {}
+    if not index:
+        for folder in receipt_folders(cfg):
+            if folder.is_dir():
+                for f in iter_photo_files(folder):
+                    index.setdefault(f.name, f)
+        index.setdefault("", None)
+    return index.get(str(row.get("파일") or ""))
+
+
+def load_preview_image(path: Path, max_w: int, max_h: int):
+    """사진을 미리보기 크기로 읽습니다(회전 정보 반영, HEIC 포함) → PIL 이미지"""
+    from PIL import Image, ImageOps
+    if path.suffix.lower() in HEIC_EXTENSIONS:
+        _register_heif()
+    with Image.open(path) as im:
+        try:
+            im.draft("RGB", (max_w * 2, max_h * 2))
+        except Exception:
+            pass
+        im = ImageOps.exif_transpose(im)
+        im = im.convert("RGB")
+        im.thumbnail((max_w, max_h))
+        return im
 
 
 def _load_json(path: Path) -> dict:
@@ -3370,6 +3434,10 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
             f"확인 필요 {len(need)}장 → {list_path.name}")
 
         if mode == "ocr":
+            if receipts and hasattr(ui, "review"):
+                ui.review(list_path)
+                log("영수증 확인 창에서 사용 여부·날짜·금액·분류·병원·도시를 고르거나 고친 뒤 [저장]하세요. 다음 실행부터 고친 내용을 씁니다.")
+                return
             if receipts and cfg.get("결과_자동_열기", True):
                 ui.open(list_path)
             ui.info("영수증 분석 완료",
@@ -3390,13 +3458,17 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
                 + "\n".join(f"· {r.original.name}: {', '.join(receipt_issues(r, receipts) or [r.skip_reason])}"
                             for r in need[:8])
                 + ("\n..." if len(need) > 8 else "")
-                + "\n\n[예] 영수증 목록을 열어 고치기\n[아니오] 그대로 진행\n[취소] 중단")
+                + ("\n\n[예] 영수증 확인 창에서 고치기" if hasattr(ui, "review") else "\n\n[예] 영수증 목록을 열어 고치기")
+                + "\n[아니오] 그대로 진행\n[취소] 중단")
             if ans is None:
                 raise Cancelled()
             if ans:
-                ui.open(list_path)
-                if not ui.confirm("영수증 목록 수정", "엑셀에서 고친 뒤 저장하고 엑셀을 닫았으면 [확인]을 누르세요.\n([취소]는 중단)"):
-                    raise Cancelled()
+                if hasattr(ui, "review"):
+                    ui.review(list_path, wait=True)           # 창을 닫으면 이어서
+                else:
+                    ui.open(list_path)
+                    if not ui.confirm("영수증 목록 수정", "엑셀에서 고친 뒤 저장하고 엑셀을 닫았으면 [확인]을 누르세요.\n([취소]는 중단)"):
+                        raise Cancelled()
                 receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log, base / HOSPITAL_FILE_NAME)
 
         bot = ConcurBot(cfg, log, ui, stop_flag)
@@ -3661,6 +3733,16 @@ def apply_theme(root, ttk, tkfont) -> dict:
     return {"px": px, "font": font, "scale": scale, "family": family, "images": checks}
 
 
+def auto_wrap(label, margin: int = 0):
+    """글자를 지금 칸 폭에 맞춰 줄바꿈(창이 좁아도 오른쪽이 잘리지 않게). 라벨은 sticky="ew"로 놓아야 합니다."""
+    def on_resize(event):
+        width = max(60, event.width - margin)
+        if str(label.cget("wraplength")) != str(width):
+            label.configure(wraplength=width)
+    label.bind("<Configure>", on_resize, add="+")
+    return label
+
+
 def hline(parent, tk):
     """연한 구분선"""
     return tk.Frame(parent, height=1, bg=THEME["border"])
@@ -3711,7 +3793,7 @@ class GuiApp:
         header = tk.Frame(root, bg=c["header"])
         header.pack(fill="x")
         title_box = tk.Frame(header, bg=c["header"])
-        title_box.pack(side="left", padx=px(22), pady=(px(12), px(11)))
+        title_box.pack(side="left", padx=px(22), pady=(px(10), px(9)))
         tk.Label(title_box, text="Concur 경비 자동 입력", bg=c["header"], fg="#ffffff", font=font(16, "bold")).pack(anchor="w")
         tk.Label(title_box, text="영수증 사진을 읽어 Concur 경비 리포트를 채웁니다 · 제출은 직접 하세요", bg=c["header"],
                  fg=c["header_sub"], font=font(9)).pack(anchor="w", pady=(px(2), 0))
@@ -3784,27 +3866,27 @@ class GuiApp:
         act.columnconfigure(1, weight=1, uniform="act")
         self.run_buttons = []
         for col, (text, mode, style, caption) in enumerate((
-                ("① 영수증 분석만", "ocr", "Big.TButton", "사진의 글자만 읽고 영수증 목록(엑셀)을 엽니다. Concur는 열지 않습니다."),
+                ("① 영수증 분석만", "ocr", "Big.TButton", "사진의 글자만 읽고 영수증 확인 창을 엽니다. Concur는 열지 않습니다."),
                 ("② 전체 실행", "full", "BigAccent.TButton", "리포트 만들기 → 경비 넣기 → 영수증 첨부·입력 → 저장 (같은 이름의 리포트가 있으면 이어서)"))):
             b = ttk.Button(act, text=text, style=style, command=lambda m=mode: self.start(m))
             b.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else px(6), px(6) if col == 0 else 0))
             self.run_buttons.append(b)
-            ttk.Label(act, text=caption, style="CardMuted.TLabel", wraplength=px(390), justify="left").grid(
-                row=1, column=col, sticky="nw", pady=(px(6), 0), padx=(0 if col == 0 else px(6), px(6) if col == 0 else 0))
+            auto_wrap(ttk.Label(act, text=caption, style="CardMuted.TLabel", wraplength=px(390), justify="left")).grid(
+                row=1, column=col, sticky="new", pady=(px(6), 0), padx=(0 if col == 0 else px(6), px(6) if col == 0 else 0))
         r += 1
 
         tools = ttk.Frame(f, style="Pane.TFrame")
         tools.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(px(18), 0))
         ttk.Label(tools, text="바로 가기", style="CardMuted.TLabel").pack(side="left", padx=(0, px(10)))
-        for text, cmd in (("영수증 목록 열기", self.open_list), ("병원 목록 편집", self.open_hospitals),
+        for text, cmd in (("영수증 확인", self.open_list), ("병원 목록 편집", self.open_hospitals),
                           ("자동 입력 편집", self.open_category_table),
                           ("결과 폴더 열기", lambda: open_path(self.base / "결과"))):
             ttk.Button(tools, text=text, style="Tool.TButton", command=cmd).pack(side="left", padx=(0, px(6)))
         r += 1
-        ttk.Label(f, style="CardMuted.TLabel", wraplength=px(800), justify="left", text=(
+        auto_wrap(ttk.Label(f, style="CardMuted.TLabel", wraplength=px(800), justify="left", text=(
             "실행 중에는 열린 Edge 창을 클릭하지 마세요(다른 프로그램은 써도 됩니다). "
-            "영수증 목록(엑셀)에서 고친 내용은 다음 실행에도 그대로 쓰입니다.")).grid(
-            row=r, column=0, columnspan=3, sticky="w", pady=(px(12), 0))
+            "[영수증 확인]에서 고친 내용은 다음 실행에도 그대로 쓰입니다."))).grid(
+            row=r, column=0, columnspan=3, sticky="ew", pady=(px(12), 0))
 
         # 아래: 실행 기록
         log_card = ttk.Frame(body, style="Card.TFrame", padding=(px(14), px(10), px(14), px(14)))
@@ -3814,7 +3896,7 @@ class GuiApp:
         ttk.Label(log_card, text="실행 기록", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, px(8)))
         self.status = ttk.Label(log_card, text="● 준비됨", style="Status.TLabel")
         self.status.grid(row=0, column=1, sticky="e", pady=(0, px(8)))
-        box, self.text = text_box(log_card, tk, ttk, self.theme, height=7)
+        box, self.text = text_box(log_card, tk, ttk, self.theme, height=5)
         box.grid(row=1, column=0, columnspan=2, sticky="nsew")
         self.text.configure(state="disabled")
 
@@ -3912,11 +3994,29 @@ class GuiApp:
         self.folder_summary.configure(text=text)
 
     def open_list(self):
+        """[영수증 확인]: 처리할 달의 영수증 확인 창"""
         path = list_csv_path(self.base / "결과", resolve_target_month(self.month.get()))
         if path.exists():
-            open_path(path)
+            self.open_review(path)
         else:
-            self.mb.showinfo("영수증 목록", "아직 이 달의 영수증 목록이 없습니다. ①을 먼저 실행하세요.")
+            self.mb.showinfo("영수증 확인", "아직 이 달의 영수증 목록이 없습니다. ①을 먼저 실행하세요.")
+
+    def open_review(self, path, on_close=None):
+        """영수증 확인 창(이미 열려 있으면 닫고 새로)"""
+        old = getattr(self, "review_win", None)
+        if old is not None and old.win.winfo_exists():
+            if Path(path) == old.path and on_close is None:
+                old.win.lift()
+                return old
+            old.close(force=True)
+        try:
+            self.review_win = ReceiptReview(self, Path(path), on_close=on_close)
+        except Exception as e:
+            self.mb.showerror("영수증 확인", f"영수증 목록을 열지 못했습니다: {e}")
+            if on_close:
+                on_close()
+            return None
+        return self.review_win
 
     def open_category_table(self):
         """자동 입력 편집 창(이미 열려 있으면 앞으로)"""
@@ -3996,6 +4096,9 @@ class GuiApp:
                     ev.set()
                 elif kind == "call":
                     item[1]()
+                elif kind == "review":
+                    _, path, ev = item
+                    self.open_review(path, on_close=ev.set if ev is not None else None)
                 elif kind == "done":
                     self.set_running(False)
         except queue.Empty:
@@ -4038,18 +4141,19 @@ class ReceiptSourcesTab:
         parent.columnconfigure(0, weight=1)
 
         ttk.Label(parent, text="영수증을 찾을 폴더", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(parent, style="CardMuted.TLabel", wraplength=px(820), justify="left", text=(
+        auto_wrap(ttk.Label(parent, style="CardMuted.TLabel", wraplength=px(820), justify="left", text=(
             "영수증 사진이 있는 폴더를 모두 넣어 두세요. 하위 폴더까지 찾고, 영수증이 아닌 사진은 자동으로 뺍니다. "
-            "오른쪽 숫자는 처리할 달 영수증일 수 있는 사진 수입니다.")).grid(row=1, column=0, sticky="w", pady=(px(2), px(10)))
+            "오른쪽 숫자는 처리할 달 영수증일 수 있는 사진 수입니다. 같은 영수증을 두 가지 방법으로 넣지는 마세요(두 장으로 보임)."))
+                  ).grid(row=1, column=0, sticky="ew", pady=(px(2), px(8)))
 
         box = ttk.Frame(parent, style="Pane.TFrame")
         box.grid(row=2, column=0, sticky="ew")
         box.columnconfigure(0, weight=1)
-        self.tree = ttk.Treeview(box, columns=("folder", "count"), show="headings", height=5, selectmode="browse")
+        self.tree = ttk.Treeview(box, columns=("folder", "count"), show="headings", height=4, selectmode="browse")
         self.tree.heading("folder", text="폴더")
         self.tree.heading("count", text="이 달 사진")
-        self.tree.column("folder", width=px(600), anchor="w")
-        self.tree.column("count", width=px(110), anchor="center", stretch=False)
+        self.tree.column("folder", width=px(300), minwidth=px(150), anchor="w", stretch=True)
+        self.tree.column("count", width=px(100), minwidth=px(80), anchor="center", stretch=False)
         self.tree.grid(row=0, column=0, sticky="ew")
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
         sb.grid(row=0, column=1, sticky="ns")
@@ -4065,18 +4169,15 @@ class ReceiptSourcesTab:
         self.import_status = ttk.Label(bf, text="", style="AccentText.TLabel")
         self.import_status.pack(side="left", padx=(px(12), 0))
 
-        hline(parent, tk).grid(row=4, column=0, sticky="ew", pady=(px(14), px(12)))
-        ttk.Label(parent, text="휴대폰별 사진 넣는 방법", style="Section.TLabel").grid(row=5, column=0, sticky="w", pady=(0, px(6)))
+        hline(parent, tk).grid(row=4, column=0, sticky="ew", pady=(px(12), px(10)))
+        ttk.Label(parent, text="휴대폰별 사진 넣는 방법", style="Section.TLabel").grid(row=5, column=0, sticky="w", pady=(0, px(4)))
         guide = ttk.Frame(parent, style="Pane.TFrame")
         guide.grid(row=6, column=0, sticky="ew")
         guide.columnconfigure(1, weight=1)
         for i, (phone, how) in enumerate(PHONE_GUIDE):
             ttk.Label(guide, text=phone, style="Field.TLabel").grid(row=i, column=0, sticky="nw", padx=(0, px(14)), pady=px(2))
-            ttk.Label(guide, text=how, style="Card.TLabel", wraplength=px(700), justify="left").grid(
-                row=i, column=1, sticky="w", pady=px(2))
-        ttk.Label(parent, style="CardMuted.TLabel", wraplength=px(820), justify="left",
-                  text="같은 영수증을 두 가지 방법으로 넣으면 두 장으로 보일 수 있으니 한 가지 방법만 쓰세요.").grid(
-            row=7, column=0, sticky="w", pady=(px(8), 0))
+            auto_wrap(ttk.Label(guide, text=how, style="Card.TLabel", wraplength=px(700), justify="left")).grid(
+                row=i, column=1, sticky="ew", pady=px(2))
         self.refresh()
 
     # ---------- 목록 ----------
@@ -4272,11 +4373,11 @@ class BackupTab:
         self.items = []
         parent.columnconfigure(0, weight=1)
         ttk.Label(parent, text="백업·되살리기", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(parent, style="CardMuted.TLabel", wraplength=px(820), justify="left", text=(
+        auto_wrap(ttk.Label(parent, style="CardMuted.TLabel", wraplength=px(820), justify="left", text=(
             "자동 입력 규칙·병원 목록·설정·영수증 목록을 파일 하나(zip)로 묶어 둡니다. 켤 때·끌 때·자동 입력을 저장할 때 "
             "바뀐 것이 있으면 자동으로 백업합니다(최근 20개). 새 판을 같은 폴더에 덮어쓰면 그대로 쓰이고, 새 폴더에 두면 "
-            "처음 켤 때 되살릴지 물어봅니다. 되살리기 전 상태도 자동으로 백업하므로 언제든 되돌릴 수 있습니다.")
-        ).grid(row=1, column=0, sticky="w", pady=(px(2), px(10)))
+            "처음 켤 때 되살릴지 물어봅니다. 되살리기 전 상태도 자동으로 백업하므로 언제든 되돌릴 수 있습니다."))
+        ).grid(row=1, column=0, sticky="ew", pady=(px(2), px(10)))
 
         folder_row = ttk.Frame(parent, style="Pane.TFrame")
         folder_row.grid(row=2, column=0, sticky="ew", pady=(0, px(8)))
@@ -4288,12 +4389,12 @@ class BackupTab:
         box = ttk.Frame(parent, style="Pane.TFrame")
         box.grid(row=3, column=0, sticky="ew")
         box.columnconfigure(0, weight=1)
-        self.tree = ttk.Treeview(box, columns=("when", "kind", "version", "files"), show="headings", height=7,
+        self.tree = ttk.Treeview(box, columns=("when", "kind", "version", "files"), show="headings", height=6,
                                  selectmode="browse")
-        for col, text, width, anchor in (("when", "만든 시각", 150, "w"), ("kind", "종류", 220, "w"),
-                                         ("version", "프로그램 판", 280, "w"), ("files", "파일 수", 80, "center")):
+        for col, text, width, anchor in (("when", "만든 시각", 140, "w"), ("kind", "종류", 170, "w"),
+                                         ("version", "프로그램 판", 220, "w"), ("files", "파일 수", 70, "center")):
             self.tree.heading(col, text=text)
-            self.tree.column(col, width=px(width), anchor=anchor)
+            self.tree.column(col, width=px(width), minwidth=px(60), anchor=anchor)
         self.tree.grid(row=0, column=0, sticky="ew")
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
         sb.grid(row=0, column=1, sticky="ns")
@@ -4378,6 +4479,286 @@ class BackupTab:
         if picked:
             return self.restore(Path(picked))
         return False
+
+
+class ReceiptReview:
+    """영수증 확인 창: ①에서 읽은 영수증을 사진과 함께 보며 사용 여부·날짜·금액·분류·병원·도시를 고르거나 고칩니다.
+    고친 내용은 영수증 목록 파일(결과\\영수증목록_YYYY-MM.csv)에 저장되어 다음 실행에 그대로 쓰입니다(엑셀 대신)."""
+    NO_CATEGORY_TEXT = "(분류 없음)"
+    DEFAULT_CITY_TEXT = "(기본 도시)"
+
+    def __init__(self, app, path: Path, on_close=None):
+        tk, ttk = app.tk, app.ttk
+        px, font, c = app.px, app.font, THEME
+        self.app, self.tk, self.path, self.on_close = app, tk, Path(path), on_close
+        self.rows = read_csv_dicts(self.path)
+        self.cfg, _ = load_settings(app.base / SETTINGS_FILE_NAME)
+        self.categories = [r[C_NAME] for r in load_category_rows(app.base / CATEGORY_FILE_NAME, self.cfg)]
+        hospitals = {r[1] for r in load_hospital_rows(app.base / HOSPITAL_FILE_NAME) if len(r) > 1 and r[1]}
+        hospitals |= {str(r.get("병원 영문") or "") for r in self.rows} - {""}
+        self.hospitals = sorted(hospitals, key=str.lower)
+        cities = {city_name(v) for v in (self.cfg.get("도시_목록") or {}).values()} | {city_name(self.cfg.get("기본_도시", ""))}
+        cities |= {str(r.get("도시") or "") for r in self.rows}
+        self.cities = [self.DEFAULT_CITY_TEXT] + sorted((x for x in cities if x), key=str.lower)
+        self.current, self.loading, self.dirty = None, False, False
+        self.images, self.photo_index = {}, {}
+        self.preview_size = (px(330), px(440))
+
+        win = self.win = tk.Toplevel(app.root)
+        month = re.search(r"(\d{4}-\d{2})", self.path.name)
+        self.month_text = month.group(1) if month else ""
+        win.title(f"영수증 확인 {self.month_text}")
+        win.configure(bg=c["bg"])
+        width = min(px(1240), app.root.winfo_screenwidth() - px(40))
+        height = min(px(720), app.root.winfo_screenheight() - px(90))
+        win.geometry(f"{width}x{height}")
+        win.minsize(min(px(1000), width), min(px(560), height))
+        win.transient(app.root)
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        outer = ttk.Frame(win, padding=(px(16), px(12)))
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(2, weight=1)
+        outer.rowconfigure(2, weight=1)
+
+        top = ttk.Frame(outer)
+        top.grid(row=0, column=0, columnspan=3, sticky="ew")
+        ttk.Label(top, text=f"영수증 확인  {self.month_text}", font=font(14, "bold")).pack(side="left")
+        self.summary = ttk.Label(top, text="", foreground=c["muted"])
+        self.summary.pack(side="left", padx=(px(14), 0))
+        auto_wrap(ttk.Label(outer, foreground=c["muted"], font=font(9), justify="left", wraplength=px(1100), text=(
+            "왼쪽에서 영수증을 고르면 사진과 읽은 내용이 나옵니다. 틀린 곳만 고르거나 고친 뒤 [저장]하세요. "
+            "고친 내용은 다음 실행부터 그대로 쓰입니다. ✓ 괜찮음 · ⚠ 확인 필요 · ✎ 고침 · ✕ 뺌"))).grid(
+            row=1, column=0, columnspan=3, sticky="ew", pady=(px(2), px(10)))
+
+        # 왼쪽: 영수증 목록
+        left = ttk.Frame(outer, style="Card.TFrame", padding=px(10))
+        left.grid(row=2, column=0, sticky="nsw", padx=(0, px(12)))
+        left.rowconfigure(1, weight=1)
+        self.only_check = tk.BooleanVar(value=False)
+        ttk.Checkbutton(left, text="확인 필요만 보기", variable=self.only_check, style="Card.TCheckbutton",
+                        command=self.refresh_list).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, px(6)))
+        self.tree = ttk.Treeview(left, columns=("state", "date", "amount", "cat"), show="headings", selectmode="browse")
+        for col, text, w, anchor in (("state", "상태", 70, "w"), ("date", "날짜", 92, "center"),
+                                     ("amount", "금액", 80, "e"), ("cat", "분류", 84, "w")):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=px(w), minwidth=px(50), anchor=anchor, stretch=False)
+        self.tree.grid(row=1, column=0, sticky="ns")
+        sb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        sb.grid(row=1, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.on_select())
+
+        # 가운데: 사진
+        mid = ttk.Frame(outer, style="Card.TFrame", padding=px(10))
+        mid.grid(row=2, column=1, sticky="ns", padx=(0, px(12)))
+        photo_box = tk.Frame(mid, bg="#eef1f5", width=self.preview_size[0], height=self.preview_size[1])
+        photo_box.pack()
+        photo_box.pack_propagate(False)                    # 사진 크기와 상관없이 칸 크기 고정
+        self.photo = tk.Label(photo_box, bg="#eef1f5", fg=c["muted"], font=font(9), text="", justify="center")
+        self.photo.pack(fill="both", expand=True)
+        name_row = ttk.Frame(mid, style="Pane.TFrame")
+        name_row.pack(fill="x", pady=(px(8), 0))
+        self.file_label = ttk.Label(name_row, text="", style="CardMuted.TLabel")
+        self.file_label.pack(side="left")
+        ttk.Button(name_row, text="사진 크게 보기", style="Tool.TButton", command=self.open_photo).pack(side="right")
+
+        # 오른쪽: 고칠 칸
+        right = ttk.Frame(outer, style="Card.TFrame", padding=(px(18), px(12)))
+        right.grid(row=2, column=2, sticky="nsew")
+        right.columnconfigure(1, weight=1)
+        self.vars = {}
+        r = 0
+
+        def label(text):
+            ttk.Label(right, text=text, style="Field.TLabel").grid(row=r, column=0, sticky="nw", pady=(px(9), 0),
+                                                                  padx=(0, px(14)))
+
+        def hint(text):
+            nonlocal r
+            auto_wrap(ttk.Label(right, text=text, style="CardMuted.TLabel", justify="left", wraplength=px(380))).grid(
+                row=r, column=1, sticky="ew", pady=(px(2), 0))
+            r += 1
+
+        def combo(key, text, values, readonly=False, hint_text=""):
+            nonlocal r
+            label(text)
+            var = self.vars[key] = tk.StringVar()
+            w = ttk.Combobox(right, textvariable=var, values=values, state="readonly" if readonly else "normal")
+            w.grid(row=r, column=1, sticky="ew", pady=(px(7), 0))
+            w.bind("<<ComboboxSelected>>", lambda e: self.on_edit())
+            w.bind("<KeyRelease>", lambda e: self.on_edit())
+            r += 1
+            if hint_text:
+                hint(hint_text)
+            return w
+
+        label("사용")
+        self.use = tk.BooleanVar(value=True)
+        ttk.Checkbutton(right, text="이 영수증을 Concur에 넣기", variable=self.use, style="Card.TCheckbutton",
+                        command=self.on_edit).grid(row=r, column=1, sticky="w", pady=(px(7), 0))
+        r += 1
+        self.date_box = combo("date", "날짜", [], hint_text="영수증에 적힌 날짜 (예: 2026-10-27). ▼에 사진에서 읽은 날짜가 있습니다.")
+        self.amount_box = combo("amount", "금액", [], hint_text="▼에 사진에서 읽은 금액이 있습니다.")
+        self.cat_box = combo("cat", "분류", [self.NO_CATEGORY_TEXT] + self.categories, readonly=True,
+                             hint_text="자동 입력 편집에서 만든 항목. 이 항목의 Comment·Expense Type이 들어갑니다.")
+        self.hosp_box = combo("hosp", "병원 (영문)", self.hospitals, hint_text="비우면 Comment에서 ' in 병원'이 빠집니다.")
+        self.city_box = combo("city", "도시", self.cities, hint_text="'(기본 도시)'면 기본 도시를 고릅니다.")
+        label("확인할 것")
+        self.issue_label = ttk.Label(right, text="", style="Warn.TLabel", justify="left", wraplength=px(380))
+        auto_wrap(self.issue_label).grid(row=r, column=1, sticky="ew", pady=(px(9), 0))
+        r += 1
+        label("읽은 글자")
+        self.ocr_label = ttk.Label(right, text="", style="CardMuted.TLabel", justify="left", wraplength=px(380))
+        auto_wrap(self.ocr_label).grid(row=r, column=1, sticky="ew", pady=(px(9), 0))
+        r += 1
+        self.status = ttk.Label(right, text="", style="AccentText.TLabel", justify="left", wraplength=px(380))
+        auto_wrap(self.status).grid(row=r, column=1, sticky="ew", pady=(px(12), 0))
+
+        bottom = ttk.Frame(outer)
+        bottom.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(px(12), 0))
+        ttk.Button(bottom, text="닫기", command=self.close).pack(side="right", padx=(px(6), 0))
+        ttk.Button(bottom, text="엑셀로 열기", command=self.open_excel).pack(side="right", padx=(px(6), 0))
+        ttk.Button(bottom, text="저장", style="Accent.TButton", command=self.save).pack(side="right")
+
+        self.refresh_list()
+        first = self.tree.get_children()
+        if first:
+            self.tree.selection_set(first[0])
+            self.on_select()
+        win.lift()
+        win.focus_force()
+
+    # ---------- 목록 ----------
+    def row_values(self, row) -> tuple:
+        amount = parse_amount_cell(row.get("금액"))
+        return (review_status(row), str(row.get("날짜") or ""), f"{amount:,}" if amount else "",
+                str(row.get("분류") or ""))
+
+    def refresh_list(self):
+        keep = self.current
+        self.tree.delete(*self.tree.get_children())
+        for i, row in enumerate(self.rows):
+            if self.only_check.get() and review_status(row) not in ("⚠ 확인",):
+                continue
+            self.tree.insert("", "end", iid=str(i), values=self.row_values(row))
+        if keep is not None and self.tree.exists(str(keep)):
+            self.tree.selection_set(str(keep))
+        used = [r for r in self.rows if parse_use_cell(str(r.get("사용(O/X)") or ""), True)]
+        need = [r for r in self.rows if review_status(r) == "⚠ 확인"]
+        self.summary.configure(text=f"영수증 {len(used)}장 사용 · 확인 필요 {len(need)}장 · 뺀 사진 {len(self.rows) - len(used)}장")
+
+    def on_select(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        self.current = int(sel[0])
+        row = self.rows[self.current]
+        g = lambda k: str(row.get(k) or "").strip()
+        self.loading = True
+        self.use.set(parse_use_cell(g("사용(O/X)"), True))
+        dates = list(dict.fromkeys([d for d in [g("날짜"), g("[자동] 날짜")] + g("날짜 후보").split() if d]))
+        self.date_box.configure(values=dates)
+        self.vars["date"].set(g("날짜"))
+        amounts = [int(a) for a in g("금액 후보").split() if a.isdigit()]
+        for a in (parse_amount_cell(g("금액")), parse_amount_cell(g("[자동] 금액"))):
+            if a and a not in amounts:
+                amounts.insert(0, a)
+        self.amount_box.configure(values=[f"{a:,}" for a in amounts])
+        amount = parse_amount_cell(g("금액"))
+        self.vars["amount"].set(f"{amount:,}" if amount else "")
+        self.vars["cat"].set(g("분류") or self.NO_CATEGORY_TEXT)
+        self.vars["hosp"].set(g("병원 영문"))
+        self.vars["city"].set(g("도시") or self.DEFAULT_CITY_TEXT)
+        self.loading = False
+        self.issue_label.configure(text=g("확인 필요") or "없음")
+        self.ocr_label.configure(text=g("OCR 앞부분") or "(읽은 글자 없음)")
+        self.status.configure(text="")
+        self.show_photo(row)
+
+    # ---------- 사진 ----------
+    def photo_path(self, row):
+        return find_receipt_photo(row, self.cfg, self.photo_index)
+
+    def show_photo(self, row):
+        path = self.photo_path(row)
+        self.file_label.configure(text=str(row.get("파일") or ""))
+        if path is None:
+            self.photo.configure(image="", text="사진 파일을 찾지 못했습니다.\n(영수증 폴더에서 옮기거나 지웠을 수 있습니다)")
+            return
+        key = str(path)
+        if key not in self.images:
+            try:
+                from PIL import ImageTk
+                self.images[key] = ImageTk.PhotoImage(load_preview_image(path, *self.preview_size), master=self.win)
+            except ImportError:
+                self.photo.configure(image="", text="사진 미리보기에는 Pillow가 필요합니다.\n[사진 크게 보기]로 여세요.")
+                return
+            except Exception as e:
+                self.photo.configure(image="", text=f"사진을 열지 못했습니다.\n{str(e)[:60]}")
+                return
+        self.photo.configure(image=self.images[key], text="")
+
+    def open_photo(self):
+        if self.current is None:
+            return
+        path = self.photo_path(self.rows[self.current])
+        if path is not None:
+            open_path(path)
+
+    # ---------- 고치기 ----------
+    def on_edit(self):
+        if self.loading or self.current is None:
+            return
+        row = self.rows[self.current]
+        row["사용(O/X)"] = "O" if self.use.get() else "X"
+        row["날짜"] = self.vars["date"].get().strip()
+        row["금액"] = self.vars["amount"].get().strip()
+        cat = self.vars["cat"].get().strip()
+        row["분류"] = "" if cat == self.NO_CATEGORY_TEXT else cat
+        row["병원 영문"] = self.vars["hosp"].get().strip()
+        city = self.vars["city"].get().strip()
+        row["도시"] = "" if city == self.DEFAULT_CITY_TEXT else city
+        warn = []
+        if row["날짜"] and not parse_date_cell(row["날짜"]):
+            warn.append("날짜는 2026-10-27처럼 적어 주세요.")
+        if row["금액"] and parse_amount_cell(row["금액"]) is None:
+            warn.append("금액은 숫자로 적어 주세요.")
+        self.status.configure(text=" ".join(warn), style="Warn.TLabel" if warn else "AccentText.TLabel")
+        self.dirty = True
+        self.win.title(f"영수증 확인 {self.month_text} *")
+        if self.tree.exists(str(self.current)):
+            self.tree.item(str(self.current), values=self.row_values(row))
+        used = [r for r in self.rows if parse_use_cell(str(r.get("사용(O/X)") or ""), True)]
+        need = [r for r in self.rows if review_status(r) == "⚠ 확인"]
+        self.summary.configure(text=f"영수증 {len(used)}장 사용 · 확인 필요 {len(need)}장 · 뺀 사진 {len(self.rows) - len(used)}장")
+
+    def save(self) -> bool:
+        try:
+            save_review_rows(self.path, self.rows)
+        except PermissionError:
+            self.app.mb.showerror("저장", "영수증 목록 파일이 엑셀에 열려 있습니다. 엑셀을 닫고 다시 저장하세요.", parent=self.win)
+            return False
+        self.dirty = False
+        self.win.title(f"영수증 확인 {self.month_text}")
+        edited = sum(1 for r in self.rows if review_row_edited(r))
+        self.status.configure(text=f"저장했습니다. 고친 영수증 {edited}장 (다음 실행부터 씁니다)", style="AccentText.TLabel")
+        self.app.append(f"영수증 확인: 저장했습니다(고친 영수증 {edited}장). 다음 실행부터 고친 내용을 씁니다.")
+        return True
+
+    def open_excel(self):
+        if self.dirty and not self.save():
+            return
+        open_path(self.path)
+
+    def close(self, force=False):
+        if self.dirty and not force:
+            ans = self.app.mb.askyesnocancel("영수증 확인", "고친 내용을 저장할까요?", parent=self.win)
+            if ans is None or (ans and not self.save()):
+                return
+        self.win.destroy()
+        if self.on_close:
+            callback, self.on_close = self.on_close, None
+            callback()
 
 
 class CategoryEditor:
@@ -4708,6 +5089,14 @@ class GuiBridge:
 
     def open(self, path):
         self.q.put(("open", path))
+
+    def review(self, path, wait=False):
+        """영수증 확인 창을 엽니다(wait=True면 창을 닫을 때까지 기다림)."""
+        ev = threading.Event() if wait else None
+        self.q.put(("review", path, ev))
+        if ev is not None:
+            ev.wait()
+        return True
 
 
 # ============================================================
