@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 영수증별 Comment"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 문서 폴더에 저장"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -233,7 +233,7 @@ def default_settings():
                           "카카오톡 받은 파일, 프로그램이 사진을 복사해 두는 '가져온 영수증' 폴더 등. 창의 [영수증 불러오기] 탭에서 고칩니다."),
         "영수증_추가_폴더": [],
         "_백업_폴더_설명": ("자동 입력 규칙·병원 목록·설정을 자동으로 백업해 두는 폴더. 비워 두면 문서\\Concur 경비 자동 입력 백업. "
-                       "프로그램 폴더와 따로 두어야 프로그램을 새로 받아도 남습니다."),
+                       "설정 폴더(문서\\Concur 경비 자동 입력)와 따로 두어야 그 폴더를 지워도 남습니다."),
         "백업_폴더": "",
         "_영수증_날짜_설명": "어느 달 영수증인지는 영수증에 적힌 날짜로 정하고, 날짜를 못 읽은 영수증만 촬영 날짜를 참고합니다. 처리할 달이 끝나고 아래 일수 안에 찍은 사진까지 봅니다.",
         "영수증_촬영_허용_일수": 60,
@@ -343,9 +343,99 @@ def default_settings():
 # ============================================================
 
 def app_dir() -> Path:
+    """프로그램 파일(exe 또는 concur_auto.py)이 있는 폴더"""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+DATA_FOLDER_NAME = "Concur 경비 자동 입력"
+BACKUP_FOLDER_NAME = "Concur 경비 자동 입력 백업"
+
+
+def documents_dir() -> Path:
+    """Windows '문서' 폴더. 회사 PC에서 OneDrive로 옮겨져 있어도 탐색기의 '문서'와 같은 곳을 씁니다."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(1024)
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf) == 0 and buf.value:   # 5 = 문서
+                return Path(buf.value)
+        except Exception:
+            pass
+    return Path.home() / "Documents"
+
+
+def data_dir() -> Path:
+    """설정·자동 입력표·병원 목록·결과·실행기록을 두는 폴더: 문서\\Concur 경비 자동 입력
+    (exe를 바탕화면 등 어디에 두어도 그 옆에 파일이 생기지 않고, 새 판으로 바꿔도 그대로 쓰임)"""
+    env = os.environ.get("CONCUR_DATA_DIR")
+    return Path(env) if env else documents_dir() / DATA_FOLDER_NAME
+
+
+def _retarget_folders(settings_path: Path, old: Path, new: Path):
+    """옮긴 설정 파일의 영수증 폴더 중 예전 프로그램 폴더 안('가져온 영수증' 등)을 새 위치로 바꿉니다."""
+    try:
+        cfg = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return
+    old_n = os.path.normcase(os.path.normpath(str(old)))
+
+    def fix(value):
+        v = str(value or "")
+        n = os.path.normcase(os.path.normpath(v)) if v else ""
+        if n and (n == old_n or n.startswith(old_n + os.sep)):
+            return str(new / os.path.relpath(v, str(old)))
+        return value
+
+    changed = False
+    first = cfg.get("영수증_원본_폴더")
+    if first and fix(first) != first:
+        cfg["영수증_원본_폴더"], changed = fix(first), True
+    more = cfg.get("영수증_추가_폴더")
+    if isinstance(more, list):
+        fixed = [fix(v) for v in more]
+        if fixed != more:
+            cfg["영수증_추가_폴더"], changed = fixed, True
+    if changed:
+        save_settings(settings_path, cfg)
+
+
+def move_personal_files(old: Path, new: Path) -> list:
+    """예전 판이 프로그램 옆(예: 바탕화면)에 만든 개인 파일·폴더를 새 폴더로 옮깁니다. → 실행 기록에 남길 글"""
+    notes = []
+    try:
+        if os.path.normcase(str(old.resolve())) == os.path.normcase(str(new.resolve())):
+            return notes
+    except OSError:
+        return notes
+    items = (SETTINGS_FILE_NAME, CATEGORY_FILE_NAME, HOSPITAL_FILE_NAME, STORE_MEMORY_FILE_NAME,
+             "결과", "실행기록", IMPORTED_FOLDER_NAME)                      # 예전 판이 프로그램 옆에 만들던 것
+    found = [name for name in items if (old / name).exists()]
+    if not found:
+        return notes
+    new.mkdir(parents=True, exist_ok=True)
+    moved, kept, failed = [], [], []
+    for name in found:
+        src, dest = old / name, new / name
+        if dest.exists():
+            kept.append(name)
+            continue
+        try:
+            shutil.move(str(src), str(dest))
+            moved.append(name)
+        except Exception as e:
+            failed.append(f"{name}({e})")
+    if SETTINGS_FILE_NAME in moved:
+        _retarget_folders(new / SETTINGS_FILE_NAME, old, new)
+    if moved:
+        notes.append(f"개인 파일을 {new} 폴더로 옮겼습니다: {', '.join(moved)}. 프로그램 옆({old})에는 더 이상 만들지 않습니다.")
+    if kept:
+        notes.append(f"{new}에 이미 같은 이름이 있어 옮기지 않았습니다: {', '.join(kept)}. "
+                     f"프로그램은 {new}의 것을 씁니다. {old}에 남은 것은 지워도 됩니다.")
+    if failed:
+        notes.append(f"옮기지 못했습니다(엑셀 등에서 열려 있으면 닫고 다시 켜 주세요): {', '.join(failed)}")
+    return notes
 
 
 # ---------- 백업·되살리기 ----------
@@ -356,12 +446,27 @@ RESULT_BACKUP_SUFFIXES = (".csv", ".json")
 
 
 def backup_dir(cfg=None) -> Path:
-    """백업 폴더: 설정 '백업_폴더' → 문서\\Concur 경비 자동 입력 백업 (프로그램 폴더와 따로 있어 새 판을 받아도 남음)"""
+    """백업 폴더: 설정 '백업_폴더' → 문서\\Concur 경비 자동 입력 백업 (설정 폴더와 따로 있어 그 폴더를 지워도 남음)"""
     env = os.environ.get("CONCUR_BACKUP_DIR")
     if env:
         return Path(env)
     custom = str((cfg or {}).get("백업_폴더") or "").strip()
-    return Path(custom) if custom else Path.home() / "Documents" / "Concur 경비 자동 입력 백업"
+    return Path(custom) if custom else documents_dir() / BACKUP_FOLDER_NAME
+
+
+def move_old_backup_folder() -> list:
+    """예전 판은 백업을 늘 C:\\Users\\이름\\Documents에 두었습니다. 문서 폴더가 OneDrive 등으로 옮겨진 PC면 새 문서 폴더로 옮깁니다."""
+    if os.environ.get("CONCUR_BACKUP_DIR"):
+        return []
+    old, new = Path.home() / "Documents" / BACKUP_FOLDER_NAME, backup_dir()
+    try:
+        if not old.is_dir() or new.exists() or os.path.normcase(str(old.resolve())) == os.path.normcase(str(new.resolve())):
+            return []
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old), str(new))
+        return [f"백업 폴더를 문서 폴더로 옮겼습니다: {new}"]
+    except Exception as e:
+        return [f"예전 백업 폴더({old})를 옮기지 못했습니다: {e}"]
 
 
 def backup_members(base: Path) -> list:
@@ -454,7 +559,7 @@ def _restorable(name: str) -> bool:
 
 
 def restore_backup(path: Path, base: Path, folder: Path) -> list:
-    """백업을 프로그램 폴더에 되살립니다. 되살리기 전 상태도 자동 백업해 두어 되돌릴 수 있습니다. → 되살린 파일 이름들"""
+    """백업을 설정 폴더(base)에 되살립니다. 되살리기 전 상태도 자동 백업해 두어 되돌릴 수 있습니다. → 되살린 파일 이름들"""
     info = read_backup_info(path)
     if not info:
         raise RuntimeError(f"이 프로그램이 만든 백업 파일이 아닙니다: {path.name}")
@@ -4017,7 +4122,7 @@ def text_box(parent, tk, ttk, theme, height=8, wrap="word"):
 
 
 class GuiApp:
-    def __init__(self, base: Path):
+    def __init__(self, base: Path, notes=()):
         import tkinter as tk
         from tkinter import filedialog, messagebox, simpledialog, ttk
         from tkinter import font as tkfont
@@ -4051,8 +4156,6 @@ class GuiApp:
         tk.Label(title_box, text="Concur 경비 자동 입력", bg=c["header"], fg="#ffffff", font=font(16, "bold")).pack(anchor="w")
         tk.Label(title_box, text="영수증 사진을 읽어 Concur 경비 리포트를 채웁니다 · 제출은 직접 하세요", bg=c["header"],
                  fg=c["header_sub"], font=font(9)).pack(anchor="w", pady=(px(2), 0))
-        tk.Label(header, text=APP_VERSION, bg=c["header"], fg=c["header_sub"], font=font(9)).pack(
-            side="right", anchor="s", padx=px(22), pady=(0, px(12)))
 
         body = ttk.Frame(root, padding=(px(16), px(14), px(16), px(16)))
         body.pack(fill="both", expand=True)
@@ -4160,6 +4263,8 @@ class GuiApp:
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self.poll)
+        for note in notes:
+            self.append(note)
         if self.restored:
             self.append(f"백업에서 되살렸습니다: {self.restored} (자동 입력 규칙·병원 목록·설정)")
         self.auto_backup("켤 때")
@@ -5618,12 +5723,18 @@ def main():
     parser.add_argument("--full", action="store_true", help="전체 실행")
     parser.add_argument("--inspect", action="store_true", help="Concur 화면 조사(입력칸 위치를 파일로 남김)")
     args = parser.parse_args()
-    base = app_dir()
+    base = data_dir()
+    try:
+        notes = move_personal_files(app_dir(), base)
+    except Exception as e:
+        notes = [f"예전 개인 파일을 옮기지 못했습니다: {e}"]
+    notes += move_old_backup_folder()
+    base.mkdir(parents=True, exist_ok=True)
 
     cli = args.cli or args.ocr_only or args.edit_only or args.full or args.inspect
     if not cli:
         try:
-            app = GuiApp(base)
+            app = GuiApp(base, notes)
         except ImportError:
             print("tkinter가 없어 명령 프롬프트 모드로 실행합니다.")
         except Exception as e:
@@ -5649,6 +5760,8 @@ def main():
         if not args.month and mode != "inspect":
             last, this = resolve_target_month(None).prefix, recent_months(1, include_current=True)[0]
             args.month = input(f"처리할 달 (Enter={last} 지난달, 이번 달은 {this}): ").strip() or None
+    for note in notes:
+        print(note)
     run_job(mode, args.month, ConsoleUI(), base)
 
 

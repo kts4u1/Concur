@@ -156,8 +156,18 @@ def test_receipt_sources_tab(tmp_path):
     cfg = ca.default_settings()
     cfg["영수증_원본_폴더"] = str(icloud)
     ca.save_settings(tmp_path / ca.SETTINGS_FILE_NAME, cfg)
-    app = ca.GuiApp(tmp_path)
+    app = ca.GuiApp(tmp_path, ["개인 파일을 옮겼습니다(테스트)"])
     try:
+        assert "개인 파일을 옮겼습니다(테스트)" in app.text.get("1.0", "end")       # 시작 안내는 실행 기록에
+
+        def all_texts(w):
+            try:
+                yield str(w.cget("text"))
+            except Exception:
+                pass
+            for child in w.winfo_children():
+                yield from all_texts(child)
+        assert ca.APP_VERSION not in list(all_texts(app.root))                 # 머리띠의 판 글자는 없앰
         tabs = [app.notebook.tab(t, "text").strip() for t in app.notebook.tabs()]
         assert tabs[:2] == ["실행", "영수증 불러오기"]
         src = app.sources
