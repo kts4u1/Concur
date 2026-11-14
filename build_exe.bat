@@ -17,6 +17,7 @@ if "%COPIED%"=="1" echo 바탕화면에 ConcurAuto.exe가 없어 바꾸지 않�
 if "%COPIED%"=="2" echo 바탕화면의 ConcurAuto.exe를 바꾸지 못했습니다. 프로그램을 끄고 dist\ConcurAuto.exe를 직접 복사하세요.
 rem Windows가 기억해 둔 예전 아이콘 지우기
 ie4uinit.exe -show >nul 2>&1
+ie4uinit.exe -ClearIconCache >nul 2>&1
 echo.
 echo 완료: dist\ConcurAuto.exe
 echo exe는 어디에 두어도 됩니다. 설정 파일과 병원 목록은 문서\Concur 경비 자동 입력 폴더에 있습니다.
