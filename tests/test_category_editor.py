@@ -63,7 +63,8 @@ def test_editor_window(tmp_path):
         ed.vars["comment"].set("Taxi fee for service in {hospital}")
         ed.vars["purpose"].set("For service")
         ed.on_edit()
-        assert ed.listbox.get(3).startswith("● Taxi") and ed.dirty
+        item = ed.tree.item(str(ed.current))
+        assert (item["text"], item["tags"]) == ("Taxi", ["on"]) and ed.dirty         # 찾을 글자를 적으면 '설정됨' 점
         ed.move(-1)                                                  # Taxi를 주차 위로
         assert [r[0] for r in ed.rows][:4] == ["식대", "카페", "Taxi", "주차"]
         ed.only_on.set(True)
@@ -128,7 +129,8 @@ def test_korean_name_and_concur_expense_type(tmp_path):
         ed.on_edit()
         ed.vars["etype"].set("Taxi")
         etype_box.event_generate("<<ComboboxSelected>>")
-        assert ed.listbox.get(ed.visible.index(ed.current)) == "● 택시   → Taxi"
+        item = ed.tree.item(str(ed.current))
+        assert (item["text"], list(item["values"]), item["tags"]) == ("택시", ["Taxi"], ["on"])
         assert ed.save()
         rows = ca.load_category_rows(tmp_path / ca.CATEGORY_FILE_NAME, cfg)
         taxi = next(r for r in rows if r[0] == "택시")

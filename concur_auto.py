@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-14 영수증 확인 창"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-14 병원 편집 창"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -1003,6 +1003,27 @@ def category_problems(rows: list) -> list:
             if k in owner and owner[k] != name:
                 problems.append(f"'{k}' 글자가 '{owner[k]}'와 '{name}'에 다 있습니다(위쪽 '{owner[k]}'로 맞춰집니다).")
             owner.setdefault(k, name)
+    return problems
+
+
+HOSP_CHECK_NOTE = "영문 이름 확인"
+HOSP_USER_NOTE = "직접 고침"
+
+
+def hospital_problems(rows: list) -> list:
+    """병원 목록 저장 전에 알려 줄 것: 같은 찾을 글자, 영문 이름이 빈 줄, 짧은 찾을 글자"""
+    problems, seen = [], {}
+    for key, en, *_ in rows:
+        k = compact(key)
+        if not k:
+            continue
+        if k in seen:
+            problems.append(f"'{key}' 찾을 글자가 두 번 있습니다(위쪽 '{seen[k]}'만 씁니다).")
+        seen.setdefault(k, en or key)
+        if not en.strip():
+            problems.append(f"'{key}': Concur에 쓸 영문 이름이 비어 있습니다.")
+        if len(k) < 2:
+            problems.append(f"'{key}': 찾을 글자가 너무 짧아 다른 글자에도 맞을 수 있습니다.")
     return problems
 
 
@@ -3624,6 +3645,23 @@ def make_check_images(tk, size: int, master=None, gap: int = 0) -> dict:
             "on": draw(c["accent"], c["accent"], "#ffffff"), "on_hover": draw(c["accent_hover"], c["accent_hover"], "#ffffff")}
 
 
+def make_dot_images(tk, size: int, master=None, gap: int = 0) -> dict:
+    """목록 앞 상태 점: 설정됨(파랑)·확인 필요(주황)·안 함(회색 테두리)"""
+    c = THEME
+
+    def draw(fill, ring):
+        img = tk.PhotoImage(master=master, width=size + gap, height=size)
+        r = size / 2
+        for y in range(size):
+            for x in range(size):
+                d = ((x + 0.5 - r) ** 2 + (y + 0.5 - r) ** 2) ** 0.5
+                if d <= r - 0.3:
+                    img.put(ring if (fill is None and d > r - 1.6) else (fill or c["card"]), to=(x, y))
+        return img
+
+    return {"dot_on": draw(c["accent"], None), "dot_warn": draw("#e08a1e", None), "dot_off": draw(None, "#a9b3be")}
+
+
 def apply_theme(root, ttk, tkfont) -> dict:
     """평면적이고 깔끔한 디자인(clam 테마에 색·글꼴·여백). → {'px': 배율 맞춘 픽셀, 'font': 글꼴, 'scale': 배율}"""
     c = THEME
@@ -3725,12 +3763,18 @@ def apply_theme(root, ttk, tkfont) -> dict:
                  relief="flat", padding=(px(8), px(6)), bordercolor=c["border"], lightcolor=c["heading"],
                  darkcolor=c["heading"])
     st.map("Treeview.Heading", background=[("active", c["hover"])])
+    # 왼쪽 목록(항목·병원): 줄 높이를 넉넉하게, 펼침 표시 없이
+    st.configure("Items.Treeview", rowheight=px(32), font=font(10), indent=0)
+    st.layout("Items.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
+        ("Treeitem.image", {"side": "left", "sticky": ""}),
+        ("Treeitem.focus", {"side": "left", "sticky": "", "children": [("Treeitem.text", {"side": "left", "sticky": ""})]})]})])
     # 스크롤바
     for name in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
         st.configure(name, background="#dce2e9", troughcolor=c["card"], bordercolor=c["card"], arrowcolor="#9aa5b1",
                      lightcolor="#dce2e9", darkcolor="#dce2e9", gripcount=0, arrowsize=px(11), relief="flat")
         st.map(name, background=[("active", "#c3ccd6")], lightcolor=[("active", "#c3ccd6")], darkcolor=[("active", "#c3ccd6")])
-    return {"px": px, "font": font, "scale": scale, "family": family, "images": checks}
+    images = dict(checks, **make_dot_images(tkinter, px(10), root, gap=px(10)))
+    return {"px": px, "font": font, "scale": scale, "family": family, "images": images}
 
 
 def auto_wrap(label, margin: int = 0):
@@ -3746,6 +3790,24 @@ def auto_wrap(label, margin: int = 0):
 def hline(parent, tk):
     """연한 구분선"""
     return tk.Frame(parent, height=1, bg=THEME["border"])
+
+
+def item_tree(parent, ttk, app, first, second):
+    """왼쪽 목록 표(점 + 이름, 두 번째 칸): first/second = (제목, 폭)"""
+    c = THEME
+    tree = ttk.Treeview(parent, columns=("second",), show="tree headings", selectmode="browse", style="Items.Treeview")
+    tree.heading("#0", text=first[0], anchor="w")
+    tree.heading("second", text=second[0], anchor="w")
+    tree.column("#0", width=first[1], minwidth=app.px(90), stretch=True)
+    tree.column("second", width=second[1], minwidth=app.px(90), stretch=True)
+    tree.tag_configure("off", foreground=c["muted"])
+    tree.tag_configure("on", foreground=c["text"])
+    tree.tag_configure("warn", foreground=c["text"])
+    sb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+    sb.pack(side="right", fill="y")
+    tree.pack(side="left", fill="both", expand=True)
+    tree.configure(yscrollcommand=sb.set)
+    return tree
 
 
 def text_box(parent, tk, ttk, theme, height=8, wrap="word"):
@@ -3879,8 +3941,7 @@ class GuiApp:
         tools.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(px(18), 0))
         ttk.Label(tools, text="바로 가기", style="CardMuted.TLabel").pack(side="left", padx=(0, px(10)))
         for text, cmd in (("영수증 확인", self.open_list), ("병원 목록 편집", self.open_hospitals),
-                          ("자동 입력 편집", self.open_category_table),
-                          ("결과 폴더 열기", lambda: open_path(self.base / "결과"))):
+                          ("자동 입력 편집", self.open_category_table)):
             ttk.Button(tools, text=text, style="Tool.TButton", command=cmd).pack(side="left", padx=(0, px(6)))
         r += 1
         auto_wrap(ttk.Label(f, style="CardMuted.TLabel", wraplength=px(800), justify="left", text=(
@@ -4029,8 +4090,17 @@ class GuiApp:
             self.mb.showerror("자동 입력 편집", "자동입력표.csv가 엑셀에 열려 있습니다. 엑셀을 닫고 다시 누르세요.")
 
     def open_hospitals(self):
-        load_hospitals(self.base / HOSPITAL_FILE_NAME)
-        open_path(self.base / HOSPITAL_FILE_NAME)
+        """병원 목록 편집 창(엑셀 대신, 이미 열려 있으면 앞으로)"""
+        old = getattr(self, "hosp_editor", None)
+        if old is not None and old.win.winfo_exists():
+            old.win.lift()
+            return old
+        try:
+            self.hosp_editor = HospitalEditor(self)
+        except PermissionError:
+            self.mb.showerror("병원 목록 편집", "병원목록.csv가 엑셀에 열려 있습니다. 엑셀을 닫고 다시 누르세요.")
+            return None
+        return self.hosp_editor
 
     def save_form(self):
         cfg, _ = load_settings(self.base / SETTINGS_FILE_NAME)
@@ -4443,6 +4513,10 @@ class BackupTab:
         if self.app.editor is not None and self.app.editor.win.winfo_exists():
             self.app.mb.showinfo("되살리기", "자동 입력 편집 창을 닫고 다시 누르세요.")
             return False
+        hosp = getattr(self.app, "hosp_editor", None)
+        if hosp is not None and hosp.win.winfo_exists():
+            self.app.mb.showinfo("되살리기", "병원 목록 편집 창을 닫고 다시 누르세요.")
+            return False
         return True
 
     def restore(self, path: Path, ask=True) -> bool:
@@ -4761,6 +4835,231 @@ class ReceiptReview:
             callback()
 
 
+class HospitalEditor:
+    """병원 목록 편집 창(엑셀 대신): 영수증에서 찾을 글자 → Concur에 쓸 영문 이름"""
+
+    def __init__(self, app):
+        tk, ttk = app.tk, app.ttk
+        px, font, c = app.px, app.font, THEME
+        self.app, self.tk = app, tk
+        self.path = app.base / HOSPITAL_FILE_NAME
+        load_hospital_rows(self.path)                  # 없으면 만들고, 예전 기본 목록은 정리
+        # 영문 이름이 아직 빈 줄도 지우지 않게 파일의 줄을 그대로 읽음
+        self.rows = [([str(v or "").strip() for v in r.values()] + ["", "", ""])[:3] for r in read_csv_dicts(self.path)]
+        self.rows = [r for r in self.rows if r[0] or r[1]]
+        self.images = app.theme["images"]
+        self.current, self.visible, self.dirty, self.loading = None, [], False, False
+
+        win = self.win = tk.Toplevel(app.root)
+        win.title("병원 목록 편집")
+        win.configure(bg=c["bg"])
+        width = min(px(960), app.root.winfo_screenwidth() - px(40))
+        height = min(px(600), app.root.winfo_screenheight() - px(90))
+        win.geometry(f"{width}x{height}")
+        win.minsize(min(px(820), width), min(px(480), height))
+        win.transient(app.root)
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        outer = ttk.Frame(win, padding=(px(16), px(14)))
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(1, weight=1)
+        outer.rowconfigure(1, weight=1)
+        auto_wrap(ttk.Label(outer, foreground=c["muted"], font=font(9), justify="left", wraplength=px(900), text=(
+            "영수증에 '찾을 글자'가 보이면 그 병원으로 보고, Comment의 {hospital} 자리에 영문 이름을 넣습니다. "
+            "주황 점은 자동으로 만든 영문 이름이라 공식 이름과 같은지 확인이 필요한 병원입니다. "
+            "영수증에서 새 병원이 보이면 자동으로 여기에 더해집니다."))).grid(
+            row=0, column=0, columnspan=2, sticky="ew", pady=(0, px(10)))
+
+        left = ttk.Frame(outer, style="Card.TFrame", padding=px(12))
+        left.grid(row=1, column=0, sticky="nsw", padx=(0, px(12)))
+        left.rowconfigure(1, weight=1)
+        sf = ttk.Frame(left, style="Pane.TFrame")
+        sf.grid(row=0, column=0, sticky="ew", pady=(0, px(8)))
+        ttk.Label(sf, text="찾기", style="Field.TLabel").pack(side="left")
+        self.filter = tk.StringVar()
+        fe = ttk.Entry(sf, textvariable=self.filter, width=22)
+        fe.pack(side="left", padx=(px(8), 0), fill="x", expand=True)
+        fe.bind("<KeyRelease>", lambda e: self.refresh_list())
+        box = tk.Frame(left, bg=c["card"], highlightthickness=1, highlightbackground=c["border"], highlightcolor=c["border"])
+        box.grid(row=1, column=0, sticky="nsew")
+        self.tree = item_tree(box, ttk, app, ("찾을 글자", px(130)), ("영문 이름", px(220)))
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.on_select())
+        bf = ttk.Frame(left, style="Pane.TFrame")
+        bf.grid(row=2, column=0, sticky="ew", pady=(px(8), 0))
+        ttk.Button(bf, text="새 병원", style="Tool.TButton", command=self.add).pack(side="left", padx=(0, px(4)))
+        ttk.Button(bf, text="삭제", style="Tool.TButton", command=self.remove).pack(side="left")
+
+        right = ttk.Frame(outer, style="Card.TFrame", padding=(px(18), px(14)))
+        right.grid(row=1, column=1, sticky="nsew")
+        right.columnconfigure(1, weight=1)
+        self.vars = {}
+        r = 0
+        for key, label, hint in (
+                ("key", "영수증에서 찾을 글자", "영수증에 이 글자가 있으면 이 병원으로 봅니다 (예: 원광대). 너무 짧으면 다른 병원에도 맞을 수 있습니다."),
+                ("en", "Concur에 쓸 영문 이름", "Comment의 {hospital} 자리에 들어갑니다 (예: Wonkwang University Hospital).")):
+            ttk.Label(right, text=label, style="Field.TLabel").grid(row=r, column=0, sticky="w", pady=(px(7), 0), padx=(0, px(14)))
+            var = self.vars[key] = tk.StringVar()
+            w = ttk.Entry(right, textvariable=var)
+            w.grid(row=r, column=1, sticky="ew", pady=(px(7), 0))
+            w.bind("<KeyRelease>", lambda e: self.on_edit())
+            if key == "key":
+                self.key_entry = w
+            r += 1
+            auto_wrap(ttk.Label(right, text=hint, style="CardMuted.TLabel", justify="left", wraplength=px(420))).grid(
+                row=r, column=1, sticky="ew", pady=(px(2), 0))
+            r += 1
+        ttk.Label(right, text="메모", style="Field.TLabel").grid(row=r, column=0, sticky="nw", pady=(px(12), 0), padx=(0, px(14)))
+        self.note_label = ttk.Label(right, text="", style="Card.TLabel", justify="left", wraplength=px(420))
+        auto_wrap(self.note_label).grid(row=r, column=1, sticky="ew", pady=(px(12), 0))
+        r += 1
+        self.check_label = ttk.Label(right, text="", style="Warn.TLabel", justify="left", wraplength=px(420))
+        auto_wrap(self.check_label).grid(row=r, column=1, sticky="ew", pady=(px(12), 0))
+        r += 1
+        self.check_button = ttk.Button(right, text="영문 이름 확인함", style="Tool.TButton", command=self.confirm_name)
+        self.check_button.grid(row=r, column=1, sticky="w", pady=(px(6), 0))
+        self.check_button.grid_remove()
+        r += 1
+
+        bottom = ttk.Frame(outer)
+        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(px(12), 0))
+        ttk.Button(bottom, text="닫기", command=self.close).pack(side="right", padx=(px(6), 0))
+        ttk.Button(bottom, text="엑셀로 열기", command=self.open_excel).pack(side="right", padx=(px(6), 0))
+        ttk.Button(bottom, text="저장", style="Accent.TButton", command=self.save).pack(side="right")
+
+        self.refresh_list()
+        if self.visible:
+            self.select_visible(0)
+
+    # ---------- 목록 ----------
+    def item_view(self, row) -> dict:
+        state = "off" if not row[1].strip() else ("warn" if HOSP_CHECK_NOTE in row[2] else "on")
+        dot = {"on": "dot_on", "warn": "dot_warn", "off": "dot_off"}[state]
+        return {"text": row[0], "image": self.images[dot], "values": (row[1] or "—",), "tags": (state,)}
+
+    def refresh_list(self):
+        q = self.filter.get().strip().lower()
+        self.visible = [i for i, row in enumerate(self.rows) if not q or q in " ".join(row).lower()]
+        self.tree.delete(*self.tree.get_children())
+        for i in self.visible:
+            self.tree.insert("", "end", iid=str(i), **self.item_view(self.rows[i]))
+        if self.current in self.visible:
+            self.tree.selection_set(str(self.current))
+            self.tree.see(str(self.current))
+
+    def select_visible(self, pos: int):
+        iid = str(self.visible[pos])
+        self.tree.selection_set(iid)
+        self.tree.see(iid)
+        self.on_select()
+
+    def on_select(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        self.current = int(sel[0])
+        row = self.rows[self.current]
+        self.loading = True
+        self.vars["key"].set(row[0])
+        self.vars["en"].set(row[1])
+        self.loading = False
+        self.show_note()
+
+    def show_note(self):
+        row = self.rows[self.current] if self.current is not None else ["", "", ""]
+        self.note_label.configure(text=row[2] or "—")
+        if HOSP_CHECK_NOTE in row[2]:
+            self.check_label.configure(text="자동으로 만든 영문 이름입니다. 공식 이름과 같은지 확인하고, "
+                                            "맞으면 [영문 이름 확인함]을 누르세요(고치면 저절로 확인됨).")
+            self.check_button.grid()
+        else:
+            self.check_label.configure(text="")
+            self.check_button.grid_remove()
+
+    # ---------- 고치기 ----------
+    def on_edit(self):
+        if self.loading or self.current is None:
+            return
+        row = self.rows[self.current]
+        new_en = self.vars["en"].get().strip()
+        if new_en != row[1] and HOSP_CHECK_NOTE in row[2]:
+            row[2] = HOSP_USER_NOTE                     # 영문 이름을 직접 고쳤으면 확인한 것으로(엑셀 가져오기가 덮지 않음)
+        row[0], row[1] = self.vars["key"].get().strip(), new_en
+        self.mark_dirty()
+        if self.tree.exists(str(self.current)):
+            self.tree.item(str(self.current), **self.item_view(row))
+        self.show_note()
+
+    def confirm_name(self):
+        if self.current is None:
+            return
+        self.rows[self.current][2] = "영문 이름 확인함"
+        self.mark_dirty()
+        self.tree.item(str(self.current), **self.item_view(self.rows[self.current]))
+        self.show_note()
+
+    def mark_dirty(self):
+        self.dirty = True
+        self.win.title("병원 목록 편집 *")
+
+    def add(self):
+        at = self.current + 1 if self.current is not None else len(self.rows)
+        self.rows.insert(at, ["", "", HOSP_USER_NOTE])
+        self.current = at
+        self.mark_dirty()
+        self.filter.set("")
+        self.refresh_list()
+        self.select_visible(self.visible.index(at))
+        self.key_entry.focus_set()
+        return at
+
+    def remove(self):
+        if self.current is None:
+            return
+        row = self.rows[self.current]
+        if row[0] and not self.app.mb.askyesno("삭제", f"'{row[0]}' 병원을 지울까요?", parent=self.win):
+            return
+        at = self.current
+        self.rows.pop(at)
+        self.current = None
+        self.mark_dirty()
+        self.refresh_list()
+        if self.visible:
+            near = min(range(len(self.visible)), key=lambda k: (abs(self.visible[k] - at), self.visible[k] >= at))
+            self.select_visible(near)
+        else:
+            for v in self.vars.values():
+                v.set("")
+            self.show_note()
+
+    def save(self) -> bool:
+        rows = [r for r in self.rows if r[0].strip()]
+        problems = hospital_problems(rows)
+        if problems and not self.app.mb.askyesno(
+                "저장", "확인할 것이 있습니다.\n\n" + "\n".join(f"· {p}" for p in problems[:10]) + "\n\n그래도 저장할까요?",
+                parent=self.win):
+            return False
+        try:
+            write_csv(self.path, HOSPITAL_HEADER, rows)
+        except PermissionError:
+            self.app.mb.showerror("저장", "병원목록.csv가 엑셀에 열려 있습니다. 엑셀을 닫고 다시 저장하세요.", parent=self.win)
+            return False
+        self.dirty = False
+        self.win.title("병원 목록 편집")
+        self.app.append(f"병원 목록을 저장했습니다: {len(rows)}곳 (다음 실행부터 씁니다)")
+        return True
+
+    def open_excel(self):
+        if self.dirty and not self.save():
+            return
+        open_path(self.path)
+
+    def close(self):
+        if self.dirty:
+            ans = self.app.mb.askyesnocancel("병원 목록 편집", "바꾼 내용을 저장할까요?", parent=self.win)
+            if ans is None or (ans and not self.save()):
+                return
+        self.win.destroy()
+
+
 class CategoryEditor:
     """자동 입력 편집 창: 왼쪽에서 항목을 고르고, 오른쪽에서 이름(한글 마음대로)·찾을 글자와
     Concur 경비 화면의 칸(Expense Type·Business Purpose·City·LCRT·Receipt Status·Personal Expense·Comment)을
@@ -4768,7 +5067,6 @@ class CategoryEditor:
     # (키, 칸 위치)
     FIELDS = (("name", C_NAME), ("keywords", C_KEYWORDS), ("etype", C_TYPE), ("purpose", C_PURPOSE), ("city", C_CITY),
               ("lcrt", C_LCRT), ("receipt", C_RECEIPT), ("comment", C_COMMENT))
-    MARK_ON, MARK_OFF = "●", "○"
 
     def __init__(self, app):
         tk, ttk = app.tk, app.ttk
@@ -4801,7 +5099,7 @@ class CategoryEditor:
 
         ttk.Label(outer, foreground=c["muted"], font=font(9), wraplength=px(1020), justify="left", text=(
             "왼쪽에서 항목을 고르고 오른쪽에 적으면 됩니다. 항목 이름은 한글로 마음대로 적고, 그 아래 칸들은 Concur 경비 화면에 "
-            "위에서 아래 순서대로 들어갑니다. ● = 설정됨(영수증에 맞춰짐), ○ = 아직 안 함. "
+            "위에서 아래 순서대로 들어갑니다. 파란 점 = 설정됨(영수증에 맞춰짐), 회색 점 = 아직 안 함. "
             "'영수증에서 찾을 글자'가 비어 있는 항목은 영수증에 맞춰지지 않으니, 실제로 쓰는 항목만 채우세요. "
             "위에 있는 항목이 먼저 맞춰집니다(▲▼로 순서 바꿈).")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, px(10)))
 
@@ -4822,14 +5120,9 @@ class CategoryEditor:
         lb_frame = tk.Frame(left, bg=c["card"], highlightthickness=1, highlightbackground=c["border"],
                             highlightcolor=c["border"])
         lb_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
-        self.listbox = tk.Listbox(lb_frame, width=30, height=18, exportselection=False, font=font(10), relief="flat",
-                                  borderwidth=0, highlightthickness=0, bg=c["card"], fg=c["text"], activestyle="none",
-                                  selectbackground=c["accent_soft"], selectforeground=c["text"])
-        sb = ttk.Scrollbar(lb_frame, orient="vertical", command=self.listbox.yview)
-        sb.pack(side="right", fill="y")
-        self.listbox.pack(side="left", fill="both", expand=True, padx=(px(4), 0), pady=px(4))
-        self.listbox.configure(yscrollcommand=sb.set)
-        self.listbox.bind("<<ListboxSelect>>", lambda e: self.on_select())
+        self.images = app.theme["images"]
+        self.tree = item_tree(lb_frame, ttk, app, ("항목", px(140)), ("Expense Type", px(170)))
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.on_select())
         bf = ttk.Frame(left, style="Pane.TFrame")
         bf.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(px(8), 0))
         for text, cmd in (("새 항목", self.add), ("삭제", self.remove), ("▲ 위로", lambda: self.move(-1)),
@@ -4886,7 +5179,7 @@ class CategoryEditor:
         ttk.Checkbutton(right, text="체크하기 (개인 경비로 처리할 항목만)", style="Card.TCheckbutton",
                         variable=self.personal, command=self.on_edit).grid(row=r, column=1, sticky="w", pady=(px(7), 0))
         r += 1
-        entry("comment", "Comment", "{hospital} 자리에 병원 영문명 (병원을 못 찾으면 ' in {hospital}'은 빠짐)")
+        entry("comment", "Comment")
 
         self.status = ttk.Label(right, text="", style="Warn.TLabel", wraplength=px(430), justify="left")
         self.status.grid(row=r, column=1, sticky="w", pady=(px(12), 0))
@@ -4904,33 +5197,34 @@ class CategoryEditor:
             self.select_visible(first)
 
     # ---------- 목록 ----------
-    def label(self, row: list) -> str:
-        mark = self.MARK_ON if row[1].strip() else self.MARK_OFF
-        return f"{mark} {row[0]}" + (f"   → {row[4]}" if row[4] and row[4] != row[0] else "")
+    def item_view(self, row: list) -> dict:
+        """목록 한 줄: 점(설정됨 파랑/안 함 회색) + 항목 이름, Expense Type"""
+        on = bool(row[C_KEYWORDS].strip())
+        return {"text": row[C_NAME], "image": self.images["dot_on" if on else "dot_off"],
+                "values": (row[C_TYPE] or "—",), "tags": ("on" if on else "off",)}
 
     def refresh_list(self):
         q = self.filter.get().strip().lower()
         self.visible = [i for i, row in enumerate(self.rows)
                         if (not q or q in " ".join(row[:5]).lower()) and (not self.only_on.get() or row[1].strip())]
-        self.listbox.delete(0, "end")
+        self.tree.delete(*self.tree.get_children())
         for i in self.visible:
-            self.listbox.insert("end", self.label(self.rows[i]))
+            self.tree.insert("", "end", iid=str(i), **self.item_view(self.rows[i]))
         if self.current in self.visible:
-            pos = self.visible.index(self.current)
-            self.listbox.selection_set(pos)
-            self.listbox.see(pos)
+            self.tree.selection_set(str(self.current))
+            self.tree.see(str(self.current))
 
     def select_visible(self, pos: int):
-        self.listbox.selection_clear(0, "end")
-        self.listbox.selection_set(pos)
-        self.listbox.see(pos)
+        iid = str(self.visible[pos])
+        self.tree.selection_set(iid)
+        self.tree.see(iid)
         self.on_select()
 
     def on_select(self):
-        sel = self.listbox.curselection()
+        sel = self.tree.selection()
         if not sel:
             return
-        self.current = self.visible[sel[0]]
+        self.current = int(sel[0])
         row = self.rows[self.current]
         self.loading = True
         for key, col in self.FIELDS:
@@ -4956,11 +5250,8 @@ class CategoryEditor:
             row[C_CITY] = ""
         row[C_PERSONAL] = "O" if self.personal.get() else ""
         self.mark_dirty()
-        if self.current in self.visible:
-            pos = self.visible.index(self.current)
-            self.listbox.delete(pos)
-            self.listbox.insert(pos, self.label(row))
-            self.listbox.selection_set(pos)
+        if self.tree.exists(str(self.current)):
+            self.tree.item(str(self.current), **self.item_view(row))
         self.update_status()
 
     def update_status(self):
