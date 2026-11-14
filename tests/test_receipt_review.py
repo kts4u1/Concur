@@ -71,6 +71,22 @@ def test_edits_in_review_are_used_next_time(made):
     assert ca.city_name(again["IMG_0001.JPG"].city) == "Mokpo"
 
 
+def test_extra_comment_kept_and_added_to_comment(made):
+    cfg, build, path, src = made
+    build()
+    rows = ca.read_csv_dicts(path)
+    by = {r["파일"]: r for r in rows}
+    by["IMG_0001.JPG"]["추가 Comment"] = "SO 1234567"                          # 영수증 확인 창에서 적은 것처럼
+    assert ca.review_status(by["IMG_0001.JPG"]) == "✎ 고침"
+    ca.save_review_rows(path, rows)
+    again = build()
+    rec = again["IMG_0001.JPG"]
+    assert rec.extra_comment == "SO 1234567"
+    assert ca.texts_for(rec, cfg)["Comment"].endswith(" SO 1234567")         # Concur Comment 맨 뒤
+    kept = {r["파일"]: r for r in ca.read_csv_dicts(path)}["IMG_0001.JPG"]
+    assert kept["추가 Comment"] == "SO 1234567"                                 # 다시 만들어도 남아 있음
+
+
 def test_unchanged_value_is_not_an_edit():
     row = {"사용(O/X)": "O", "[자동] 사용": "O", "날짜": "2026-11-05", "[자동] 날짜": "2026-11-05",
            "금액": "4,500", "[자동] 금액": "4500", "분류": "카페", "[자동] 분류": "카페", "확인 필요": ""}
@@ -147,9 +163,11 @@ def test_review_window(made, tmp_path):
         rv.on_edit()
         assert "2026-10-27처럼" in rv.status.cget("text")                     # 날짜 모양이 틀리면 알려 줌
         rv.vars["date"].set("2026-11-05")
+        rv.vars["memo"].set("SO 1234567")                                     # 서비스 오더 번호 등
         rv.on_edit()
         assert rv.save() and not rv.dirty
-        assert {r["파일"]: r for r in ca.read_csv_dicts(path)}["IMG_0002.JPG"]["분류"] == "식대"
+        saved = {r["파일"]: r for r in ca.read_csv_dicts(path)}["IMG_0002.JPG"]
+        assert saved["분류"] == "식대" and saved["추가 Comment"] == "SO 1234567"
         rv.only_check.set(True)
         rv.refresh_list()
         assert rv.tree.get_children() == ()                                   # 확인 필요가 남지 않음

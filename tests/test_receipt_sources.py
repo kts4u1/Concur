@@ -163,6 +163,8 @@ def test_receipt_sources_tab(tmp_path):
         src = app.sources
         assert src.folders == [str(icloud)]
         assert app.folder_summary.cget("text") == "1곳: iCloud"
+        assert "Iksan, KOREA, REPUBLIC OF" in app.city_box.cget("values")         # 기본 도시는 ▼에서 고르기
+        assert app.city.get() == "Gwangju (ex Kwangju), KOREA, REPUBLIC OF"
         buttons = button_texts(app.notebook.nametowidget(app.notebook.tabs()[0]))
         assert buttons == ["① 영수증 분석만", "② 전체 실행",                     # ③·중지·결과 폴더 열기는 없앰
                            "영수증 확인", "병원 목록 편집", "자동 입력 편집"]

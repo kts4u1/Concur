@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 가게 기억"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 영수증별 Comment"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -169,11 +169,13 @@ CAFE_MORE_WORDS = ["커피", "라떼", "카푸치노", "에스프레소", "프�
 PARKING_WORDS = ["주차", "입차", "출차", "주자"]              # '주자'는 OCR이 '주차'를 잘못 읽은 것
 PARKING_MORE_WORDS = ["입출차", "파킹", "발렛", "parking", "valet"]
 # 예전 자동입력표에 판마다 한 번씩만 더할 글자(사용자가 나중에 지운 글자는 다시 넣지 않음)
-DEFAULT_WORDS_VERSION = 2
+DEFAULT_WORDS_VERSION = 3
 DEFAULT_WORDS_BY_VERSION = {
     1: {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS},
     2: {"카페": CAFE_WORDS + CAFE_MORE_WORDS, "주차": PARKING_WORDS + PARKING_MORE_WORDS},
+    3: {},                                                 # 판 3: 문구 철자 고치기(SPELLING_FIXES)
 }
+SPELLING_FIXES = [(re.compile(r"\bAccomodation", re.I), "Accommodation")]
 DEFAULT_CITIES = {
     # Concur 화면에서 확인한 이름
     "광주": "Gwangju (ex Kwangju), KOREA, REPUBLIC OF",
@@ -990,15 +992,26 @@ def upgrade_category_table(table_path: Path, settings_path: Path, log=None) -> i
         if new:
             row[C_KEYWORDS] = ", ".join(have + new)
             added += len(new)
+    fixed = 0
+    if done_version < 3:                                   # 사용자가 적은 Comment·Business Purpose의 철자
+        for row in rows:
+            for col in (C_COMMENT, C_PURPOSE):
+                new_text = row[col]
+                for pattern, word in SPELLING_FIXES:
+                    new_text = pattern.sub(word, new_text)
+                if new_text != row[col]:
+                    row[col], fixed = new_text, fixed + 1
     if done_version < 1 and not any(r[C_NAME] == "숙박" for r in rows):
         defaults = {r[C_NAME]: r for r in category_rows_from_cfg(default_settings())}
         at = next((i + 1 for i, r in enumerate(rows) if r[C_NAME] == "식대"), len(rows))
         rows.insert(at, _category_row(defaults["숙박"][:C_NOTE] + [""]))
         added += len(ACCOM_USER_WORDS + ACCOM_MORE_WORDS)
-    if added:
+    if added or fixed:
         save_category_rows(table_path, rows)
-        if log:
-            log(f"자동 입력표에 기본 찾을 글자 {added}개를 더했습니다({'·'.join(to_add)}). [자동 입력 편집]에서 고칠 수 있습니다.")
+    if log and added:
+        log(f"자동 입력표에 기본 찾을 글자 {added}개를 더했습니다({'·'.join(to_add)}). [자동 입력 편집]에서 고칠 수 있습니다.")
+    if log and fixed:
+        log(f"자동 입력표 문구의 철자를 고쳤습니다(Accomodation → Accommodation, {fixed}곳).")
     cfg["_기본_찾을_글자_판"] = DEFAULT_WORDS_VERSION
     save_settings(settings_path, cfg)
     return added
@@ -1652,6 +1665,7 @@ class Receipt:
     skip_reason: str = ""                           # 이 달 목록에서 자동으로 뺀 이유
     hospital_src: str = ""                          # 병원을 어디서 찾았는지
     biz_no: str = ""                                # 사업자등록번호(가게 기억에 씀)
+    extra_comment: str = ""                         # 영수증 확인 창에서 적은 글(서비스 오더 번호 등) → Comment 맨 뒤
     remembered: bool = False                        # 가게 기억으로 분류·병원·도시를 채웠는지
 
     @property
@@ -2018,7 +2032,7 @@ def duplicate_count(rec: Receipt, receipts: list) -> int:
 
 LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "병원 근거", "도시", "확인 필요",
                "OCR 앞부분", "[자동] 사용", "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문", "[자동] 도시",
-               "날짜 후보", "금액 후보", "찾은 병원 글자", "사진 위치", "사업자번호", "가게 기억"]
+               "날짜 후보", "금액 후보", "찾은 병원 글자", "사진 위치", "사업자번호", "가게 기억", "추가 Comment"]
 NOT_RECEIPT_NOTE = "영수증 아닌 것 같음(자동 제외)"
 UNDATED_NOTE = "날짜 못 읽음: 영수증 날짜를 적어 주세요(자동 제외)"
 OTHER_MONTH_NOTE = "다른 달 영수증({date})(자동 제외)"
@@ -2079,6 +2093,8 @@ def apply_user_edits(rec: Receipt, row: dict, tm=None, cities=None, categories=N
     if "도시" in row and g("도시") != g("[자동] 도시"):
         rec.city = resolve_city(g("도시"), cities or DEFAULT_CITIES)
         rec.edited.append("도시")
+    if g("추가 Comment"):
+        rec.extra_comment = g("추가 Comment")
     if tm is not None and "날짜" in rec.edited:
         place_in_month(rec, tm)          # 고친 날짜로 이 달 영수증인지 다시 정함
     if user_use != auto_use:
@@ -2115,7 +2131,7 @@ def save_receipt_list(receipts: list, auto: dict, path: Path):
             city_name(r.city), ", ".join(issues), compact(r.ocr_text)[:100],
             "O" if a.use else "X", a.main_date, a.total or "", a.category, a.hospital_en, city_name(a.city),
             " ".join(a.dates), " ".join(str(x) for x in a.amounts), a.hospital_key, str(r.original),
-            r.biz_no, "O" if a.remembered else "",
+            r.biz_no, "O" if a.remembered else "", r.extra_comment,
         ])
     write_csv(path, LIST_HEADER, rows)
 
@@ -2133,7 +2149,7 @@ def review_row_edited(row: dict) -> bool:
         return True
     if parse_amount_cell(g("금액")) is not None and parse_amount_cell(g("금액")) != parse_amount_cell(g("[자동] 금액")):
         return True
-    return any(g(k) != g(f"[자동] {k}") for k in ("분류", "병원 영문", "도시"))
+    return any(g(k) != g(f"[자동] {k}") for k in ("분류", "병원 영문", "도시")) or bool(g("추가 Comment"))
 
 
 def review_status(row: dict) -> str:
@@ -2399,15 +2415,17 @@ def city_to_choose(rec, current: str, default: str, fixed: str = ""):
 
 
 def texts_for(rec: Receipt, cfg: dict) -> dict:
+    """Comment·Business Purpose 글. 영수증 확인 창에서 적은 글(서비스 오더 번호 등)은 Comment 맨 뒤에 붙입니다."""
     tmpl = cfg["입력_문구"].get(rec.category) if rec and rec.category else None
-    if not tmpl:
-        return {}
     out = {}
-    for name, t in tmpl.items():
+    for name, t in (tmpl or {}).items():
         t = t.replace("{병원}", "{hospital}")
         if not rec.hospital_en:
             t = re.sub(r"\s+(?:in|at|@)\s+\{hospital\}|\{hospital\}", "", t)
         out[name] = t.replace("{hospital}", rec.hospital_en).strip()
+    extra = (getattr(rec, "extra_comment", "") or "").strip() if rec else ""
+    if extra:
+        out["Comment"] = f"{out.get('Comment', '')} {extra}".strip()
     return out
 
 
@@ -4074,7 +4092,8 @@ class GuiApp:
         r += 1
         field_label("기본 도시")
         self.city = tk.StringVar(value=self.cfg["기본_도시"])
-        ttk.Entry(f, textvariable=self.city).grid(row=r, column=1, columnspan=2, sticky="ew", pady=px(4))
+        self.city_box = ttk.Combobox(f, textvariable=self.city, values=self.city_choices())
+        self.city_box.grid(row=r, column=1, columnspan=2, sticky="ew", pady=px(4))
         r += 1
         field_label("Concur 로그인 이메일")
         self.login_email = tk.StringVar(value=str(self.cfg.get("로그인_이메일") or ""))
@@ -4212,6 +4231,7 @@ class GuiApp:
         self.cfg, _ = load_settings(self.base / SETTINGS_FILE_NAME)
         load_hospitals(self.base / HOSPITAL_FILE_NAME)
         self.city.set(self.cfg["기본_도시"])
+        self.city_box.configure(values=self.city_choices())
         self.login_email.set(str(self.cfg.get("로그인_이메일") or ""))
         self.auto_login.set(str(self.cfg.get("로그인_방법", "이메일 링크")).strip() == "이메일 링크")
         self.pre.set(bool(self.cfg.get("영수증_보정_사용", True)))
@@ -4219,6 +4239,11 @@ class GuiApp:
         self.sources.folders = [str(f) for f in receipt_folders(self.cfg)]
         self.sources.counts = {}
         self.sources.refresh()
+
+    def city_choices(self) -> list:
+        """기본 도시 ▼ 목록: 도시 목록(설정 '도시_목록')의 Concur 이름 + 지금 기본 도시"""
+        cities = set((self.cfg.get("도시_목록") or DEFAULT_CITIES).values()) | {self.cfg.get("기본_도시", "")}
+        return sorted((c for c in cities if c), key=lambda c: city_name(c).lower())
 
     def update_folder_summary(self, folders: list):
         if not folders:
@@ -4851,6 +4876,13 @@ class ReceiptReview:
                              hint_text="자동 입력 편집에서 만든 항목. 이 항목의 Comment·Expense Type이 들어갑니다.")
         self.hosp_box = combo("hosp", "병원 (영문)", self.hospitals, hint_text="비우면 Comment에서 ' in 병원'이 빠집니다.")
         self.city_box = combo("city", "도시", self.cities, hint_text="'(기본 도시)'면 기본 도시를 고릅니다.")
+        label("Comment")
+        self.vars["memo"] = tk.StringVar()
+        self.memo_entry = ttk.Entry(right, textvariable=self.vars["memo"])
+        self.memo_entry.grid(row=r, column=1, sticky="ew", pady=(px(7), 0))
+        self.memo_entry.bind("<KeyRelease>", lambda e: self.on_edit())
+        r += 1
+        hint("서비스 오더 번호나 그 외 Comment에 들어갈 정보를 넣으세요. Concur의 Comment 맨 뒤에 붙습니다.")
         label("확인할 것")
         self.issue_label = ttk.Label(right, text="", style="Warn.TLabel", justify="left", wraplength=px(380))
         auto_wrap(self.issue_label).grid(row=r, column=1, sticky="ew", pady=(px(9), 0))
@@ -4917,6 +4949,7 @@ class ReceiptReview:
         self.vars["cat"].set(g("분류") or self.NO_CATEGORY_TEXT)
         self.vars["hosp"].set(g("병원 영문"))
         self.vars["city"].set(g("도시") or self.DEFAULT_CITY_TEXT)
+        self.vars["memo"].set(g("추가 Comment"))
         self.loading = False
         issue = g("확인 필요") or "없음"
         if g("가게 기억") == "O":
@@ -4969,6 +5002,7 @@ class ReceiptReview:
         row["병원 영문"] = self.vars["hosp"].get().strip()
         city = self.vars["city"].get().strip()
         row["도시"] = "" if city == self.DEFAULT_CITY_TEXT else city
+        row["추가 Comment"] = self.vars["memo"].get().strip()
         warn = []
         if row["날짜"] and not parse_date_cell(row["날짜"]):
             warn.append("날짜는 2026-10-27처럼 적어 주세요.")

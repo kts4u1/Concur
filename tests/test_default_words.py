@@ -54,11 +54,12 @@ def test_old_table_gets_words_once(tmp_path):
         ["톨게이트", "통행료", "Toll fee", "For service", "Parking & Toll", ""]])
     lines = []
     assert ca.upgrade_category_table(table, settings, lines.append) > 0 and "기본 찾을 글자" in lines[0]
+    assert any("Accomodation → Accommodation" in l for l in lines)
     by = {r[ca.C_NAME]: r for r in ca.load_category_rows(table, ca.default_settings())}
     meal = [k.strip() for k in by["식대"][ca.C_KEYWORDS].split(",")]
     assert meal[:3] == ["찌개", "한식", "식당"] and "김밥" in meal and "버터" not in meal   # 사용자가 지운 글자는 안 넣음
     assert "hotel" in by["숙박"][ca.C_KEYWORDS] and "객실" in by["숙박"][ca.C_KEYWORDS]
-    assert by["숙박"][ca.C_COMMENT] == "Accomodation fee for service in hospital"         # 사용자 문구는 그대로
+    assert by["숙박"][ca.C_COMMENT] == "Accommodation fee for service in hospital"        # 사용자 문구는 철자만 고침
     cafe = [k.strip() for k in by["카페"][ca.C_KEYWORDS].split(",")]
     assert cafe[:2] == ["메리카", "카페"] and "스타벅스" in cafe and "coffee" in cafe
     assert "parking" in by["주차"][ca.C_KEYWORDS] and by["주차"][ca.C_KEYWORDS].startswith("주차, 입차, ")
@@ -95,3 +96,17 @@ def test_old_table_without_accommodation(tmp_path):
     rows = ca.load_category_rows(table, ca.default_settings())
     assert [r[ca.C_NAME] for r in rows] == ["식대", "숙박", "주차"]                        # 식대 아래에 숙박
     assert rows[1][ca.C_TYPE] == "Accommodation" and rows[0][ca.C_KEYWORDS].startswith("버터, 찌개")
+
+
+def test_spelling_fixed_once_for_version_2_users(tmp_path):
+    settings, table = tmp_path / ca.SETTINGS_FILE_NAME, tmp_path / ca.CATEGORY_FILE_NAME
+    cfg = ca.default_settings()
+    cfg["_기본_찾을_글자_판"] = 2                                                          # 글자 더하기는 이미 받음
+    ca.save_settings(settings, cfg)
+    ca.save_category_rows(table, [["숙박", "모텔, 호텔", "Accomodation fee for service in hospital",
+                                   "For service in hospital", "Accommodation", ""]])
+    lines = []
+    assert ca.upgrade_category_table(table, settings, lines.append) == 0                 # 더한 글자는 없음
+    row = ca.load_category_rows(table, ca.default_settings())[0]
+    assert row[ca.C_COMMENT] == "Accommodation fee for service in hospital"
+    assert row[ca.C_KEYWORDS] == "모텔, 호텔" and lines == ["자동 입력표 문구의 철자를 고쳤습니다(Accomodation → Accommodation, 1곳)."]

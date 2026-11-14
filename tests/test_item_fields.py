@@ -122,6 +122,14 @@ def test_fills_top_to_bottom_with_item_values(page, tmp_path):
     assert checks == []                                                          # 자동 입력표대로 고른 것은 묻지 않음
 
 
+def test_extra_comment_goes_last(page, tmp_path):
+    cfg = cfg_with(tmp_path, [TOLL])
+    rec = ca.Receipt(original=Path("a.jpg"), ocr_file=Path("a.jpg"), category="톨게이트",
+                     hospital_en="Mokpo Hankook Hospital", extra_comment="SO 1234567")
+    make_bot(page, cfg).fill_expense(rec, None, [])
+    assert page.input_value("#comment") == "Toll fee for service in Mokpo Hankook Hospital SO 1234567"
+
+
 def test_no_matching_item_leaves_expense_type(page, tmp_path):
     cfg = cfg_with(tmp_path, [TOLL])
     rec = ca.Receipt(original=Path("a.jpg"), ocr_file=Path("a.jpg"), category="")
