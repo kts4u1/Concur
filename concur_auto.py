@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 아이콘"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 숙박 기간"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -109,6 +109,7 @@ DEFAULT_ELEMENTS = {
     "도시": "#location",
     "영수증 업로드 버튼": "#upload-receipt-button",
     "드롭다운 항목": ".sapcnqr-listbox-item__wrapper",
+    "숙박 기간": "input[placeholder='MM/DD/YYYY - MM/DD/YYYY'], input[id*='dateRange'], input[id*='DateRange']",
 }
 # 위치(id)로 못 찾을 때 화면 글자(라벨)로 찾는 입력칸
 DEFAULT_ELEMENT_LABELS = {
@@ -121,6 +122,7 @@ DEFAULT_ELEMENT_LABELS = {
     "경비 금액": "Amount|금액",
     "Comment": "Comment|코멘트|의견",
     "Business Purpose": "Business Purpose|비즈니스 목적|업무 목적",
+    "숙박 기간": "Date Range|숙박 기간|날짜 범위",
 }
 
 # 사용자 Concur의 Expense Type(사용자가 화면을 캡처해 보내 준 것, 글자 그대로). Concur에서 고를 때는 이름이 완전히 같은
@@ -342,6 +344,9 @@ def default_settings():
             "NA": "NA",
             "Undefined": "Undefined",
             "Personal Expense": "개인 경비|Personal Expense",
+            "필수 정보 빠짐": "Would you like to make corrections now|missing required information|필수 정보|지금 수정하시겠습니까",
+            "예": "Yes|예",
+            "아니요": "No|아니요|아니오",
         },
         "_Concur_경비_유형_설명": "자동 입력 편집 창에서 고를 Concur Expense Type 목록. 화면 조사(python concur_auto.py --inspect)를 경비 편집 화면에서 하면 Concur의 전체 목록을 읽어 여기에 더합니다.",
         "Concur_경비_유형": list(KNOWN_EXPENSE_TYPES),
@@ -351,6 +356,8 @@ def default_settings():
         "화면_요소": dict(DEFAULT_ELEMENTS),
         "_화면_요소_라벨_설명": "위치로 못 찾을 때 화면에 보이는 칸 이름(라벨)으로 찾습니다. '|'로 여러 개.",
         "화면_요소_라벨": dict(DEFAULT_ELEMENT_LABELS),
+        "_숙박_설명": "Date Range 칸이 있는 경비(Accommodation)는 영수증 날짜부터 다음 날까지 1박으로 넣습니다. 영수증 시각이 아래 시각 전(새벽)이면 전날부터 넣습니다(예: 11월 3일 새벽 2시 영수증 → 11/02~11/03).",
+        "숙박_새벽_기준_시각": 6,
         "대기시간_초": 60,
     }
 
@@ -1893,6 +1900,71 @@ def find_ocr_dates(ocr_text: str) -> list:
     return found
 
 
+TIME_IN_TEXT = re.compile(
+    r"(?:(오전|오후|AM|PM|A\.M\.|P\.M\.)\s*)?(?<![\d:])([01]?\d|2[0-3])\s*[:시]\s*([0-5]\d)(?:\s*[:분]\s*[0-5]\d)?(?![\d:])"
+    r"(?:\s*(AM|PM|A\.M\.|P\.M\.))?", re.I)
+TIME_WORDS = re.compile(r"일시|시각|입실|결제|승인|거래|발행|판매")       # '영업시간'의 시각은 쓰지 않음
+
+
+def _hour_of(m) -> tuple:
+    hour, minute = int(m.group(2)), int(m.group(3))
+    mark = (m.group(1) or m.group(4) or "").upper().replace(".", "")
+    if mark in ("오후", "PM") and hour < 12:
+        hour += 12
+    elif mark in ("오전", "AM") and hour == 12:
+        hour = 0
+    return hour, minute
+
+
+def find_receipt_time(text: str):
+    """영수증에 찍힌 시각 (시, 분). 날짜 바로 뒤의 시각을 먼저 보고, 없으면 '거래일시·결제·입실…' 같은 글자 뒤의 시각.
+    영업시간처럼 아무 데나 있는 시각은 쓰지 않습니다. 못 찾으면 None."""
+    text = text or ""
+    for date_re in (DATE_IN_TEXT, DATE_SHORT_YEAR, DATE_COMPACT):
+        for d in date_re.finditer(text):
+            m = TIME_IN_TEXT.search(text[d.end():d.end() + 25])
+            if m and text[d.end():d.end() + m.start()].count("\n") <= 1:     # 날짜와 같은 줄이나 바로 다음 줄
+                return _hour_of(m)
+    for w in TIME_WORDS.finditer(text):
+        m = TIME_IN_TEXT.search(text[w.end():w.end() + 30])
+        if m:
+            return _hour_of(m)
+    return None
+
+
+def _as_date(value):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def stay_dates(rec, txn_iso, cutoff_hour: int = 6) -> tuple:
+    """숙박(Date Range) 1박: (들어간 날, 나온 날, 확인할 것).
+    영수증 날짜부터 다음 날까지. 영수증 시각이 새벽(cutoff_hour 전)이면 전날부터
+    (야근 뒤 새벽에 들어가 받은 영수증은 전날 숙박). 시각은 영수증 글자 → 같은 날 찍은 사진 시각 순서로 봅니다."""
+    base = _as_date(rec.main_date) if rec and rec.main_date else None
+    note = ""
+    when = None
+    if rec is not None:
+        when = find_receipt_time(rec.ocr_text)
+        if when is None and rec.taken and base and _as_date(rec.taken) == base:
+            when = (rec.taken.hour, rec.taken.minute)
+    if base is None:
+        base = _as_date(txn_iso)
+        note = "숙박 기간 확인(영수증이 없어 거래일부터 1박)"
+    elif when is None:
+        note = "숙박 기간 확인(영수증 시각을 못 읽어 영수증 날짜부터 1박)"
+    if base is None:
+        return None, None, "숙박 기간 직접 넣기(날짜를 모름)"
+    start = base - timedelta(days=1) if when is not None and when[0] < cutoff_hour else base
+    return start, start + timedelta(days=1), note
+
+
 def file_name_date(name: str):
     m = DATE_IN_NAME.search(name)
     return normalize_date(*m.groups()) if m else None
@@ -2690,6 +2762,73 @@ def apply_vendor_hospital(rec, vendor: str, hospitals: list) -> bool:
     return True
 
 
+JS_PICK_DAY = r"""
+({y, m, d}) => {
+  // 열린 달력에서 y년 m월 d일 칸을 찾아 표시합니다. 보이는 달이 다르면 앞/뒤 화살표를 표시합니다.
+  const MONTHS = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  document.querySelectorAll('[data-concur-auto]').forEach(e => e.removeAttribute('data-concur-auto'));
+  const own = e => Array.from(e.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()
+                   || (e.children.length === 0 ? (e.textContent || '').trim() : '');
+  // 달력: 1~28이 적힌 칸이 모두 있는 가장 작은 상자
+  const boxes = Array.from(document.querySelectorAll('[role=dialog], [role=grid], [role=application], div, table'))
+    .filter(vis).filter(b => {
+      const nums = new Set(Array.from(b.querySelectorAll('button, td, [role=gridcell], [role=button], span, div'))
+        .filter(vis).map(own).filter(t => /^\d{1,2}$/.test(t)));
+      for (let i = 1; i <= 28; i++) if (!nums.has(String(i))) return false;
+      return /(19|20)\d{2}/.test(b.innerText) && MONTHS.some(mn => b.innerText.toLowerCase().includes(mn) || /\d{1,2}\s*월/.test(b.innerText));
+    });
+  if (!boxes.length) return {ok: false, why: 'no calendar'};
+  boxes.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+  const cal = boxes[0];
+  // 보이는 달
+  const text = cal.innerText;
+  const year = parseInt((text.match(/(19|20)\d{2}/) || ['0'])[0], 10);
+  let month = -1;
+  const lower = text.toLowerCase();
+  let best = 1e9;
+  MONTHS.forEach((mn, i) => { const at = lower.indexOf(mn); if (at >= 0 && at < best) { best = at; month = i + 1; } });
+  if (month < 0) { const km = text.match(/(\d{1,2})\s*월/); if (km) month = parseInt(km[1], 10); }
+  if (!year || month < 0) return {ok: false, why: 'no month'};
+  const diff = (y - year) * 12 + (m - month);
+  if (diff !== 0) {
+    const want = diff > 0 ? /next|다음|forward|›|»|>/i : /prev|이전|back|‹|«|</i;
+    const btns = Array.from(cal.querySelectorAll('button, [role=button], a')).filter(vis)
+      .filter(b => !/^\d{1,2}$/.test(own(b)));
+    let nav = btns.find(b => want.test(b.getAttribute('aria-label') || '') || want.test(b.getAttribute('title') || '')
+                             || want.test(b.className || '') || want.test(own(b)));
+    if (!nav) {   // 글자 없는 화살표: 달 이름 줄의 첫 번째(이전)·마지막(다음) 버튼
+      const arrows = btns.filter(b => !own(b) || /^[<>‹›«»]$/.test(own(b)));
+      nav = diff > 0 ? arrows[arrows.length - 1] : arrows[0];
+    }
+    if (!nav) return {ok: false, why: 'no arrow'};
+    nav.setAttribute('data-concur-auto', 'nav');
+    return {ok: true, nav: true};
+  }
+  const cells = Array.from(cal.querySelectorAll('button, td, [role=gridcell], [role=button]')).filter(vis)
+    .filter(e => own(e) === String(d) || (e.children.length && (e.innerText || '').trim() === String(d)));
+  // 날짜가 적힌 이름표(aria-label 등)가 있으면 그것으로 정확히
+  const names = [MONTHS[m - 1], String(m).padStart(2, '0') + '/' + String(d).padStart(2, '0') + '/' + y,
+                 y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0')];
+  const exact = cells.find(e => Array.from(e.attributes).some(a => {
+    const v = (a.value || '').toLowerCase();
+    return (v.includes(names[0]) && new RegExp('\\b' + d + '\\b').test(v) && v.includes(String(y))) || v.includes(names[1]) || v.includes(names[2]);
+  }));
+  let pick = exact;
+  if (!pick) {
+    const other = /outside|other|adjacent|disabled|prev-month|next-month|muted|grey|gray|offmonth|off-month/i;
+    let inMonth = cells.filter(e => !other.test(e.className || '') && e.getAttribute('aria-disabled') !== 'true' && !e.disabled);
+    if (!inMonth.length) inMonth = cells;
+    // 앞쪽에는 지난달 끝(23~31일), 뒤쪽에는 다음 달 초(1~14일)가 보일 수 있음
+    pick = d <= 14 ? inMonth[0] : inMonth[inMonth.length - 1];
+  }
+  if (!pick) return {ok: false, why: 'no day'};
+  pick.setAttribute('data-concur-auto', 'day');
+  return {ok: true, nav: false};
+}
+"""
+
+
 JS_INSPECT = r"""
 () => {
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
@@ -3482,9 +3621,133 @@ class ConcurBot:
             time.sleep(0.5)
         raise RuntimeError(f"{index}번째 경비 화면으로 넘어가지 않았습니다.")
 
+    # ---------- 숙박 Date Range ----------
+    def _calendar_pick(self, day: date):
+        """열린 달력에서 그날을 누릅니다(보이는 달이 다르면 화살표로 넘김)."""
+        page = self.page
+        for _ in range(26):
+            r = page.evaluate(JS_PICK_DAY, {"y": day.year, "m": day.month, "d": day.day})
+            if not r.get("ok"):
+                raise RuntimeError(f"달력에서 {day:%m/%d}를 찾지 못했습니다({r.get('why')}).")
+            page.locator("[data-concur-auto]").first.click()
+            time.sleep(0.25)
+            if not r.get("nav"):
+                return
+        raise RuntimeError("달력에서 그 달로 넘어가지 못했습니다.")
+
+    def pick_date_range(self, box, start: date, end: date):
+        """Date Range: 칸을 눌러 달력을 열고 들어간 날 → 나온 날을 차례로 누릅니다. 안 되면 글자로 넣습니다."""
+        want = f"{start:%m/%d/%Y} - {end:%m/%d/%Y}"
+        try:
+            box.click()
+            time.sleep(0.4)
+            self._calendar_pick(start)
+            self._calendar_pick(end)
+            time.sleep(0.4)
+        except Exception as e:
+            self.log(f"   달력으로 넣지 못해 글자로 넣습니다: {str(e).splitlines()[0][:80]}")
+            try:
+                self.page.keyboard.press("Escape")
+            except Exception:
+                pass
+        if " ".join(box.input_value().split()) != want:
+            self.type_text(box, want)
+        if " ".join(box.input_value().split()) != want:
+            raise RuntimeError(f"Date Range에 {want}가 들어가지 않았습니다.")
+
+    def fill_stay_range(self, rec, done: list, checks: list, wait_s: float):
+        """Date Range 칸이 있는 경비(Accommodation)면 1박 기간을 넣습니다. 이미 값이 있으면 그대로 둡니다."""
+        try:
+            box = self.field("숙박 기간", timeout_s=wait_s)
+        except Exception:
+            return
+        current = " ".join(box.input_value().split())
+        try:
+            txn = concur_date_to_iso(self.field("경비 날짜", timeout_s=1).input_value())
+        except Exception:
+            txn = None
+        cutoff = int(self.cfg.get("숙박_새벽_기준_시각", 6) or 6)
+        start, end, note = stay_dates(rec, txn, cutoff)
+        if start is None:
+            checks.append(note)
+            return
+        want = f"{start:%m/%d/%Y} - {end:%m/%d/%Y}"
+        if current == want:
+            return
+        if current:
+            self.log(f"   Date Range에 이미 {current}가 있어 그대로 둡니다(계산한 기간: {want}).")
+            return
+        try:
+            self.pick_date_range(box, start, end)
+        except Exception as e:
+            self.log(f"   Date Range를 넣지 못했습니다: {str(e).splitlines()[0][:80]}")
+            checks.append(f"Date Range 직접 넣기({want})")
+            return
+        done.append(f"Date Range={want}")
+        if note:
+            checks.append(note)
+
+    # ---------- 저장 뒤 '필수 정보가 빠졌다'는 창 ----------
+    def missing_info_dialog(self, wait_s: float = 3.0, moved=None):
+        """저장 뒤 'This expense has been saved, but it is missing required information … make corrections now?' 창.
+        wait_s초 안에 뜨면 그 창, 다음 경비로 넘어갔거나 안 뜨면 None."""
+        page = self.page
+        text = self._re("필수 정보 빠짐", exact=False)
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            box = self._first_shown([page.get_by_role("dialog").filter(has_text=text),
+                                     page.locator("[role=alertdialog], .modal, [class*=dialog]").filter(has_text=text)])
+            if box is not None:
+                return box
+            try:
+                if moved is not None and moved():
+                    return None
+            except Exception:
+                pass
+            time.sleep(0.3)
+        return None
+
+    def answer_dialog(self, box, key: str):
+        page = self.page
+        btn = self._first_shown([box.get_by_role("button", name=self._re(key)),
+                                 page.get_by_role("button", name=self._re(key))])
+        if btn is None:
+            raise RuntimeError(f"창에서 [{self._alts(key)[0]}] 버튼을 찾지 못했습니다.")
+        btn.click()
+        time.sleep(1.0)
+
+    def go_next(self, i: int, total: int, checks: list):
+        """[다음 경비](마지막은 [경비 저장])를 누릅니다. 필수 정보가 빠졌다는 창이 뜨면 [Yes]를 누르고
+        (Itemizations는 아직 자동으로 넣지 않으므로 '확인 필요'에 남김) 다시 눌러 [No]로 넘어갑니다."""
+        page = self.page
+        key = "경비 저장" if i == total else "다음 경비"
+
+        def press():
+            page.get_by_role("button", name=self._re(key, exact=(key == "경비 저장"))).first.click()
+
+        def moved():
+            return i < total and self.progress()[0] != i
+
+        press()
+        box = self.missing_info_dialog(4.0, moved)
+        if box is None:
+            return
+        self.log("   '필수 정보가 빠졌다'는 창이 떠서 [Yes]를 눌렀습니다.")
+        self.answer_dialog(box, "예")
+        checks.append("Itemizations 직접 넣기")
+        self.log("   Itemizations(항목별 내역)는 아직 자동으로 넣지 않습니다. 이 경비는 Concur에서 Itemizations를 넣어 주세요.")
+        try:
+            page.keyboard.press("Escape")                       # Alerts 창 닫기
+        except Exception:
+            pass
+        press()
+        box = self.missing_info_dialog(4.0, moved)
+        if box is not None:
+            self.answer_dialog(box, "아니요")                     # 이번에는 그대로 넘어감
+
     # ---------- 경비 하나 입력 ----------
     def fill_expense(self, rec, upload, checks: list) -> list:
-        """Concur 경비 화면에 위에서 아래 순서로 넣습니다: Expense Type → Business Purpose → City → LCRT →
+        """Concur 경비 화면에 위에서 아래 순서로 넣습니다: Expense Type → (Date Range) → Business Purpose → City → LCRT →
         Receipt Status → Personal Expense → Comment → 영수증 첨부. 값은 자동 입력 편집의 항목에서 가져옵니다.
         (Transaction Date·Amount·Currency는 카드 정보로 들어와 있어 건드리지 않음)"""
         page, t, done = self.page, self.t, []
@@ -3519,12 +3782,17 @@ class ConcurBot:
 
         # 1. Expense Type (Concur에 Undefined일 때만, 고르면 화면 칸이 바뀔 수 있어 맨 먼저)
         trigger, value = self.find_select(self.sel("Expense Type"))
+        changed_type = False
         if trigger is not None and value == t["Undefined"]:
             new_type = (self.cfg.get("Undefined일_때_선택할_유형") or {}).get(category) if category else ""
             if not new_type:
                 checks.append("Expense Type 직접 고르기(맞는 자동 입력 항목 없음)")
             elif safely(f"Expense Type({new_type})", lambda: self.choose_option(trigger, new_type)):
                 done.append(f"Expense Type={new_type}")
+                changed_type = True
+
+        # 1-2. Date Range (Accommodation처럼 이 칸이 있는 경비만: 1박, 새벽 영수증은 전날부터)
+        self.fill_stay_range(rec, done, checks, 3.0 if changed_type else 0.8)
 
         # 2. Business Purpose
         type_field("Business Purpose")
@@ -3697,13 +3965,13 @@ class ConcurBot:
             row["확인 필요"] = ", ".join(checks)
             results.append(row)
             try:
+                self.go_next(i, total, checks)
+                row["확인 필요"] = ", ".join(checks)
                 if i == total:
-                    page.get_by_role("button", name=self._re("경비 저장")).first.click()
                     time.sleep(3)
                     self.log("마지막 경비 저장 완료")
-                else:
-                    page.get_by_role("button", name=self._re("다음 경비", exact=False)).first.click()
             except Exception as e:
+                row["확인 필요"] = ", ".join(checks)
                 self.log(f"   다음 경비로 넘어가지 못해 중단합니다: {e}")
                 self.screenshot("next_failed")
                 break
