@@ -56,7 +56,8 @@ def test_detect_category_uses_priority():
     kw, pr = cfg["키워드"], cfg["분류_우선순위"]
     assert ca.detect_category(ca.compact("주 차 요 금"), kw, pr) == "주차"
     assert ca.detect_category("아메리카노테이크아웃", kw, pr) == "카페"
-    assert ca.detect_category("버터주차", kw, pr) == "식대"
+    assert ca.detect_category("김밥주차", kw, pr) == "식대"
+    assert "버터" not in kw["식대"]                                              # 사용자가 빼 달라고 함
     assert ca.detect_category("영수증", kw, pr) == ""
 
 

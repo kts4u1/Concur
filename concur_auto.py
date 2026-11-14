@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 문서 폴더에 저장"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 간결하게"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -169,13 +169,30 @@ CAFE_MORE_WORDS = ["커피", "라떼", "카푸치노", "에스프레소", "프�
 PARKING_WORDS = ["주차", "입차", "출차", "주자"]              # '주자'는 OCR이 '주차'를 잘못 읽은 것
 PARKING_MORE_WORDS = ["입출차", "파킹", "발렛", "parking", "valet"]
 # 예전 자동입력표에 판마다 한 번씩만 더할 글자(사용자가 나중에 지운 글자는 다시 넣지 않음)
-DEFAULT_WORDS_VERSION = 3
+DEFAULT_WORDS_VERSION = 4
 DEFAULT_WORDS_BY_VERSION = {
     1: {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS},
     2: {"카페": CAFE_WORDS + CAFE_MORE_WORDS, "주차": PARKING_WORDS + PARKING_MORE_WORDS},
     3: {},                                                 # 판 3: 문구 철자 고치기(SPELLING_FIXES)
+    4: {},                                                 # 판 4: {hospital} → hospital, 식대의 '버터' 빼기
 }
 SPELLING_FIXES = [(re.compile(r"\bAccomodation", re.I), "Accommodation")]
+REMOVED_WORDS = {"식대": ["버터"]}                         # 사용자가 빼 달라고 한 기본 글자(판 4)
+# Comment의 hospital 자리(병원 영문명이 들어감). 예전에는 {hospital}·{병원}으로 적었습니다.
+OLD_HOSPITAL_MARK = re.compile(r"\{(?:hospital|병원)\}", re.I)
+
+
+def fill_hospital(text: str, hospital: str, bare: bool = True) -> str:
+    """글의 hospital 자리에 병원 영문명을 넣습니다. 병원을 모르면 ' in hospital'을 뺍니다.
+    bare=True면 소문자 낱말 hospital도 자리로 봅니다(Comment). 병원 이름 속 'Hospital'(대문자)은 건드리지 않습니다."""
+    mark = r"(?:\{(?:(?i:hospital)|병원)\}" + (r"|\bhospital\b" if bare else "") + ")"
+    if hospital:
+        text = re.sub(mark, lambda m: hospital, text)
+    else:
+        text = re.sub(r"\s+(?:in|at|@)\s+" + mark + "|" + mark, "", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
 DEFAULT_CITIES = {
     # Concur 화면에서 확인한 이름
     "광주": "Gwangju (ex Kwangju), KOREA, REPUBLIC OF",
@@ -278,7 +295,7 @@ def default_settings():
         "키워드": {
             "주차": PARKING_WORDS + PARKING_MORE_WORDS,
             "카페": CAFE_WORDS + CAFE_MORE_WORDS,
-            "식대": MEAL_USER_WORDS + MEAL_MORE_WORDS + ["버터"],
+            "식대": MEAL_USER_WORDS + MEAL_MORE_WORDS,
             "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS,
         },
         "분류_우선순위": ["식대", "숙박", "카페", "주차"],
@@ -292,12 +309,12 @@ def default_settings():
         "가게_이름_칸": ["#vendorDescription", "[name=vendorDescription]", "#vendor", "[name=vendor]",
                       "#vendorName", "[name=vendorName]", "#merchantName", "[name=merchantName]"],
         "가게_이름_라벨": "공급업체|가맹점|판매처|상호|Vendor|Merchant",
-        "_입력_문구_설명": "자동입력표.csv를 처음 만들 때만 씁니다. {hospital} 자리에 병원 영문명. 병원을 못 찾으면 ' in {hospital}' 부분은 빠집니다.",
+        "_입력_문구_설명": "자동입력표.csv를 처음 만들 때만 씁니다. Comment의 hospital 자리에 병원 영문명. 병원을 못 찾으면 ' in hospital' 부분은 빠집니다.",
         "입력_문구": {
-            "주차": {"Comment": "Parking fee for service in {hospital}", "Business Purpose": "For service"},
-            "카페": {"Comment": "Cafe for wifi in {hospital}", "Business Purpose": "For wifi"},
-            "식대": {"Comment": "Overtime meal fee for service in {hospital}", "Business Purpose": "For Overtime meal"},
-            "숙박": {"Comment": "Accommodation fee for service in {hospital}", "Business Purpose": "For service in hospital"},
+            "주차": {"Comment": "Parking fee for service in hospital", "Business Purpose": "For service"},
+            "카페": {"Comment": "Cafe for wifi in hospital", "Business Purpose": "For wifi"},
+            "식대": {"Comment": "Overtime meal fee for service in hospital", "Business Purpose": "For Overtime meal"},
+            "숙박": {"Comment": "Accommodation fee for service in hospital", "Business Purpose": "For service in hospital"},
         },
         "_Undefined_설명": ("자동입력표.csv를 처음 만들 때만 씁니다. Expense Type이 Undefined인 경비에 고를 유형. "
                           "어느 항목에도 맞지 않는 경비는 Undefined 그대로 두고 결과 파일 '확인 필요'에 남깁니다."),
@@ -683,6 +700,8 @@ def load_settings(path: Path) -> tuple:
     for k, v in user.items():
         if isinstance(v, str):
             merged[k] = upgraded(v, defaults.get(k))
+        if k.startswith("_") and isinstance(defaults.get(k), str):     # 설명 글은 늘 새 판의 글
+            merged[k] = defaults[k]
     if user.get("병원_엑셀_탭") in ("MR System Information",):      # 예전 기본값 → 여러 탭
         merged["병원_엑셀_탭"] = defaults["병원_엑셀_탭"]
     if user.get("리포트_이름_형식") in OLD_REPORT_NAME_FORMATS:       # 예전 기본값 → Monthly Expense for Nov
@@ -1057,6 +1076,9 @@ def _is_no_category(name: str) -> bool:
     return compact(name) in ("(분류없음)", "분류없음")
 
 
+CATEGORY_NOTE = "위에 있는 분류가 먼저 맞춰집니다. Comment의 hospital 자리에 병원 영문명이 들어가고, 병원을 못 찾으면 ' in hospital'은 빠집니다."
+
+
 def category_rows_from_cfg(cfg: dict) -> list:
     """설정 파일의 키워드·입력 문구로 처음 자동입력표를 만듭니다. 위에 있는 분류가 먼저 맞춰집니다."""
     priority = list(cfg.get("분류_우선순위") or [])
@@ -1068,7 +1090,7 @@ def category_rows_from_cfg(cfg: dict) -> list:
         rows.append(_category_row([cat, ", ".join((cfg.get("키워드") or {}).get(cat, [])), t.get("Comment", ""),
                                    t.get("Business Purpose", ""), types.get(cat, ""), ""]))
     if rows:
-        rows[0][C_NOTE] = "위에 있는 분류가 먼저 맞춰집니다. {hospital}(또는 {병원}) 자리에 병원 영문명이 들어가고, 병원을 못 찾으면 ' in {hospital}'은 빠집니다."
+        rows[0][C_NOTE] = CATEGORY_NOTE
     return rows
 
 
@@ -1097,7 +1119,7 @@ def upgrade_category_table(table_path: Path, settings_path: Path, log=None) -> i
         if new:
             row[C_KEYWORDS] = ", ".join(have + new)
             added += len(new)
-    fixed = 0
+    fixed = removed = 0
     if done_version < 3:                                   # 사용자가 적은 Comment·Business Purpose의 철자
         for row in rows:
             for col in (C_COMMENT, C_PURPOSE):
@@ -1106,17 +1128,38 @@ def upgrade_category_table(table_path: Path, settings_path: Path, log=None) -> i
                     new_text = pattern.sub(word, new_text)
                 if new_text != row[col]:
                     row[col], fixed = new_text, fixed + 1
+    if done_version < 4:                                   # {hospital} → hospital, 빼 달라고 한 글자 빼기
+        for row in rows:
+            new_text = OLD_HOSPITAL_MARK.sub("hospital", row[C_COMMENT])
+            if new_text != row[C_COMMENT]:
+                row[C_COMMENT], fixed = new_text, fixed + 1
+            if OLD_HOSPITAL_MARK.search(row[C_NOTE]):
+                row[C_NOTE] = CATEGORY_NOTE
+            gone = {compact(w).lower() for w in REMOVED_WORDS.get(row[C_NAME], [])}
+            have = [k.strip() for k in re.split(r"[,，/]", row[C_KEYWORDS]) if k.strip()]
+            keep = [k for k in have if compact(k).lower() not in gone]
+            if len(keep) != len(have):
+                row[C_KEYWORDS], removed = ", ".join(keep), removed + len(have) - len(keep)
+        for name, words in REMOVED_WORDS.items():          # 설정 파일의 처음 만들 때 쓰는 글자에서도 뺌
+            saved = (cfg.get("키워드") or {}).get(name)
+            if isinstance(saved, list):
+                cfg["키워드"][name] = [w for w in saved if w not in words]
+        for t in (cfg.get("입력_문구") or {}).values():
+            if isinstance(t, dict) and t.get("Comment"):
+                t["Comment"] = OLD_HOSPITAL_MARK.sub("hospital", t["Comment"])
     if done_version < 1 and not any(r[C_NAME] == "숙박" for r in rows):
         defaults = {r[C_NAME]: r for r in category_rows_from_cfg(default_settings())}
         at = next((i + 1 for i, r in enumerate(rows) if r[C_NAME] == "식대"), len(rows))
         rows.insert(at, _category_row(defaults["숙박"][:C_NOTE] + [""]))
         added += len(ACCOM_USER_WORDS + ACCOM_MORE_WORDS)
-    if added or fixed:
+    if added or fixed or removed:
         save_category_rows(table_path, rows)
     if log and added:
         log(f"자동 입력표에 기본 찾을 글자 {added}개를 더했습니다({'·'.join(to_add)}). [자동 입력 편집]에서 고칠 수 있습니다.")
     if log and fixed:
-        log(f"자동 입력표 문구의 철자를 고쳤습니다(Accomodation → Accommodation, {fixed}곳).")
+        log(f"자동 입력표 Comment 글을 새 모양으로 고쳤습니다({fixed}곳: 병원 자리 표시를 hospital로, Accommodation 철자).")
+    if log and removed:
+        log(f"자동 입력표 찾을 글자에서 {removed}개를 뺐습니다({', '.join(w for ws in REMOVED_WORDS.values() for w in ws)}).")
     cfg["_기본_찾을_글자_판"] = DEFAULT_WORDS_VERSION
     save_settings(settings_path, cfg)
     return added
@@ -2123,7 +2166,7 @@ def receipt_issues(rec: Receipt, receipts: list) -> list:
         issues.append("금액 못 읽음")
     if not rec.category:
         issues.append("분류 없음")
-    # 병원 이름이 없는 영수증이 많아 '병원 없음'은 확인할 것으로 치지 않음(Comment에서 ' in {hospital}'만 빠짐)
+    # 병원 이름이 없는 영수증이 많아 '병원 없음'은 확인할 것으로 치지 않음(Comment에서 ' in hospital'만 빠짐)
     if duplicate_count(rec, receipts) > 1:
         issues.append("같은 날짜·금액 영수증 있음")
     return issues
@@ -2520,14 +2563,12 @@ def city_to_choose(rec, current: str, default: str, fixed: str = ""):
 
 
 def texts_for(rec: Receipt, cfg: dict) -> dict:
-    """Comment·Business Purpose 글. 영수증 확인 창에서 적은 글(서비스 오더 번호 등)은 Comment 맨 뒤에 붙입니다."""
+    """Comment·Business Purpose 글. Comment의 hospital 자리에는 병원 영문명이 들어갑니다(못 찾으면 ' in hospital'을 뺌).
+    영수증 확인 창에서 적은 글(서비스 오더 번호 등)은 Comment 맨 뒤에 붙입니다."""
     tmpl = cfg["입력_문구"].get(rec.category) if rec and rec.category else None
     out = {}
     for name, t in (tmpl or {}).items():
-        t = t.replace("{병원}", "{hospital}")
-        if not rec.hospital_en:
-            t = re.sub(r"\s+(?:in|at|@)\s+\{hospital\}|\{hospital\}", "", t)
-        out[name] = t.replace("{hospital}", rec.hospital_en).strip()
+        out[name] = fill_hospital(t, rec.hospital_en, bare=(name == "Comment"))
     extra = (getattr(rec, "extra_comment", "") or "").strip() if rec else ""
     if extra:
         out["Comment"] = f"{out.get('Comment', '')} {extra}".strip()
@@ -4979,7 +5020,7 @@ class ReceiptReview:
         self.amount_box = combo("amount", "금액", [], hint_text="▼에 사진에서 읽은 금액이 있습니다.")
         self.cat_box = combo("cat", "분류", [self.NO_CATEGORY_TEXT] + self.categories, readonly=True,
                              hint_text="자동 입력 편집에서 만든 항목. 이 항목의 Comment·Expense Type이 들어갑니다.")
-        self.hosp_box = combo("hosp", "병원 (영문)", self.hospitals, hint_text="비우면 Comment에서 ' in 병원'이 빠집니다.")
+        self.hosp_box = combo("hosp", "병원 (영문)", self.hospitals, hint_text="비우면 Comment에서 ' in hospital'이 빠집니다.")
         self.city_box = combo("city", "도시", self.cities, hint_text="'(기본 도시)'면 기본 도시를 고릅니다.")
         label("Comment")
         self.vars["memo"] = tk.StringVar()
@@ -5002,7 +5043,6 @@ class ReceiptReview:
         bottom = ttk.Frame(outer)
         bottom.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(px(12), 0))
         ttk.Button(bottom, text="닫기", command=self.close).pack(side="right", padx=(px(6), 0))
-        ttk.Button(bottom, text="엑셀로 열기", command=self.open_excel).pack(side="right", padx=(px(6), 0))
         ttk.Button(bottom, text="저장", style="Accent.TButton", command=self.save).pack(side="right")
 
         self.refresh_list()
@@ -5138,11 +5178,6 @@ class ReceiptReview:
         self.app.append(f"영수증 확인: 저장했습니다(고친 영수증 {edited}장). 다음 실행부터 고친 내용을 씁니다.")
         return True
 
-    def open_excel(self):
-        if self.dirty and not self.save():
-            return
-        open_path(self.path)
-
     def close(self, force=False):
         if self.dirty and not force:
             ans = self.app.mb.askyesnocancel("영수증 확인", "고친 내용을 저장할까요?", parent=self.win)
@@ -5183,7 +5218,7 @@ class HospitalEditor:
         outer.columnconfigure(1, weight=1)
         outer.rowconfigure(1, weight=1)
         auto_wrap(ttk.Label(outer, foreground=c["muted"], font=font(9), justify="left", wraplength=px(900), text=(
-            "영수증에 '찾을 글자'가 보이면 그 병원으로 보고, Comment의 {hospital} 자리에 영문 이름을 넣습니다. "
+            "영수증에 '찾을 글자'가 보이면 그 병원으로 보고, Comment의 hospital 자리에 영문 이름을 넣습니다. "
             "주황 점은 자동으로 만든 영문 이름이라 공식 이름과 같은지 확인이 필요한 병원입니다. "
             "영수증에서 새 병원이 보이면 자동으로 여기에 더해집니다."))).grid(
             row=0, column=0, columnspan=2, sticky="ew", pady=(0, px(10)))
@@ -5214,7 +5249,7 @@ class HospitalEditor:
         r = 0
         for key, label, hint in (
                 ("key", "영수증에서 찾을 글자", "영수증에 이 글자가 있으면 이 병원으로 봅니다 (예: 원광대). 너무 짧으면 다른 병원에도 맞을 수 있습니다."),
-                ("en", "Concur에 쓸 영문 이름", "Comment의 {hospital} 자리에 들어갑니다 (예: Wonkwang University Hospital).")):
+                ("en", "Concur에 쓸 영문 이름", "Comment의 hospital 자리에 들어갑니다 (예: Wonkwang University Hospital).")):
             ttk.Label(right, text=label, style="Field.TLabel").grid(row=r, column=0, sticky="w", pady=(px(7), 0), padx=(0, px(14)))
             var = self.vars[key] = tk.StringVar()
             w = ttk.Entry(right, textvariable=var)
@@ -5241,7 +5276,6 @@ class HospitalEditor:
         bottom = ttk.Frame(outer)
         bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(px(12), 0))
         ttk.Button(bottom, text="닫기", command=self.close).pack(side="right", padx=(px(6), 0))
-        ttk.Button(bottom, text="엑셀로 열기", command=self.open_excel).pack(side="right", padx=(px(6), 0))
         ttk.Button(bottom, text="저장", style="Accent.TButton", command=self.save).pack(side="right")
 
         self.refresh_list()
@@ -5365,11 +5399,6 @@ class HospitalEditor:
         self.win.title("병원 목록 편집")
         self.app.append(f"병원 목록을 저장했습니다: {len(rows)}곳 (다음 실행부터 씁니다)")
         return True
-
-    def open_excel(self):
-        if self.dirty and not self.save():
-            return
-        open_path(self.path)
 
     def close(self):
         if self.dirty:
@@ -5508,7 +5537,6 @@ class CategoryEditor:
         bottom = ttk.Frame(outer)
         bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(px(12), 0))
         ttk.Button(bottom, text="닫기", command=self.close).pack(side="right", padx=(px(6), 0))
-        ttk.Button(bottom, text="엑셀로 열기", command=self.open_excel).pack(side="right", padx=(px(6), 0))
         ttk.Button(bottom, text="저장", style="Accent.TButton", command=self.save).pack(side="right")
 
         self.refresh_list()
@@ -5658,11 +5686,6 @@ class CategoryEditor:
         self.status.configure(text=f"저장했습니다. 설정된 항목 {on}개.")
         self.app.auto_backup("자동 입력 저장 때")
         return True
-
-    def open_excel(self):
-        if self.dirty and not self.save():
-            return
-        open_path(self.path)
 
     def close(self):
         if self.dirty:

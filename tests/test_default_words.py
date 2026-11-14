@@ -39,7 +39,7 @@ def test_new_table_has_user_items(tmp_path):
     assert [r[ca.C_NAME] for r in rows] == ["식대", "숙박", "카페", "주차"]
     assert by["식대"][ca.C_KEYWORDS].startswith("찌개, 한식, 식당, ")
     assert by["숙박"][ca.C_KEYWORDS].startswith("모텔, 호텔, ") and by["숙박"][ca.C_TYPE] == "Accommodation"
-    assert by["숙박"][ca.C_COMMENT] == "Accommodation fee for service in {hospital}"
+    assert by["숙박"][ca.C_COMMENT] == "Accommodation fee for service in hospital"
     assert by["숙박"][ca.C_PURPOSE] == "For service in hospital"
 
 
@@ -54,8 +54,10 @@ def test_old_table_gets_words_once(tmp_path):
         ["톨게이트", "통행료", "Toll fee", "For service", "Parking & Toll", ""]])
     lines = []
     assert ca.upgrade_category_table(table, settings, lines.append) > 0 and "기본 찾을 글자" in lines[0]
-    assert any("Accomodation → Accommodation" in l for l in lines)
+    assert any("Accommodation 철자" in l for l in lines)
     by = {r[ca.C_NAME]: r for r in ca.load_category_rows(table, ca.default_settings())}
+    assert by["식대"][ca.C_COMMENT] == "Overtime meal fee for service in hospital"     # {hospital} → hospital
+    assert by["주차"][ca.C_COMMENT] == "Parking fee for service in hospital"
     meal = [k.strip() for k in by["식대"][ca.C_KEYWORDS].split(",")]
     assert meal[:3] == ["찌개", "한식", "식당"] and "김밥" in meal and "버터" not in meal   # 사용자가 지운 글자는 안 넣음
     assert "hotel" in by["숙박"][ca.C_KEYWORDS] and "객실" in by["숙박"][ca.C_KEYWORDS]
@@ -95,7 +97,8 @@ def test_old_table_without_accommodation(tmp_path):
     ca.upgrade_category_table(table, settings)
     rows = ca.load_category_rows(table, ca.default_settings())
     assert [r[ca.C_NAME] for r in rows] == ["식대", "숙박", "주차"]                        # 식대 아래에 숙박
-    assert rows[1][ca.C_TYPE] == "Accommodation" and rows[0][ca.C_KEYWORDS].startswith("버터, 찌개")
+    assert rows[1][ca.C_TYPE] == "Accommodation" and rows[0][ca.C_KEYWORDS].startswith("찌개, 한식")   # 버터는 빠짐
+    assert "버터" not in rows[0][ca.C_KEYWORDS]
 
 
 def test_spelling_fixed_once_for_version_2_users(tmp_path):
@@ -109,4 +112,48 @@ def test_spelling_fixed_once_for_version_2_users(tmp_path):
     assert ca.upgrade_category_table(table, settings, lines.append) == 0                 # 더한 글자는 없음
     row = ca.load_category_rows(table, ca.default_settings())[0]
     assert row[ca.C_COMMENT] == "Accommodation fee for service in hospital"
-    assert row[ca.C_KEYWORDS] == "모텔, 호텔" and lines == ["자동 입력표 문구의 철자를 고쳤습니다(Accomodation → Accommodation, 1곳)."]
+    assert row[ca.C_KEYWORDS] == "모텔, 호텔" and len(lines) == 1 and "1곳" in lines[0]
+
+
+def test_version_3_users_hospital_mark_and_butter(tmp_path):
+    """판 3까지 받은 사용자: {hospital} → hospital, 식대의 '버터'만 빼고 나머지는 그대로"""
+    settings, table = tmp_path / ca.SETTINGS_FILE_NAME, tmp_path / ca.CATEGORY_FILE_NAME
+    cfg = ca.default_settings()
+    cfg["_기본_찾을_글자_판"] = 3
+    cfg["키워드"]["식대"] = ["찌개", "버터"]
+    cfg["입력_문구"]["주차"]["Comment"] = "Parking fee for service in {hospital}"
+    ca.save_settings(settings, cfg)
+    rows = [["식대", "찌개, 한식, 버터, 식권", "Overtime meal fee for service in {hospital}", "For Overtime meal",
+             "Other Staff Expenses", "위에 있는 분류가 먼저 맞춰집니다. {hospital}(또는 {병원}) 자리에 …"],
+            ["톨게이트", "통행료, 버터", "Toll fee at {병원}", "For service", "Parking & Toll", ""],
+            ["숙박", "모텔", "Accommodation fee for service in hospital", "For service in hospital", "Accommodation", ""]]
+    ca.save_category_rows(table, rows)
+    lines = []
+    assert ca.upgrade_category_table(table, settings, lines.append) == 0
+    by = {r[ca.C_NAME]: r for r in ca.load_category_rows(table, ca.default_settings())}
+    assert by["식대"][ca.C_KEYWORDS] == "찌개, 한식, 식권"
+    assert by["식대"][ca.C_COMMENT] == "Overtime meal fee for service in hospital"
+    assert by["식대"][ca.C_NOTE] == ca.CATEGORY_NOTE and "{" not in by["식대"][ca.C_NOTE]
+    assert by["톨게이트"][ca.C_KEYWORDS] == "통행료, 버터"                          # 다른 항목에 적은 것은 그대로
+    assert by["톨게이트"][ca.C_COMMENT] == "Toll fee at hospital"
+    assert by["숙박"][ca.C_PURPOSE] == "For service in hospital"
+    saved = ca.load_settings(settings)[0]
+    assert saved["키워드"]["식대"] == ["찌개"] and saved["입력_문구"]["주차"]["Comment"] == "Parking fee for service in hospital"
+    assert saved["_기본_찾을_글자_판"] == ca.DEFAULT_WORDS_VERSION
+    assert any("버터" in l for l in lines)
+
+
+def test_hospital_word_in_comment():
+    cfg = ca.default_settings()
+    rec = ca.Receipt(original=Path("a.jpg"), ocr_file=Path("a.jpg"), category="숙박", hospital_en="Mokpo Hankook Hospital")
+    t = ca.texts_for(rec, cfg)
+    assert t["Comment"] == "Accommodation fee for service in Mokpo Hankook Hospital"
+    assert t["Business Purpose"] == "For service in hospital"                       # Business Purpose의 hospital은 그대로
+    rec.hospital_en = ""
+    t = ca.texts_for(rec, cfg)
+    assert t["Comment"] == "Accommodation fee for service" and t["Business Purpose"] == "For service in hospital"
+    cfg["입력_문구"]["숙박"]["Comment"] = "Hotel near hospital, hospitality"          # 예전 모양·낱말 일부는 안 바꿈
+    rec.hospital_en = "X Hospital"
+    assert ca.texts_for(rec, cfg)["Comment"] == "Hotel near X Hospital, hospitality"
+    cfg["입력_문구"]["숙박"]["Comment"] = "Fee at {병원}"
+    assert ca.texts_for(rec, cfg)["Comment"] == "Fee at X Hospital"

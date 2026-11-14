@@ -32,7 +32,8 @@ def test_first_table_has_current_settings(tmp_path):
     assert [r["분류"] for r in rows] == ["식대", "숙박", "카페", "주차"]       # '(분류 없음)' 줄은 이제 없음
     parking = rows[3]
     assert parking["영수증에서 찾을 글자(쉼표로 구분)"] == ", ".join(ca.PARKING_WORDS + ca.PARKING_MORE_WORDS)
-    assert parking["Comment"] == "Parking fee for service in {hospital}"
+    assert parking["Comment"] == "Parking fee for service in hospital"
+    assert "{" not in rows[0]["설명"]
     assert parking["Expense Type이 Undefined일 때"] == "Parking & Toll"
     assert cfg["키워드"]["주차"] == ca.PARKING_WORDS + ca.PARKING_MORE_WORDS
     assert lines == ["자동 입력표: 분류 4개 (식대, 숙박, 카페, 주차)"]
