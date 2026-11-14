@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-14 병원 편집 창"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 식대·숙박 찾을 글자"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -149,6 +149,20 @@ KNOWN_EXPENSE_TYPES = [
 ]
 
 OLD_DEFAULT_CITY = "Daejeon (ex Taejon), KOREA, REPUBLIC OF"
+
+# 영수증에서 찾을 글자(기본). 식대·숙박은 사용자가 자동 입력 편집에서 만든 글자(앞쪽)에 더 넣은 것입니다.
+# 한 글자짜리나 지명과 겹치는 글자(예: 부산 해운대구 '우동')는 다른 영수증에도 맞을 수 있어 넣지 않았습니다.
+MEAL_USER_WORDS = ["찌개", "한식", "식당"]
+MEAL_MORE_WORDS = ["중식", "일식", "양식", "분식", "백반", "국밥", "김밥", "칼국수", "국수", "냉면", "짜장", "짬뽕", "반점",
+                   "돈까스", "돈가스", "삼겹살", "갈비", "불고기", "제육", "비빔밥", "덮밥", "볶음밥", "공기밥", "해장국",
+                   "설렁탕", "곰탕", "감자탕", "순대", "족발", "보쌈", "치킨", "피자", "버거", "도시락", "초밥", "라면",
+                   "떡볶이", "스테이크", "한우", "횟집", "식사", "음식", "식권"]
+ACCOM_USER_WORDS = ["모텔", "호텔"]
+ACCOM_MORE_WORDS = ["숙박", "여관", "여인숙", "리조트", "펜션", "게스트하우스", "레지던스", "콘도", "객실", "입실", "퇴실",
+                    "체크인", "체크아웃", "야놀자", "여기어때", "에어비앤비", "hotel", "motel", "resort"]
+# 예전 자동입력표에 한 번만 더할 글자(사용자가 나중에 지운 글자는 다시 넣지 않음)
+DEFAULT_WORDS_VERSION = 1
+DEFAULT_WORDS_TO_ADD = {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS}
 DEFAULT_CITIES = {
     # Concur 화면에서 확인한 이름
     "광주": "Gwangju (ex Kwangju), KOREA, REPUBLIC OF",
@@ -251,9 +265,10 @@ def default_settings():
         "키워드": {
             "주차": ["주차", "입차", "출차", "주자"],
             "카페": ["메리카", "리카노", "테이크", "카페"],
-            "식대": ["버터"],
+            "식대": MEAL_USER_WORDS + MEAL_MORE_WORDS + ["버터"],
+            "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS,
         },
-        "분류_우선순위": ["식대", "카페", "주차"],
+        "분류_우선순위": ["식대", "숙박", "카페", "주차"],
         "_영수증_판별_설명": "폴더에 일반 사진이 섞여 있어도 됩니다. 금액이 보이고 아래 글자·OCR 날짜·분류 키워드 중 하나가 있으면 영수증으로 봅니다. 아니면 영수증 목록 맨 아래에 '사용 X'로 넣습니다.",
         "영수증_판별_단어": ["합계", "결제", "승인", "카드", "영수증", "금액", "부가세", "사업자", "매출", "가맹점", "거래", "주차"],
         "_병원_엑셀_설명": "병원 정보 엑셀(MR System Information 탭)을 고르면 실행할 때마다 새 병원을 병원목록.csv에 더합니다. 영문 이름은 한글을 자동으로 바꾼 것이라 확인이 필요합니다. 열을 비워 두면 병원 이름처럼 보이는 열을 자동으로 고르고, 열 제목(예: 병원명)이나 열 문자(예: C)를 적어도 됩니다.",
@@ -269,6 +284,7 @@ def default_settings():
             "주차": {"Comment": "Parking fee for service in {hospital}", "Business Purpose": "For service"},
             "카페": {"Comment": "Cafe for wifi in {hospital}", "Business Purpose": "For wifi"},
             "식대": {"Comment": "Overtime meal fee for service in {hospital}", "Business Purpose": "For Overtime meal"},
+            "숙박": {"Comment": "Accommodation fee for service in {hospital}", "Business Purpose": "For service in hospital"},
         },
         "_Undefined_설명": ("자동입력표.csv를 처음 만들 때만 씁니다. Expense Type이 Undefined인 경비에 고를 유형. "
                           "어느 항목에도 맞지 않는 경비는 Undefined 그대로 두고 결과 파일 '확인 필요'에 남깁니다."),
@@ -276,6 +292,7 @@ def default_settings():
             "주차": "Parking & Toll",
             "카페": "Other Staff Expenses",
             "식대": "Other Staff Expenses",
+            "숙박": "Accommodation",
         },
         "_화면_문구_설명": "Concur 화면에 보이는 글자. '|'로 나눠 여러 개를 적으면 그중 하나가 보이면 됩니다(예: 다음|Next). 화면이 영어로 바뀌어도 되도록 영어도 같이 적어 두었습니다.",
         "화면_문구": {
@@ -935,6 +952,40 @@ def category_rows_from_cfg(cfg: dict) -> list:
     if rows:
         rows[0][C_NOTE] = "위에 있는 분류가 먼저 맞춰집니다. {hospital}(또는 {병원}) 자리에 병원 영문명이 들어가고, 병원을 못 찾으면 ' in {hospital}'은 빠집니다."
     return rows
+
+
+def upgrade_category_table(table_path: Path, settings_path: Path, log=None) -> int:
+    """예전 자동입력표에 새 기본 찾을 글자(식대·숙박)를 한 번만 더하고, 숙박 항목이 없으면 식대 아래에 넣습니다.
+    사용자가 적은 글자와 문구는 그대로 두고 없는 글자만 뒤에 붙입니다. → 더한 글자 수"""
+    if not table_path.exists():
+        return 0                                          # 새로 만들 때는 기본값에 이미 들어 있음
+    cfg, _ = load_settings(settings_path)
+    if int(cfg.get("_기본_찾을_글자_판") or 0) >= DEFAULT_WORDS_VERSION:
+        return 0
+    rows = load_category_rows(table_path, cfg)
+    added = 0
+    for row in rows:
+        words = DEFAULT_WORDS_TO_ADD.get(row[C_NAME])
+        if not words:
+            continue
+        have = [k.strip() for k in re.split(r"[,，/]", row[C_KEYWORDS]) if k.strip()]
+        known = {compact(k).lower() for k in have}
+        new = [w for w in words if compact(w).lower() not in known]
+        if new:
+            row[C_KEYWORDS] = ", ".join(have + new)
+            added += len(new)
+    if not any(r[C_NAME] == "숙박" for r in rows):
+        defaults = {r[C_NAME]: r for r in category_rows_from_cfg(default_settings())}
+        at = next((i + 1 for i, r in enumerate(rows) if r[C_NAME] == "식대"), len(rows))
+        rows.insert(at, _category_row(defaults["숙박"][:C_NOTE] + [""]))
+        added += len(ACCOM_USER_WORDS + ACCOM_MORE_WORDS)
+    if added:
+        save_category_rows(table_path, rows)
+        if log:
+            log(f"자동 입력표에 기본 찾을 글자 {added}개를 더했습니다(식대·숙박). [자동 입력 편집]에서 고칠 수 있습니다.")
+    cfg["_기본_찾을_글자_판"] = DEFAULT_WORDS_VERSION
+    save_settings(settings_path, cfg)
+    return added
 
 
 def item_extras(row) -> dict:
@@ -1667,8 +1718,9 @@ def compact(text: str) -> str:
 
 
 def detect_category(text_compact: str, keywords: dict, priority=None) -> str:
+    text = (text_compact or "").lower()                   # 영어 글자는 대소문자 상관없이(HOTEL·Hotel·hotel)
     for cat in (priority or ["식대", "카페", "주차"]):
-        if any(k and k in text_compact for k in keywords.get(cat, [])):
+        if any(k and k.lower() in text for k in keywords.get(cat, [])):
             return cat
     return ""
 
@@ -3435,6 +3487,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         if is_unfinished_month(tm):
             log(unfinished_month_note(tm))
         try:
+            upgrade_category_table(base / CATEGORY_FILE_NAME, base / SETTINGS_FILE_NAME, log)
             apply_category_table(cfg, base / CATEGORY_FILE_NAME, log)
         except PermissionError:
             log("자동 입력표가 엑셀에 열려 있어 읽지 못했습니다. 엑셀을 닫고 다시 실행하세요.")
@@ -5072,6 +5125,7 @@ class CategoryEditor:
         tk, ttk = app.tk, app.ttk
         self.app, self.tk = app, tk
         self.path = app.base / CATEGORY_FILE_NAME
+        upgrade_category_table(self.path, app.base / SETTINGS_FILE_NAME, app.append)
         cfg, _ = load_settings(app.base / SETTINGS_FILE_NAME)
         self.rows = load_category_rows(self.path, cfg)
         self.type_choices = sorted(set(cfg.get("Concur_경비_유형") or KNOWN_EXPENSE_TYPES)

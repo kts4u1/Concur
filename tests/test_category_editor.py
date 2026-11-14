@@ -12,14 +12,14 @@ def test_load_and_save_rows(tmp_path):
     cfg = ca.default_settings()
     path = tmp_path / ca.CATEGORY_FILE_NAME
     rows = ca.load_category_rows(path, cfg)
-    assert [r[0] for r in rows] == ["식대", "카페", "주차"] and all(len(r) == ca.CATEGORY_ROW_LEN for r in rows)
+    assert [r[0] for r in rows] == ["식대", "숙박", "카페", "주차"] and all(len(r) == ca.CATEGORY_ROW_LEN for r in rows)
     rows.append(["Taxi", "택시, 콜택시", "Taxi fee for service in {hospital}", "For service", "Taxi", "",
                  "Mokpo, KOREA, REPUBLIC OF", "NA", "Receipt", "O"])
     rows.append(["", "버려짐", "", "", "", ""])                      # 이름이 빈 줄은 저장하지 않음
     ca.save_category_rows(path, rows)
     again = ca.load_category_rows(path, cfg)
-    assert [r[0] for r in again] == ["식대", "카페", "주차", "Taxi"]
-    assert ca.apply_category_table(cfg, path) == ["식대", "카페", "주차", "Taxi"]
+    assert [r[0] for r in again] == ["식대", "숙박", "카페", "주차", "Taxi"]
+    assert ca.apply_category_table(cfg, path) == ["식대", "숙박", "카페", "주차", "Taxi"]
     assert "분류없음" not in cfg["Undefined일_때_선택할_유형"]                 # '어느 항목에도 안 맞을 때'는 없앰
     assert cfg["항목_추가_입력"]["Taxi"] == {"도시": "Mokpo, KOREA, REPUBLIC OF", "LCRT": "NA",
                                          "Receipt Status": "Receipt", "Personal Expense": True}
@@ -56,7 +56,7 @@ def test_editor_window(tmp_path):
         app.open_category_table()                                    # 두 번 눌러도 창은 하나
         assert app.editor is ed
         names = [ed.rows[i][0] for i in ed.visible]
-        assert names == ["식대", "카페", "주차", "Taxi", "Hotel", "Fuel"]
+        assert names == ["식대", "숙박", "카페", "주차", "Taxi", "Hotel", "Fuel"]
         assert ed.vars["name"].get() == "식대"                         # 처음엔 설정된 첫 항목
         ed.select_visible(names.index("Taxi"))
         ed.vars["keywords"].set("택시, 콜택시")
@@ -66,14 +66,14 @@ def test_editor_window(tmp_path):
         item = ed.tree.item(str(ed.current))
         assert (item["text"], item["tags"]) == ("Taxi", ["on"]) and ed.dirty         # 찾을 글자를 적으면 '설정됨' 점
         ed.move(-1)                                                  # Taxi를 주차 위로
-        assert [r[0] for r in ed.rows][:4] == ["식대", "카페", "Taxi", "주차"]
+        assert [r[0] for r in ed.rows][:5] == ["식대", "숙박", "카페", "Taxi", "주차"]
         ed.only_on.set(True)
         ed.refresh_list()
-        assert [ed.rows[i][0] for i in ed.visible] == ["식대", "카페", "Taxi", "주차"]
+        assert [ed.rows[i][0] for i in ed.visible] == ["식대", "숙박", "카페", "Taxi", "주차"]
         ed.only_on.set(False)
-        ed.filter.set("hot")
+        ed.filter.set("fue")
         ed.refresh_list()
-        assert [ed.rows[i][0] for i in ed.visible] == ["Hotel"]
+        assert [ed.rows[i][0] for i in ed.visible] == ["Fuel"]
         ed.filter.set("")
         ed.refresh_list()
         ed.select_visible([ed.rows[i][0] for i in ed.visible].index("Fuel"))
@@ -84,8 +84,8 @@ def test_editor_window(tmp_path):
         ed.on_edit()
         assert ed.save() and not ed.dirty
         rows = ca.load_category_rows(tmp_path / ca.CATEGORY_FILE_NAME, cfg)
-        assert [r[0] for r in rows] == ["식대", "카페", "Taxi", "주차", "Hotel", "주유"]
-        assert rows[2][1] == "택시, 콜택시"
+        assert [r[0] for r in rows] == ["식대", "숙박", "카페", "Taxi", "주차", "Hotel", "주유"]
+        assert rows[3][1] == "택시, 콜택시"
         ed.close()
         assert not ed.win.winfo_exists()
     finally:
