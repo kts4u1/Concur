@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """숙박(Accommodation): Date Range 1박(새벽 영수증은 전날부터)을 달력에서 차례로 눌러 넣고,
-저장 뒤 '필수 정보가 빠졌다'는 창에서 [Yes]를 누르기. (Itemizations는 다음 판)"""
+저장 뒤 '필수 정보가 빠졌다'는 창에서 [Yes]를 누르기. (Itemizations는 test_itemization.py)"""
 
 import os
 from datetime import date, datetime
@@ -226,8 +226,8 @@ def test_missing_info_dialog_yes_then_continue(browser):
     bot, pg = bot_on(browser, NEXT_PAGE % "true")
     checks = []
     bot.go_next(1, 2, checks)
-    assert pg.evaluate("steps") == ["next", "yes", "next", "no"]       # [Yes] → (Itemizations는 다음 판) → 다음 경비로
-    assert pg.inner_text("#prog") == "2 of 2" and checks == ["Itemizations 직접 넣기"]
+    assert pg.evaluate("steps") == ["next", "yes", "next", "no"]       # [Yes] → (Itemizations 탭이 없음) → 다음 경비로
+    assert pg.inner_text("#prog") == "2 of 2" and checks == ["필수 정보 직접 확인(Concur 알림 참고)"]
 
 
 def test_last_expense_save_dialog(browser):
@@ -235,7 +235,7 @@ def test_last_expense_save_dialog(browser):
     pg.evaluate("document.getElementById('prog').textContent = '2 of 2'")
     checks = []
     bot.go_next(2, 2, checks)
-    assert pg.evaluate("steps") == ["save", "yes", "save", "no"] and checks == ["Itemizations 직접 넣기"]
+    assert pg.evaluate("steps") == ["save", "yes", "save", "no"] and checks == ["필수 정보 직접 확인(Concur 알림 참고)"]
 
 
 def test_no_dialog_goes_straight_on(browser):

@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 숙박 기간"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 Itemizations"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -344,6 +344,12 @@ def default_settings():
             "NA": "NA",
             "Undefined": "Undefined",
             "Personal Expense": "개인 경비|Personal Expense",
+            "Itemizations": "Itemizations|항목별 내역|항목화",
+            "Save Itemization": "Save Itemization|항목별 내역 저장|항목화 저장",
+            "Room Rate": "Room Rate|객실 요금|객실료",
+            "Alerts": "Alerts|알림",
+            "닫기": "Close|닫기",
+            "경비로 돌아가기": "Expense|경비",
             "필수 정보 빠짐": "Would you like to make corrections now|missing required information|필수 정보|지금 수정하시겠습니까",
             "예": "Yes|예",
             "아니요": "No|아니요|아니오",
@@ -2829,6 +2835,77 @@ JS_PICK_DAY = r"""
 """
 
 
+JS_COLUMN_INPUT = r"""
+(names) => {
+  // 표 머리글(예: 'Room Rate *') 바로 아래 같은 열에 있는 첫 입력칸을 표시합니다(칸에 이름표가 없을 때).
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  const norm = t => (t || '').replace(/[*\s]+/g, ' ').trim().toLowerCase();
+  document.querySelectorAll('[data-concur-auto]').forEach(e => e.removeAttribute('data-concur-auto'));
+  const wanted = names.map(n => n.toLowerCase());
+  const heads = Array.from(document.querySelectorAll('th, [role=columnheader], div, span, label, p')).filter(vis)
+    .filter(e => wanted.includes(norm(e.innerText)));
+  heads.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+  for (const h of heads) {
+    const r = h.getBoundingClientRect(), cx = r.left + r.width / 2;
+    const inputs = Array.from(document.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio])'))
+      .filter(vis).filter(i => !i.disabled && !i.readOnly)
+      .map(i => [i, i.getBoundingClientRect()])
+      .filter(([i, b]) => b.top >= r.bottom - 2 && b.left - 8 <= cx && cx <= b.right + 8);
+    inputs.sort((a, b) => a[1].top - b[1].top);
+    if (inputs.length) { inputs[0][0].setAttribute('data-concur-auto', 'cell'); return true; }
+  }
+  return false;
+}
+"""
+
+
+JS_CLOSE_ALERTS = r"""
+(names) => {
+  // 'Alerts' 알림 창의 닫기(X) 버튼을 표시합니다.
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  document.querySelectorAll('[data-concur-auto]').forEach(e => e.removeAttribute('data-concur-auto'));
+  const [titles, closes] = names;
+  const close = new RegExp('^(?:' + closes.join('|') + ')$|close|닫기|dismiss', 'i');
+  const heads = Array.from(document.querySelectorAll('h1, h2, h3, h4, header, div, span, p')).filter(vis)
+    .filter(e => titles.some(t => (e.innerText || '').trim().toLowerCase() === t.toLowerCase()));
+  for (const h of heads) {
+    let box = h;
+    for (let k = 0; k < 6 && box; k++, box = box.parentElement) {
+      const btn = Array.from(box.querySelectorAll('button, [role=button]')).filter(vis).find(b =>
+        close.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '')) || close.test((b.innerText || '').trim()));
+      if (btn) { btn.setAttribute('data-concur-auto', 'close'); return true; }
+    }
+  }
+  return false;
+}
+"""
+
+
+JS_ITEM_CHECKBOX = r"""
+(heading) => {
+  // 'Itemizations (1)' 목록에서 고칠 항목의 체크박스(오류가 있는 줄 먼저, 없으면 첫 줄)를 표시합니다.
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  document.querySelectorAll('[data-concur-auto]').forEach(e => e.removeAttribute('data-concur-auto'));
+  const head = Array.from(document.querySelectorAll('h1, h2, h3, h4, div, span, p')).filter(vis)
+    .filter(e => new RegExp('^(?:' + heading.join('|') + ')\\s*\\(\\d+\\)$', 'i').test((e.innerText || '').trim()))
+    .sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length)[0];
+  const top = head ? head.getBoundingClientRect().bottom : 0;
+  const shownBox = c => vis(c) ? c : (c.closest('label') || c.parentElement);
+  const boxes = Array.from(document.querySelectorAll('input[type=checkbox], [role=checkbox]'))
+    .filter(c => { const s = shownBox(c); return s && vis(s) && s.getBoundingClientRect().top >= top - 2; })
+    .filter(c => !/select all|모두 선택|전체 선택/i.test((c.getAttribute('aria-label') || '') + ' ' + ((c.closest('label') || {}).innerText || '')));
+  const rowOf = c => { let r = c; for (let k = 0; k < 6 && r.parentElement; k++) { r = r.parentElement;
+      if (r.querySelectorAll('input[type=checkbox], [role=checkbox]').length > 1) return null;
+      if (/\d/.test(r.innerText || '') && (r.innerText || '').trim().length > 10) return r; } return r; };
+  const withError = boxes.find(c => { const r = rowOf(c); return r && /error|오류/i.test(r.innerText || ''); });
+  const pick = withError || boxes[0];
+  if (!pick) return false;
+  pick.setAttribute('data-concur-auto', 'check');
+  return true;
+}
+"""
+
+
 JS_INSPECT = r"""
 () => {
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
@@ -3716,9 +3793,151 @@ class ConcurBot:
         btn.click()
         time.sleep(1.0)
 
-    def go_next(self, i: int, total: int, checks: list):
+    # ---------- 숙박 Itemizations ----------
+    def _click_button(self, key: str, timeout_s: float = 8.0):
+        """화면 문구(key)의 버튼을 기다렸다가 누릅니다."""
+        page = self.page
+        locs = [page.get_by_role("button", name=self._re(key)), page.get_by_role("tab", name=self._re(key)),
+                page.get_by_role("button", name=self._re(key, exact=False)),
+                page.locator("button, [role=button], [role=tab], a").filter(has_text=self._re(key, exact=False))]
+        deadline = time.time() + timeout_s
+        while True:
+            el = self._first_shown(locs)
+            if el is not None:
+                try:
+                    if el.is_enabled():
+                        el.click()
+                        time.sleep(0.8)
+                        return
+                except Exception:
+                    pass
+            if time.time() >= deadline:
+                raise RuntimeError(f"[{self._alts(key)[0]}] 버튼을 찾지 못했습니다.")
+            time.sleep(0.3)
+
+    def _wait_text(self, key: str, timeout_s: float) -> bool:
+        loc = self.page.get_by_text(re.compile(r"^\s*(?:" + "|".join(re.escape(a) for a in self._alts(key)) + r")\s*\*?\s*$", re.I))
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if self._first_shown([loc]) is not None:
+                return True
+            time.sleep(0.3)
+        return False
+
+    def close_alerts(self):
+        """오른쪽 위 'Alerts' 알림 창이 버튼을 가리지 않게 닫습니다."""
+        page = self.page
+        try:
+            if page.evaluate(JS_CLOSE_ALERTS, [self._alts("Alerts"), self._alts("닫기")]):
+                page.locator("[data-concur-auto]").first.click()
+                time.sleep(0.4)
+            else:
+                page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+    def fill_blank_item_fields(self, values: dict, checks: list) -> list:
+        """Itemizations 수정 화면에서 비어 있는 Business Purpose·LCRT·Comment를 경비와 같은 값으로 채웁니다."""
+        filled = []
+        for name in ("Business Purpose", "Comment"):
+            if not values.get(name):
+                continue
+            try:
+                box = self.field(name, timeout_s=3)
+            except Exception:
+                continue
+            if not box.input_value().strip():
+                self.type_text(box, values[name])
+                filled.append(name)
+        want = values.get("LCRT") or self.t["NA"]
+        trigger, value = self.find_select(self.sel("LCRT"))
+        if trigger is None:
+            checks.append("Itemizations의 LCRT 확인")
+            self.log("   Itemizations 수정 화면에서 LCRT 칸을 찾지 못했습니다.")
+        elif value.strip() != want:
+            self.choose_option(trigger, want)
+            filled.insert(0, "LCRT")
+        return filled
+
+    def fill_itemization(self, amount, checks: list) -> bool:
+        """숙박 경비의 Itemizations (사용자 설명 순서):
+        [Itemizations] → Room Rate에 금액 → [Save Itemization] → 목록에서 항목 체크 → [Edit] →
+        빈 LCRT·Comment(·Business Purpose) 채우기 → [Save Itemization]"""
+        page = self.page
+        self.close_alerts()
+        try:
+            self._click_button("Itemizations", 5)
+        except Exception:
+            checks.append("필수 정보 직접 확인(Concur 알림 참고)")
+            self.log("   Itemizations 탭이 없습니다. 빠진 필수 정보는 Concur 화면의 알림을 보고 넣어 주세요.")
+            return False
+        try:
+            # 1. Add Itemization: Room Rate에 금액
+            if self._wait_text("Room Rate", 8):
+                if amount is None:
+                    raise RuntimeError("경비 금액을 몰라 Room Rate를 넣지 못했습니다.")
+                box = self._first_shown([page.get_by_label(re.compile(
+                    "|".join(re.escape(a) for a in self._alts("Room Rate")), re.I))])
+                if box is None:
+                    if not page.evaluate(JS_COLUMN_INPUT, self._alts("Room Rate")):
+                        raise RuntimeError("Room Rate 칸을 찾지 못했습니다.")
+                    box = page.locator("[data-concur-auto]").first
+                self.type_text(box, str(amount))
+                self._click_button("Save Itemization")
+                deadline = time.time() + 15
+                while self._wait_text("Room Rate", 0.5) and time.time() < deadline:
+                    time.sleep(0.5)
+                self.log(f"   Itemizations: Room Rate {amount:,}원 넣고 저장")
+            # 2. 목록에서 항목 체크 → [Edit]
+            self.close_alerts()
+            found = False
+            deadline = time.time() + 10
+            while time.time() < deadline and not found:
+                found = page.evaluate(JS_ITEM_CHECKBOX, self._alts("Itemizations"))
+                if not found:
+                    time.sleep(0.5)
+            if not found:
+                raise RuntimeError("Itemizations 목록에서 항목을 찾지 못했습니다.")
+            self.click_checkbox(page.locator("[data-concur-auto]").first)
+            time.sleep(0.4)
+            self.close_alerts()
+            self._click_button("편집")
+            # 3. 빈 칸 채우고 [Save Itemization]
+            filled = self.fill_blank_item_fields(getattr(self, "last_values", {}) or {}, checks)
+            self._click_button("Save Itemization")
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                if self._first_shown([page.get_by_role("button", name=self._re("Save Itemization", exact=False))]) is None:
+                    break
+                time.sleep(0.5)
+            self.log(f"   Itemizations: {('·'.join(filled) or '빈 칸 없음')} 채우고 저장")
+            return True
+        except Exception as e:
+            self.log(f"   Itemizations를 넣지 못했습니다: {str(e).splitlines()[0][:100]}")
+            self.screenshot("itemization")
+            checks.append("Itemizations 직접 넣기")
+            self._leave_itemization()
+            return False
+
+    def _leave_itemization(self):
+        """Itemization 화면에서 멈췄으면 왼쪽 위 '< Expense'로 경비 화면에 돌아갑니다."""
+        page = self.page
+        save = page.get_by_role("button", name=self._re("Save Itemization", exact=False))
+        if self._first_shown([save]) is None:
+            return
+        try:
+            page.keyboard.press("Escape")
+            back = self._first_shown([page.get_by_role("link", name=self._re("경비로 돌아가기")),
+                                      page.get_by_role("button", name=self._re("경비로 돌아가기"))])
+            if back is not None:
+                back.click()
+                time.sleep(1.0)
+        except Exception:
+            pass
+
+    def go_next(self, i: int, total: int, checks: list, amount=None):
         """[다음 경비](마지막은 [경비 저장])를 누릅니다. 필수 정보가 빠졌다는 창이 뜨면 [Yes]를 누르고
-        (Itemizations는 아직 자동으로 넣지 않으므로 '확인 필요'에 남김) 다시 눌러 [No]로 넘어갑니다."""
+        숙박 Itemizations를 넣은 뒤(fill_itemization) 다시 누릅니다. 그래도 창이 뜨면 [No]로 넘어갑니다('확인 필요')."""
         page = self.page
         key = "경비 저장" if i == total else "다음 경비"
 
@@ -3734,16 +3953,15 @@ class ConcurBot:
             return
         self.log("   '필수 정보가 빠졌다'는 창이 떠서 [Yes]를 눌렀습니다.")
         self.answer_dialog(box, "예")
-        checks.append("Itemizations 직접 넣기")
-        self.log("   Itemizations(항목별 내역)는 아직 자동으로 넣지 않습니다. 이 경비는 Concur에서 Itemizations를 넣어 주세요.")
-        try:
-            page.keyboard.press("Escape")                       # Alerts 창 닫기
-        except Exception:
-            pass
+        itemized = self.fill_itemization(amount, checks)
+        self.close_alerts()
         press()
         box = self.missing_info_dialog(4.0, moved)
         if box is not None:
-            self.answer_dialog(box, "아니요")                     # 이번에는 그대로 넘어감
+            if itemized:
+                checks.append("필수 정보 확인(저장해도 빠졌다고 함)")
+            self.log("   아직 빠진 정보가 있다고 해서 [No]를 누르고 넘어갑니다. Concur에서 확인해 주세요.")
+            self.answer_dialog(box, "아니요")
 
     # ---------- 경비 하나 입력 ----------
     def fill_expense(self, rec, upload, checks: list) -> list:
@@ -3758,6 +3976,9 @@ class ConcurBot:
         category = rec.category if rec else ""
         extra = (self.cfg.get("항목_추가_입력") or {}).get(category) or {}
         texts = texts_for(rec, self.cfg) if rec else {}
+        # 숙박 Itemizations 수정 화면에 다시 넣을 값
+        self.last_values = {"Business Purpose": texts.get("Business Purpose", ""), "Comment": texts.get("Comment", ""),
+                            "LCRT": extra.get("LCRT") or t["NA"]}
 
         def safely(step: str, action) -> bool:
             """칸 하나를 못 채워도 다음 칸과 영수증 첨부는 계속합니다(결과 파일 '확인 필요'에 남김)."""
@@ -3918,6 +4139,7 @@ class ConcurBot:
             row = {"순번": i, "Concur 날짜": "", "Concur 금액": "", "가게 이름": "", "영수증": "", "분류": "",
                    "병원": "", "병원 근거": "", "도시": "", "처리": "", "확인 필요": "", "오류": ""}
             checks = []
+            amount = None
             try:
                 self.wait_progress(i)
                 date_text = self.field("경비 날짜").input_value()
@@ -3965,7 +4187,7 @@ class ConcurBot:
             row["확인 필요"] = ", ".join(checks)
             results.append(row)
             try:
-                self.go_next(i, total, checks)
+                self.go_next(i, total, checks, amount)
                 row["확인 필요"] = ", ".join(checks)
                 if i == total:
                     time.sleep(3)
@@ -4478,7 +4700,7 @@ class GuiApp:
         self.base = base
         enable_dpi_awareness()
         root = self.root = tk.Tk()
-        root.title(f"Concur 경비 자동 입력 ({APP_VERSION})")
+        root.title("Concur 경비 자동 입력")                     # 판 이름은 실행 기록 첫 줄에
         set_window_icon(root)
         self.theme = apply_theme(root, ttk, tkfont)
         self.px, self.font = self.theme["px"], self.theme["font"]

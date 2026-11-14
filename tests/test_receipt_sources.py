@@ -168,6 +168,7 @@ def test_receipt_sources_tab(tmp_path):
             for child in w.winfo_children():
                 yield from all_texts(child)
         assert ca.APP_VERSION not in list(all_texts(app.root))                 # 머리띠의 판 글자는 없앰
+        assert app.root.title() == "Concur 경비 자동 입력"                      # 창 제목에도 판 이름 없음
         tabs = [app.notebook.tab(t, "text").strip() for t in app.notebook.tabs()]
         assert tabs[:2] == ["실행", "영수증 불러오기"]
         src = app.sources
