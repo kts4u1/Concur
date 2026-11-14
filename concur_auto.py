@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-14 편집 창 미리보기 없앰"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-14 버튼 정리"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -86,7 +86,7 @@ OLD_DEFAULT_HOSPITALS = [
 
 
 # Concur 화면의 입력칸·목록 위치(CSS 선택자). Power Automate 흐름에 저장돼 있던 값입니다.
-# Concur가 바뀌면 설정 파일의 '화면_요소'만 고치면 됩니다([화면 조사] 파일 참고). 쉼표로 여러 개를 적으면 그중 하나를 찾습니다.
+# Concur가 바뀌면 설정 파일의 '화면_요소'만 고치면 됩니다(화면 조사 파일 참고: python concur_auto.py --inspect). 쉼표로 여러 개를 적으면 그중 하나를 찾습니다.
 DEFAULT_ELEMENTS = {
     "리포트 이름": "#name",
     "리포트 시작일": "#custom11-date-input-field-input",
@@ -123,7 +123,7 @@ DEFAULT_ELEMENT_LABELS = {
 }
 
 # 사용자 Concur의 Expense Type(사용자가 화면을 캡처해 보내 준 것, 글자 그대로). Concur에서 고를 때는 이름이 완전히 같은
-# 항목만 고르므로 띄어쓰기·대소문자까지 같아야 합니다. [화면 조사]가 Concur에서 전체 목록을 읽어 설정에 더하기도 합니다.
+# 항목만 고르므로 띄어쓰기·대소문자까지 같아야 합니다. 화면 조사(--inspect)가 Concur에서 전체 목록을 읽어 설정에 더하기도 합니다.
 KNOWN_EXPENSE_TYPES = [
     # 숙박·접대·식사
     "Accommodation", "M card accommodation",
@@ -292,11 +292,11 @@ def default_settings():
             "Undefined": "Undefined",
             "Personal Expense": "개인 경비|Personal Expense",
         },
-        "_Concur_경비_유형_설명": "자동 입력 편집 창에서 고를 Concur Expense Type 목록. [화면 조사]를 경비 편집 화면에서 하면 Concur의 전체 목록을 읽어 여기에 더합니다.",
+        "_Concur_경비_유형_설명": "자동 입력 편집 창에서 고를 Concur Expense Type 목록. 화면 조사(python concur_auto.py --inspect)를 경비 편집 화면에서 하면 Concur의 전체 목록을 읽어 여기에 더합니다.",
         "Concur_경비_유형": list(KNOWN_EXPENSE_TYPES),
         "_글자_입력_설명": "'한꺼번에': Comment 같은 글을 한 번에 넣습니다(칸이 안 받으면 한 글자씩). '한 글자씩': 예전처럼 한 글자씩 칩니다(느리지만 Concur가 글을 못 받을 때).",
         "글자_입력_방식": "한꺼번에",
-        "_화면_요소_설명": "Concur 화면의 입력칸 위치(CSS 선택자). Concur가 바뀌어 칸을 못 찾으면 창의 [화면 조사]로 만든 파일의 id·name을 보고 여기를 고칩니다. 예: 입력칸 id가 txtComment면 \"#txtComment\". 쉼표로 여러 개를 적으면 그중 하나를 찾습니다.",
+        "_화면_요소_설명": "Concur 화면의 입력칸 위치(CSS 선택자). Concur가 바뀌어 칸을 못 찾으면 화면 조사(python concur_auto.py --inspect)로 만든 파일의 id·name을 보고 여기를 고칩니다. 예: 입력칸 id가 txtComment면 \"#txtComment\". 쉼표로 여러 개를 적으면 그중 하나를 찾습니다.",
         "화면_요소": dict(DEFAULT_ELEMENTS),
         "_화면_요소_라벨_설명": "위치로 못 찾을 때 화면에 보이는 칸 이름(라벨)으로 찾습니다. '|'로 여러 개.",
         "화면_요소_라벨": dict(DEFAULT_ELEMENT_LABELS),
@@ -2474,7 +2474,8 @@ class ConcurBot:
                 return el
             if time.time() >= deadline:
                 raise RuntimeError(f"Concur 화면에서 '{key}' 칸을 찾지 못했습니다(위치 {self.sel(key)}). "
-                                   f"Concur 화면이 바뀌었으면 [화면 조사]로 확인한 뒤 설정 '화면_요소'를 고치세요.")
+                                   f"Concur 화면이 바뀌었을 수 있습니다. 실행기록 폴더(기록·화면 캡처)를 보내 주시면 고칠 수 있습니다"
+                                   f"(직접 고치려면 화면 조사(python concur_auto.py --inspect) 파일을 보고 설정 '화면_요소'를 고치세요).")
             time.sleep(0.3)
 
     def _alts(self, key: str) -> list:
@@ -3462,8 +3463,7 @@ class GuiApp:
 
         ttk.Label(f, text="영수증 폴더").grid(row=1, column=0, sticky="w", pady=3)
         self.folder_summary = ttk.Label(f, text="", foreground="#1a4d8f")
-        self.folder_summary.grid(row=1, column=1, sticky="w")
-        ttk.Button(f, text="영수증 불러오기 탭", command=lambda: nb.select(self.sources_frame)).grid(row=1, column=2, padx=(6, 0))
+        self.folder_summary.grid(row=1, column=1, columnspan=2, sticky="w")
 
         ttk.Label(f, text="기본 도시").grid(row=2, column=0, sticky="w", pady=3)
         self.city = tk.StringVar(value=self.cfg["기본_도시"])
@@ -3496,11 +3496,8 @@ class GuiApp:
         sf = ttk.Frame(f)
         sf.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(2, 6))
         for text, cmd in (("영수증 목록 열기", self.open_list), ("병원 목록 편집", self.open_hospitals),
-                          ("병원 엑셀 가져오기", self.import_hospital_excel),
                           ("자동 입력 편집", self.open_category_table),
-                          ("화면 조사", lambda: self.start("inspect")),
-                          ("결과 폴더 열기", lambda: open_path(self.base / "결과")),
-                          ("설정 파일 열기", lambda: open_path(self.base / SETTINGS_FILE_NAME, notepad=True))):
+                          ("결과 폴더 열기", lambda: open_path(self.base / "결과"))):
             ttk.Button(sf, text=text, command=cmd).pack(side="left", padx=3)
 
         ttk.Label(f, foreground="#555", wraplength=760, justify="left", text=(
@@ -3526,7 +3523,7 @@ class GuiApp:
             self.append("영수증 사진이 있는 곳은 [영수증 불러오기] 탭에서 넣습니다. 아이폰은 iCloud 사진 폴더, "
                         "갤럭시는 OneDrive 사진 폴더, 그 밖에는 카카오톡 받은 파일이나 [사진 고르기]로 가져오면 됩니다.")
             self.append("병원 목록에는 영수증에서 확인한 병원(원광대병원, 목포한국병원)만 들어 있습니다. "
-                        "영수증에서 새 병원이 보이면 자동으로 더하고, [병원 엑셀 가져오기]로 회사 엑셀(MR·CT·XR 탭)에서 가져올 수도 있습니다.")
+                        "영수증에서 새 병원이 보이면 자동으로 더합니다.")
 
     # ---------- 화면 동작 ----------
     def append(self, line):
@@ -3610,30 +3607,6 @@ class GuiApp:
     def open_hospitals(self):
         load_hospitals(self.base / HOSPITAL_FILE_NAME)
         open_path(self.base / HOSPITAL_FILE_NAME)
-
-    def import_hospital_excel(self):
-        cfg, _ = load_settings(self.base / SETTINGS_FILE_NAME)
-        current = str(cfg.get("병원_엑셀_파일") or "")
-        picked = self.fd.askopenfilename(
-            title="병원 정보 엑셀 고르기 (MR·CT·XR 탭이 있는 파일)",
-            initialdir=str(Path(current).parent) if current else str(Path.home()),
-            filetypes=[("Excel 파일", "*.xlsx *.xlsm"), ("모든 파일", "*.*")])
-        if not picked:
-            return
-        cfg["병원_엑셀_파일"] = str(Path(picked))
-        save_settings(self.base / SETTINGS_FILE_NAME, cfg)
-        try:
-            read, added = import_hospitals_from_excel(cfg, self.base / HOSPITAL_FILE_NAME, self.append)
-        except Exception as e:
-            self.mb.showerror("병원 엑셀 가져오기", str(e))
-            return
-        self.mb.showinfo("병원 엑셀 가져오기",
-                         f"병원 {read}곳을 읽었고, 병원 목록에 새로 {added}곳을 넣었습니다. (MR·CT·XR 탭)\n\n"
-                         "엑셀에 영문 이름이 없는 병원은 한글을 자동으로 바꾼 것이라 공식 영문명과 다를 수 있습니다. "
-                         "이어서 열리는 병원 목록에서 확인하고 고쳐 주세요.\n"
-                         "앞으로는 실행할 때마다 이 엑셀에서 새 병원을 자동으로 더합니다.")
-        if added:
-            open_path(self.base / HOSPITAL_FILE_NAME)
 
     def save_form(self):
         cfg, _ = load_settings(self.base / SETTINGS_FILE_NAME)

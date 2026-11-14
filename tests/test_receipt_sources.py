@@ -140,6 +140,15 @@ def test_build_receipts_uses_all_folders(tmp_path, monkeypatch):
 tkinter = pytest.importorskip("tkinter") if os.environ.get("DISPLAY") else None
 
 
+def button_texts(widget):
+    out = []
+    for child in widget.winfo_children():
+        if child.winfo_class() in ("TButton", "Button"):
+            out.append(child.cget("text"))
+        out.extend(button_texts(child))
+    return out
+
+
 @pytest.mark.skipif(tkinter is None, reason="창을 띄울 화면이 없음")
 def test_receipt_sources_tab(tmp_path):
     icloud = tmp_path / "iCloud"
@@ -154,6 +163,9 @@ def test_receipt_sources_tab(tmp_path):
         src = app.sources
         assert src.folders == [str(icloud)]
         assert app.folder_summary.cget("text") == "1곳: iCloud"
+        buttons = button_texts(app.notebook.nametowidget(app.notebook.tabs()[0]))
+        assert buttons == ["① 영수증 분석만", "② 전체 실행", "③ 만든 리포트에 입력만", "중지",
+                           "영수증 목록 열기", "병원 목록 편집", "자동 입력 편집", "결과 폴더 열기"]   # 쓸모없는 버튼은 없앰
 
         usb = tmp_path / "USB"
         r = src.import_files([photo(usb / "20261104_101010.jpg", b"usb"), usb / "없는.jpg"])
