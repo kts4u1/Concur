@@ -119,6 +119,10 @@ def test_run_job_shows_notice_and_keeps_window(tmp_path, monkeypatch):
         def wait_login(self, need_home=True):
             calls.append("login")
 
+        def find_report(self, tm):
+            calls.append("find")
+            return None
+
         def create_report(self, tm):
             calls.append("report")
 
@@ -154,5 +158,5 @@ def test_run_job_shows_notice_and_keeps_window(tmp_path, monkeypatch):
     ca.run_job("full", "2026-11", ui, base)
     assert [t for t, _ in ui.infos] == ["넣을 경비 없음"]            # '오류'가 아님
     assert "Concur 창은 그대로 두니" in ui.infos[0][1]
-    assert calls == ["start", "login", "report", "기다림(창 열어 둠)", "stop"]
+    assert calls == ["start", "login", "find", "report", "기다림(창 열어 둠)", "stop"]
     assert not any(line.startswith("[") and "오류:" in line for line in ui.lines)

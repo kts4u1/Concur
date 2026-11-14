@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-14 버튼 정리"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-14 새 디자인"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -243,6 +243,10 @@ def default_settings():
         "리포트_이름_형식": "Monthly Expense for {month_abbr}",
         "리포트_Business_Purpose": "service",
         "리포트_Comment_형식": "{report_name}",
+        "_리포트_찾기_설명": ("② 전체 실행 때 Concur 리포트 목록(리포트_목록_주소)에서 같은 이름의 리포트를 찾아, 있으면 이어서 넣을지 묻습니다. "
+                         "리포트_찾기_대기_초 동안 못 찾으면 새로 만듭니다."),
+        "리포트_목록_주소": "/nui/expense",
+        "리포트_찾기_대기_초": 8,
         "_키워드_설명": "아래 키워드·분류_우선순위·입력_문구·Undefined일_때_선택할_유형은 자동입력표.csv를 처음 만들 때만 씁니다. 그 뒤로는 자동입력표.csv(창의 [자동 입력표 편집])에서 고치세요.",
         "키워드": {
             "주차": ["주차", "입차", "출차", "주자"],
@@ -2878,6 +2882,48 @@ class ConcurBot:
         time.sleep(3)
 
     # ---------- 지난달 경비 추가 ----------
+    # ---------- 이미 만든 리포트 ----------
+    def go_home(self):
+        try:
+            self.page.goto(self.base + "/home")
+            self.page.wait_for_load_state()
+        except Exception:
+            pass
+
+    def find_report(self, tm: TargetMonth):
+        """Concur 리포트 목록에 같은 이름(예: Monthly Expense for Nov)의 리포트가 있으면 그 항목, 없으면 None(홈 화면으로 돌아감)"""
+        name = tm.report_name(self.cfg["리포트_이름_형식"])
+        page = self.page
+        try:
+            page.goto(self.base + str(self.cfg.get("리포트_목록_주소") or "/nui/expense"))
+            item = page.get_by_text(name, exact=True).first
+            if self._visible(item, int(float(self.cfg.get("리포트_찾기_대기_초", 8)) * 1000)):
+                self.log(f"Concur에 같은 이름의 리포트가 있습니다: {name}")
+                return item
+        except Exception as e:
+            self.log(f"   리포트 목록을 보지 못했습니다: {str(e).splitlines()[0][:80] if str(e) else type(e).__name__}")
+        self.log(f"같은 이름의 리포트가 없어 새로 만듭니다: {name}")
+        self.go_home()
+        return None
+
+    def open_report(self, item):
+        item.click()
+        self.page.wait_for_url(re.compile(r"/nui/expense/reports/"))
+        time.sleep(2)
+
+    def report_is_empty(self) -> bool:
+        """연 리포트에 경비가 하나도 없는지(빈 리포트 카드가 보이면 True)"""
+        page = self.page
+        entries, empty = page.locator(self.sel("경비 목록")), page.locator(self.sel("사용 가능한 경비 카드"))
+        deadline = time.time() + self.timeout_ms / 1000
+        while time.time() < deadline:
+            if self._shown(empty):
+                return True
+            if self._shown(entries):
+                return False
+            time.sleep(0.5)
+        return False
+
     def add_available_expenses(self, tm: TargetMonth):
         page = self.page
         card = page.locator(self.sel("사용 가능한 경비 카드")).filter(has_text=self._re("사용 가능한 경비", exact=False))
@@ -3363,8 +3409,26 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
                 raise Cancelled()
         else:
             bot.wait_login()
-            bot.create_report(tm)
-            bot.add_available_expenses(tm)
+            name = tm.report_name(cfg["리포트_이름_형식"])
+            found = bot.find_report(tm)
+            again = False
+            if found is not None:
+                again = ui.yes_no_cancel("이미 만든 리포트", (
+                    f"Concur에 '{name}' 리포트가 이미 있습니다.\n\n"
+                    "[예] 그 리포트에 이어서 넣기\n[아니오] 새 리포트 만들기\n[취소] 중단"))
+                if again is None:
+                    raise Cancelled()
+            if again:
+                bot.open_report(found)
+                if bot.report_is_empty():
+                    bot.add_available_expenses(tm)
+                else:
+                    log("이미 들어 있는 경비에 이어서 입력합니다. 새로 들어온 카드 경비는 Concur에서 이 리포트에 넣은 뒤 다시 ②를 누르세요.")
+            else:
+                if found is not None:
+                    bot.go_home()
+                bot.create_report(tm)
+                bot.add_available_expenses(tm)
         bot.open_first_expense()
         results = bot.process_expenses(receipts, work_dir, stop_flag)
 
@@ -3415,16 +3479,222 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
 # 7. 창(GUI)
 # ============================================================
 
+# ---------- 창 모양(색·글꼴) ----------
+THEME = {
+    "bg": "#f2f4f7", "card": "#ffffff", "border": "#dfe4ea", "text": "#1d2d3e", "muted": "#6b7787",
+    "accent": "#0a6ed1", "accent_hover": "#0854a0", "accent_soft": "#e7f1fc", "accent_off": "#9fc4ea",
+    "header": "#0e3a63", "header_sub": "#b6cfe8", "warn": "#b05000", "hover": "#edf1f6", "pressed": "#e0e7ef",
+    "field": "#ffffff", "heading": "#f4f6f9",
+}
+
+
+def enable_dpi_awareness():
+    """Windows 화면 배율(125%·150%)에서 글자가 흐리지 않게 합니다(창을 만들기 전에)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def ui_font_family(tkfont) -> str:
+    try:
+        families = set(tkfont.families())
+    except Exception:
+        families = set()
+    for name in ("Malgun Gothic", "맑은 고딕", "NanumGothic", "NanumBarunGothic", "Noto Sans CJK KR", "Apple SD Gothic Neo"):
+        if name in families:
+            return name
+    return "TkDefaultFont"
+
+
+def make_check_images(tk, size: int, master=None, gap: int = 0) -> dict:
+    """체크 상자 그림(둥근 네모 + ✓, 오른쪽에 글자와 띄울 빈칸 gap): 꺼짐·마우스 올림·켜짐"""
+    c = THEME
+    r = max(2, size // 5)
+    pts = [(0.24, 0.52), (0.43, 0.70), (0.77, 0.32)]
+    thick = max(1.6, size * 0.13)
+
+    def seg_dist(x, y, a, b):
+        (ax, ay), (bx, by) = a, b
+        dx, dy = bx - ax, by - ay
+        t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)))
+        return ((x - ax - t * dx) ** 2 + (y - ay - t * dy) ** 2) ** 0.5
+
+    def corner_dist(x, y):
+        cx, cy = min(x, size - 1 - x), min(y, size - 1 - y)
+        if cx < r and cy < r:
+            return ((r - cx - 0.5) ** 2 + (r - cy - 0.5) ** 2) ** 0.5
+        return 0.0
+
+    def draw(fill, border, check=None):
+        img = tk.PhotoImage(master=master, width=size + gap, height=size)
+        scaled = [(ax * size, ay * size) for ax, ay in pts]
+        for y in range(size):
+            for x in range(size):
+                d = corner_dist(x, y)
+                if d > r:
+                    continue
+                edge = x in (0, size - 1) or y in (0, size - 1) or d > r - 1
+                color = border if edge else fill
+                if check and not edge and min(seg_dist(x + 0.5, y + 0.5, scaled[0], scaled[1]),
+                                              seg_dist(x + 0.5, y + 0.5, scaled[1], scaled[2])) <= thick / 2:
+                    color = check
+                img.put(color, to=(x, y))
+        return img
+
+    return {"off": draw(c["field"], "#b3bdc8"), "hover": draw(c["accent_soft"], c["accent"]),
+            "on": draw(c["accent"], c["accent"], "#ffffff"), "on_hover": draw(c["accent_hover"], c["accent_hover"], "#ffffff")}
+
+
+def apply_theme(root, ttk, tkfont) -> dict:
+    """평면적이고 깔끔한 디자인(clam 테마에 색·글꼴·여백). → {'px': 배율 맞춘 픽셀, 'font': 글꼴, 'scale': 배율}"""
+    c = THEME
+    try:
+        scale = max(1.0, float(root.winfo_fpixels("1i")) / 96.0)
+    except Exception:
+        scale = 1.0
+
+    def px(n):
+        return int(round(n * scale))
+
+    family = ui_font_family(tkfont)
+
+    def font(size, *style):
+        return (family, size, *style)
+
+    root.configure(bg=c["bg"])
+    st = ttk.Style(root)
+    st.theme_use("clam")
+    st.configure(".", background=c["bg"], foreground=c["text"], font=font(10), bordercolor=c["border"],
+                 lightcolor=c["bg"], darkcolor=c["bg"], troughcolor=c["bg"], focuscolor=c["accent"],
+                 selectbackground=c["accent_soft"], selectforeground=c["text"], insertcolor=c["text"])
+    # 바탕·카드
+    st.configure("TFrame", background=c["bg"])
+    st.configure("Card.TFrame", background=c["card"], bordercolor=c["border"], lightcolor=c["border"],
+                 darkcolor=c["border"], relief="solid", borderwidth=1)
+    st.configure("Pane.TFrame", background=c["card"])
+    st.configure("TLabel", background=c["bg"], foreground=c["text"])
+    st.configure("Card.TLabel", background=c["card"])
+    st.configure("CardMuted.TLabel", background=c["card"], foreground=c["muted"], font=font(9))
+    st.configure("Field.TLabel", background=c["card"], foreground=c["muted"])
+    st.configure("Value.TLabel", background=c["card"], foreground=c["accent"], font=font(10, "bold"))
+    st.configure("Section.TLabel", background=c["card"], foreground=c["text"], font=font(11, "bold"))
+    st.configure("AccentText.TLabel", background=c["card"], foreground=c["accent"], font=font(10, "bold"))
+    st.configure("Warn.TLabel", background=c["card"], foreground=c["warn"], font=font(9))
+    st.configure("Status.TLabel", background=c["card"], foreground=c["muted"], font=font(9, "bold"))
+    st.configure("TSeparator", background=c["border"])
+    # 버튼
+    flat = {"relief": "raised", "borderwidth": 1, "focusthickness": 0}
+    btn = "#f6f8fa"
+    st.configure("TButton", background=btn, foreground=c["text"], bordercolor="#cbd3dc", lightcolor=btn,
+                 darkcolor=btn, padding=(px(14), px(6)), font=font(10), width=-6, **flat)
+    st.map("TButton", background=[("disabled", c["bg"]), ("pressed", c["pressed"]), ("active", c["hover"])],
+           lightcolor=[("disabled", c["bg"]), ("pressed", c["pressed"]), ("active", c["hover"])],
+           darkcolor=[("disabled", c["bg"]), ("pressed", c["pressed"]), ("active", c["hover"])],
+           foreground=[("disabled", "#a3abb5")], bordercolor=[("active", "#aeb9c5"), ("disabled", c["border"])])
+    for name, size, pad in (("Accent.TButton", 10, (px(16), px(6))), ("BigAccent.TButton", 12, (px(18), px(14)))):
+        st.configure(name, background=c["accent"], foreground="#ffffff", bordercolor=c["accent"], lightcolor=c["accent"],
+                     darkcolor=c["accent"], padding=pad, font=font(size, "bold"), **flat)
+        st.map(name, background=[("disabled", c["accent_off"]), ("pressed", c["accent_hover"]), ("active", c["accent_hover"])],
+               lightcolor=[("disabled", c["accent_off"]), ("pressed", c["accent_hover"]), ("active", c["accent_hover"])],
+               darkcolor=[("disabled", c["accent_off"]), ("pressed", c["accent_hover"]), ("active", c["accent_hover"])],
+               bordercolor=[("disabled", c["accent_off"]), ("active", c["accent_hover"])],
+               foreground=[("disabled", "#ffffff")])
+    st.configure("Big.TButton", padding=(px(18), px(14)), font=font(12, "bold"))
+    st.configure("Tool.TButton", padding=(px(12), px(5)), font=font(9), width=0)
+    # 입력칸
+    st.configure("TEntry", fieldbackground=c["field"], bordercolor=c["border"], lightcolor=c["field"],
+                 darkcolor=c["field"], padding=(px(8), px(5)))
+    st.map("TEntry", bordercolor=[("focus", c["accent"])], lightcolor=[("focus", c["accent"])])
+    st.configure("TCombobox", fieldbackground=c["field"], background=c["field"], bordercolor=c["border"],
+                 lightcolor=c["field"], darkcolor=c["field"], arrowcolor=c["muted"], padding=(px(8), px(4)),
+                 arrowsize=px(13))
+    st.map("TCombobox", fieldbackground=[("readonly", c["field"]), ("disabled", c["bg"])],
+           background=[("active", c["hover"]), ("readonly", c["field"])],
+           selectbackground=[("readonly", c["field"])], selectforeground=[("readonly", c["text"])],
+           bordercolor=[("focus", c["accent"])], lightcolor=[("focus", c["accent"])], arrowcolor=[("active", c["accent"])])
+    root.option_add("*TCombobox*Listbox.font", font(10))
+    root.option_add("*TCombobox*Listbox.background", c["field"])
+    root.option_add("*TCombobox*Listbox.selectBackground", c["accent_soft"])
+    root.option_add("*TCombobox*Listbox.selectForeground", c["text"])
+    root.option_add("*Menu.font", font(10))
+    # 체크(둥근 네모 + ✓ 그림)
+    import tkinter
+    checks = make_check_images(tkinter, px(16), root, gap=px(8))
+    st.element_create("Nice.indicator", "image", checks["off"],
+                      ("selected", "active", checks["on_hover"]), ("selected", checks["on"]),
+                      ("active", checks["hover"]), sticky="")
+    st.layout("TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
+        ("Nice.indicator", {"side": "left", "sticky": ""}),
+        ("Checkbutton.label", {"side": "left", "sticky": "nswe"})]})])
+    for name, bg in (("TCheckbutton", c["bg"]), ("Card.TCheckbutton", c["card"])):
+        st.configure(name, background=bg, foreground=c["text"], padding=(0, px(3)))
+        st.map(name, background=[("active", bg)])
+    # 탭
+    st.configure("TNotebook", background=c["bg"], borderwidth=0, tabmargins=(0, 0, 0, 0), bordercolor=c["border"],
+                 lightcolor=c["card"], darkcolor=c["border"])
+    st.configure("TNotebook.Tab", background=c["bg"], foreground=c["muted"], padding=(px(20), px(9)), borderwidth=0,
+                 font=font(10, "bold"), bordercolor=c["bg"], lightcolor=c["bg"], focuscolor=c["card"])
+    st.map("TNotebook.Tab", background=[("selected", c["card"]), ("active", c["hover"])],
+           foreground=[("selected", c["accent"]), ("active", c["text"])],
+           lightcolor=[("selected", c["card"])], bordercolor=[("selected", c["border"])],
+           expand=[("selected", (0, 0, 0, 0))])
+    # 목록(표)
+    st.configure("Treeview", background=c["field"], fieldbackground=c["field"], foreground=c["text"],
+                 rowheight=px(28), bordercolor=c["border"], lightcolor=c["field"], darkcolor=c["field"], font=font(10))
+    st.map("Treeview", background=[("selected", c["accent_soft"])], foreground=[("selected", c["text"])])
+    st.configure("Treeview.Heading", background=c["heading"], foreground=c["muted"], font=font(9, "bold"),
+                 relief="flat", padding=(px(8), px(6)), bordercolor=c["border"], lightcolor=c["heading"],
+                 darkcolor=c["heading"])
+    st.map("Treeview.Heading", background=[("active", c["hover"])])
+    # 스크롤바
+    for name in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+        st.configure(name, background="#dce2e9", troughcolor=c["card"], bordercolor=c["card"], arrowcolor="#9aa5b1",
+                     lightcolor="#dce2e9", darkcolor="#dce2e9", gripcount=0, arrowsize=px(11), relief="flat")
+        st.map(name, background=[("active", "#c3ccd6")], lightcolor=[("active", "#c3ccd6")], darkcolor=[("active", "#c3ccd6")])
+    return {"px": px, "font": font, "scale": scale, "family": family, "images": checks}
+
+
+def hline(parent, tk):
+    """연한 구분선"""
+    return tk.Frame(parent, height=1, bg=THEME["border"])
+
+
+def text_box(parent, tk, ttk, theme, height=8, wrap="word"):
+    """평면 글 상자(실행 기록 등) + 얇은 스크롤바 → (바깥 프레임, Text)"""
+    c, px, font = THEME, theme["px"], theme["font"]
+    frame = tk.Frame(parent, bg=c["card"], highlightthickness=1, highlightbackground=c["border"], highlightcolor=c["border"])
+    text = tk.Text(frame, height=height, wrap=wrap, relief="flat", borderwidth=0, highlightthickness=0, bg=c["card"],
+                   fg=c["text"], font=font(9), padx=px(10), pady=px(8), insertbackground=c["text"],
+                   selectbackground=c["accent_soft"], selectforeground=c["text"], spacing1=px(1), spacing3=px(1))
+    sb = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+    text.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y")
+    text.pack(side="left", fill="both", expand=True)
+    return frame, text
+
+
 class GuiApp:
     def __init__(self, base: Path):
         import tkinter as tk
-        from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+        from tkinter import filedialog, messagebox, simpledialog, ttk
+        from tkinter import font as tkfont
         self.sd, self.ttk = simpledialog, ttk
         self.editor = None
         self.tk, self.mb, self.fd = tk, messagebox, filedialog
         self.base = base
+        enable_dpi_awareness()
         root = self.root = tk.Tk()
         root.title(f"Concur 경비 자동 입력 ({APP_VERSION})")
+        self.theme = apply_theme(root, ttk, tkfont)
+        self.px, self.font = self.theme["px"], self.theme["font"]
+        px, font, c = self.px, self.font, THEME
         self.restored = self.offer_restore_on_first_run() if not (base / SETTINGS_FILE_NAME).exists() else None
         self.cfg, created = load_settings(base / SETTINGS_FILE_NAME)
         load_hospitals(base / HOSPITAL_FILE_NAME)
@@ -3432,86 +3702,125 @@ class GuiApp:
         self.worker = None
         self.stop_flag = threading.Event()
 
-        root.geometry("880x820")
-        root.minsize(780, 680)
-        style = ttk.Style()
-        for name in ("TLabel", "TButton", "TCheckbutton"):
-            style.configure(name, font=("Malgun Gothic", 10))
-        style.configure("Big.TButton", font=("Malgun Gothic", 11, "bold"))
+        width = min(px(920), root.winfo_screenwidth() - px(40))
+        height = min(px(830), root.winfo_screenheight() - px(80))
+        root.geometry(f"{width}x{height}")
+        root.minsize(min(px(780), width), min(px(620), height))
 
-        outer = ttk.Frame(root, padding=(10, 8))
-        outer.pack(fill="both", expand=True)
-        outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(1, weight=1)
-        nb = self.notebook = ttk.Notebook(outer)
+        # 위쪽 머리띠
+        header = tk.Frame(root, bg=c["header"])
+        header.pack(fill="x")
+        title_box = tk.Frame(header, bg=c["header"])
+        title_box.pack(side="left", padx=px(22), pady=(px(12), px(11)))
+        tk.Label(title_box, text="Concur 경비 자동 입력", bg=c["header"], fg="#ffffff", font=font(16, "bold")).pack(anchor="w")
+        tk.Label(title_box, text="영수증 사진을 읽어 Concur 경비 리포트를 채웁니다 · 제출은 직접 하세요", bg=c["header"],
+                 fg=c["header_sub"], font=font(9)).pack(anchor="w", pady=(px(2), 0))
+        tk.Label(header, text=APP_VERSION, bg=c["header"], fg=c["header_sub"], font=font(9)).pack(
+            side="right", anchor="s", padx=px(22), pady=(0, px(12)))
+
+        body = ttk.Frame(root, padding=(px(16), px(14), px(16), px(16)))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
+        nb = self.notebook = ttk.Notebook(body)
         nb.grid(row=0, column=0, sticky="nsew")
-        f = ttk.Frame(nb, padding=10)
+        f = ttk.Frame(nb, style="Pane.TFrame", padding=(px(22), px(14)))
         f.columnconfigure(1, weight=1)
-        nb.add(f, text="  실행  ")
-        self.sources_frame = ttk.Frame(nb, padding=10)
-        nb.add(self.sources_frame, text="  영수증 불러오기  ")
-        self.backup_frame = ttk.Frame(nb, padding=10)
-        nb.add(self.backup_frame, text="  백업·되살리기  ")
+        nb.add(f, text="실행")
+        self.sources_frame = ttk.Frame(nb, style="Pane.TFrame", padding=(px(22), px(14)))
+        nb.add(self.sources_frame, text="영수증 불러오기")
+        self.backup_frame = ttk.Frame(nb, style="Pane.TFrame", padding=(px(22), px(14)))
+        nb.add(self.backup_frame, text="백업·되살리기")
 
-        ttk.Label(f, text="처리할 달").grid(row=0, column=0, sticky="w", pady=3)
+        # [실행] 탭: 기본 정보
+        r = 0
+        ttk.Label(f, text="기본 정보", style="Section.TLabel").grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, px(8)))
+        r += 1
+
+        def field_label(text):
+            ttk.Label(f, text=text, style="Field.TLabel").grid(row=r, column=0, sticky="w", pady=px(5), padx=(0, px(16)))
+
+        field_label("처리할 달")
         months = recent_months(include_current=True)                     # 맨 위가 이번 달
         self.month = tk.StringVar(value=resolve_target_month(None).prefix)  # 처음 선택은 지난달
-        mf = ttk.Frame(f)
-        mf.grid(row=0, column=1, columnspan=2, sticky="w")
-        ttk.Combobox(mf, textvariable=self.month, values=months, width=10, state="readonly").pack(side="left")
-        ttk.Label(mf, foreground="#555", text="  처음에는 지난달이 골라져 있습니다. 맨 위의 이번 달도 고를 수 있습니다.").pack(side="left")
-
-        ttk.Label(f, text="영수증 폴더").grid(row=1, column=0, sticky="w", pady=3)
-        self.folder_summary = ttk.Label(f, text="", foreground="#1a4d8f")
-        self.folder_summary.grid(row=1, column=1, columnspan=2, sticky="w")
-
-        ttk.Label(f, text="기본 도시").grid(row=2, column=0, sticky="w", pady=3)
+        mf = ttk.Frame(f, style="Pane.TFrame")
+        mf.grid(row=r, column=1, columnspan=2, sticky="w")
+        self.month_box = ttk.Combobox(mf, textvariable=self.month, values=months, width=10, state="readonly")
+        self.month_box.pack(side="left")
+        self.month_box.bind("<<ComboboxSelected>>", lambda e: self.on_month_changed())
+        ttk.Label(mf, text="처음에는 지난달 · 맨 위는 이번 달", style="CardMuted.TLabel").pack(side="left", padx=(px(10), 0))
+        r += 1
+        field_label("영수증 폴더")
+        self.folder_summary = ttk.Label(f, text="", style="Value.TLabel")
+        self.folder_summary.grid(row=r, column=1, columnspan=2, sticky="w")
+        r += 1
+        field_label("기본 도시")
         self.city = tk.StringVar(value=self.cfg["기본_도시"])
-        ttk.Entry(f, textvariable=self.city).grid(row=2, column=1, columnspan=2, sticky="ew")
-
-        ttk.Label(f, text="Concur 로그인 이메일").grid(row=3, column=0, sticky="w", pady=3)
-        lf = ttk.Frame(f)
-        lf.grid(row=3, column=1, columnspan=2, sticky="ew")
-        lf.columnconfigure(0, weight=1)
+        ttk.Entry(f, textvariable=self.city).grid(row=r, column=1, columnspan=2, sticky="ew", pady=px(4))
+        r += 1
+        field_label("Concur 로그인 이메일")
         self.login_email = tk.StringVar(value=str(self.cfg.get("로그인_이메일") or ""))
-        ttk.Entry(lf, textvariable=self.login_email).grid(row=0, column=0, sticky="ew")
+        ttk.Entry(f, textvariable=self.login_email).grid(row=r, column=1, sticky="ew", pady=px(4))
         self.auto_login = tk.BooleanVar(value=str(self.cfg.get("로그인_방법", "이메일 링크")).strip() == "이메일 링크")
-        ttk.Checkbutton(lf, text="이메일 링크로 자동 로그인 (Outlook 메일 사용)", variable=self.auto_login).grid(row=0, column=1, padx=(8, 0))
-
+        ttk.Checkbutton(f, text="이메일 링크로 자동 로그인", variable=self.auto_login, style="Card.TCheckbutton").grid(
+            row=r, column=2, sticky="w", padx=(px(12), 0))
+        r += 1
         self.pre = tk.BooleanVar(value=bool(self.cfg.get("영수증_보정_사용", True)))
-        ttk.Checkbutton(f, text="금액·날짜를 못 읽은 영수증은 보정해서 한 번 더 읽기", variable=self.pre).grid(row=4, column=1, sticky="w", pady=(6, 0))
         self.review = tk.BooleanVar(value=bool(self.cfg.get("입력_전_확인", True)))
-        ttk.Checkbutton(f, text="Concur 입력 전에 확인이 필요한 영수증 알려 주기", variable=self.review).grid(row=5, column=1, sticky="w")
+        opts = ttk.Frame(f, style="Pane.TFrame")
+        opts.grid(row=r, column=1, columnspan=2, sticky="w", pady=(px(4), 0))
+        ttk.Checkbutton(opts, text="금액·날짜를 못 읽은 영수증은 보정해서 한 번 더 읽기", variable=self.pre,
+                        style="Card.TCheckbutton").pack(anchor="w")
+        ttk.Checkbutton(opts, text="Concur 입력 전에 확인이 필요한 영수증 알려 주기", variable=self.review,
+                        style="Card.TCheckbutton").pack(anchor="w")
+        r += 1
+        hline(f, tk).grid(row=r, column=0, columnspan=3, sticky="ew", pady=(px(14), px(14)))
+        r += 1
 
-        bf = ttk.Frame(f)
-        bf.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(12, 4))
+        # 실행 버튼
+        act = ttk.Frame(f, style="Pane.TFrame")
+        act.grid(row=r, column=0, columnspan=3, sticky="ew")
+        act.columnconfigure(0, weight=1, uniform="act")
+        act.columnconfigure(1, weight=1, uniform="act")
         self.run_buttons = []
-        for text, mode in (("① 영수증 분석만", "ocr"), ("② 전체 실행", "full"), ("③ 만든 리포트에 입력만", "edit")):
-            b = ttk.Button(bf, text=text, style="Big.TButton", command=lambda m=mode: self.start(m))
-            b.pack(side="left", expand=True, fill="x", padx=3, ipady=8)
+        for col, (text, mode, style, caption) in enumerate((
+                ("① 영수증 분석만", "ocr", "Big.TButton", "사진의 글자만 읽고 영수증 목록(엑셀)을 엽니다. Concur는 열지 않습니다."),
+                ("② 전체 실행", "full", "BigAccent.TButton", "리포트 만들기 → 경비 넣기 → 영수증 첨부·입력 → 저장 (같은 이름의 리포트가 있으면 이어서)"))):
+            b = ttk.Button(act, text=text, style=style, command=lambda m=mode: self.start(m))
+            b.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else px(6), px(6) if col == 0 else 0))
             self.run_buttons.append(b)
-        self.stop_button = ttk.Button(bf, text="중지", command=self.stop, state="disabled")
-        self.stop_button.pack(side="left", padx=3, ipady=8)
+            ttk.Label(act, text=caption, style="CardMuted.TLabel", wraplength=px(390), justify="left").grid(
+                row=1, column=col, sticky="nw", pady=(px(6), 0), padx=(0 if col == 0 else px(6), px(6) if col == 0 else 0))
+        r += 1
 
-        sf = ttk.Frame(f)
-        sf.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(2, 6))
+        tools = ttk.Frame(f, style="Pane.TFrame")
+        tools.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(px(18), 0))
+        ttk.Label(tools, text="바로 가기", style="CardMuted.TLabel").pack(side="left", padx=(0, px(10)))
         for text, cmd in (("영수증 목록 열기", self.open_list), ("병원 목록 편집", self.open_hospitals),
                           ("자동 입력 편집", self.open_category_table),
                           ("결과 폴더 열기", lambda: open_path(self.base / "결과"))):
-            ttk.Button(sf, text=text, command=cmd).pack(side="left", padx=3)
+            ttk.Button(tools, text=text, style="Tool.TButton", command=cmd).pack(side="left", padx=(0, px(6)))
+        r += 1
+        ttk.Label(f, style="CardMuted.TLabel", wraplength=px(800), justify="left", text=(
+            "실행 중에는 열린 Edge 창을 클릭하지 마세요(다른 프로그램은 써도 됩니다). "
+            "영수증 목록(엑셀)에서 고친 내용은 다음 실행에도 그대로 쓰입니다.")).grid(
+            row=r, column=0, columnspan=3, sticky="w", pady=(px(12), 0))
 
-        ttk.Label(f, foreground="#555", wraplength=760, justify="left", text=(
-            "영수증 사진은 [영수증 불러오기] 탭에 넣은 폴더들에서 찾습니다(아이폰·갤럭시·카카오톡·USB 모두 됨). "
-            "파일 이름·형식은 상관없고, 영수증이 아닌 사진은 자동으로 뺍니다.\n"
-            "어느 달 영수증인지는 영수증에 적힌 날짜로 정하므로 늦게 찍어도 됩니다.\n"
-            "처음에는 ①로 OCR 결과를 확인하세요. 영수증 목록(엑셀)에서 고친 내용은 다음 실행에도 그대로 쓰입니다.\n"
-            "②③ 실행 중에는 열린 Edge 창을 클릭하지 마세요. 다른 프로그램은 써도 됩니다. 제출은 직접 하세요."
-        )).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        # 아래: 실행 기록
+        log_card = ttk.Frame(body, style="Card.TFrame", padding=(px(14), px(10), px(14), px(14)))
+        log_card.grid(row=1, column=0, sticky="nsew", pady=(px(14), 0))
+        log_card.columnconfigure(0, weight=1)
+        log_card.rowconfigure(1, weight=1)
+        ttk.Label(log_card, text="실행 기록", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, px(8)))
+        self.status = ttk.Label(log_card, text="● 준비됨", style="Status.TLabel")
+        self.status.grid(row=0, column=1, sticky="e", pady=(0, px(8)))
+        box, self.text = text_box(log_card, tk, ttk, self.theme, height=7)
+        box.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        self.text.configure(state="disabled")
 
-        self.text = scrolledtext.ScrolledText(outer, height=12, state="disabled", font=("Malgun Gothic", 9))
-        self.text.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         self.sources = ReceiptSourcesTab(self, self.sources_frame)
         self.backups = BackupTab(self, self.backup_frame)
+        nb.bind("<<NotebookTabChanged>>", lambda e: self.on_tab_changed())
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self.poll)
@@ -3521,7 +3830,7 @@ class GuiApp:
         if created:
             self.append("처음 실행입니다. 영수증 폴더·기본 도시를 확인하고, [병원 목록 편집]에서 담당 병원을 넣어 주세요.")
             self.append("영수증 사진이 있는 곳은 [영수증 불러오기] 탭에서 넣습니다. 아이폰은 iCloud 사진 폴더, "
-                        "갤럭시는 OneDrive 사진 폴더, 그 밖에는 카카오톡 받은 파일이나 [사진 고르기]로 가져오면 됩니다.")
+                        "갤럭시는 OneDrive 사진 폴더, 그 밖에는 카카오톡 받은 파일이나 [사진 가져오기]로 넣으면 됩니다.")
             self.append("병원 목록에는 영수증에서 확인한 병원(원광대병원, 목포한국병원)만 들어 있습니다. "
                         "영수증에서 새 병원이 보이면 자동으로 더합니다.")
 
@@ -3531,6 +3840,21 @@ class GuiApp:
         self.text.insert("end", line + "\n")
         self.text.see("end")
         self.text.configure(state="disabled")
+
+    def on_tab_changed(self):
+        try:
+            current = self.notebook.nametowidget(self.notebook.select())
+        except Exception:
+            return
+        if current is self.sources_frame:
+            self.sources.auto_count()
+        elif current is self.backup_frame:
+            self.backups.refresh()
+
+    def on_month_changed(self):
+        self.sources.counts = {}
+        self.sources.refresh()
+        self.on_tab_changed()
 
     # ---------- 백업 ----------
     def offer_restore_on_first_run(self):
@@ -3621,18 +3945,15 @@ class GuiApp:
     def set_running(self, running: bool):
         for b in self.run_buttons:
             b.configure(state="disabled" if running else "normal")
-        self.stop_button.configure(state="normal" if running else "disabled")
+        self.status.configure(text="● 실행 중… (끝나면 여기에 알려 드립니다)" if running else "● 준비됨",
+                              foreground=THEME["accent"] if running else THEME["muted"])
 
     def start(self, mode):
         if self.worker and self.worker.is_alive():
             return
         tm = resolve_target_month(self.month.get())
-        note = unfinished_month_note(tm) if is_unfinished_month(tm) else ""
-        if mode == "full" and not self.mb.askokcancel(
-                "전체 실행", f"{self.month.get()} 리포트를 새로 만듭니다.\n이미 만들었다면 ③을 쓰세요."
-                + (f"\n\n{note}" if note else "") + "\n\n계속할까요?"):
-            return
-        if mode == "edit" and note and not self.mb.askokcancel("리포트에 입력", f"{note}\n\n계속할까요?"):
+        if mode == "full" and is_unfinished_month(tm) and not self.mb.askokcancel(
+                "전체 실행", f"{unfinished_month_note(tm)}\n\n계속할까요?"):
             return
         try:
             self.save_form()
@@ -3652,10 +3973,6 @@ class GuiApp:
             ui.log(f"오류: {e}")
         finally:
             self.q.put(("done",))
-
-    def stop(self):
-        self.stop_flag.set()
-        self.append("중지 요청: 지금 처리 중인 경비가 끝나면 멈춥니다.")
 
     def poll(self):
         try:
@@ -3700,76 +4017,66 @@ class GuiApp:
 
 
 PHONE_GUIDE = (
-    "• 아이폰: 위 '이 PC에서 찾은 곳'의 iCloud 사진이나 iCloud Drive 영수증 폴더를 넣으면 찍기만 해도 들어옵니다.\n"
-    "• 갤럭시: 갤러리 앱 → 설정 → 'OneDrive와 동기화'를 켜면 PC의 OneDrive 사진\\Samsung Gallery 폴더로 들어옵니다"
-    "(PC에도 같은 Microsoft 계정으로 OneDrive 로그인).\n"
-    "• 그 밖의 휴대폰: 구글 드라이브 PC 앱 폴더에 올리거나, 카카오톡 '나와의 채팅'으로 보낸 뒤 PC 카카오톡에서 저장하세요"
-    "('카카오톡 받은 파일' 폴더). 카카오톡은 '원본'으로 보내야 글자가 잘 읽힙니다.\n"
-    "• USB 케이블로 옮긴 사진이나 이메일 첨부 사진은 [사진 고르기…]로 가져오면 됩니다. "
-    "같은 영수증을 두 가지 방법으로 넣으면 두 장으로 보일 수 있으니 한 가지 방법만 쓰세요."
+    ("아이폰", "[폴더 추가 ▾]에서 iCloud 사진이나 iCloud Drive 영수증 폴더를 고르면, 찍기만 해도 들어옵니다."),
+    ("갤럭시", "갤러리 앱 → 설정 → 'OneDrive와 동기화'를 켠 뒤, [폴더 추가 ▾]에서 OneDrive 갤럭시 사진을 고르세요."),
+    ("그 밖에", "카카오톡 '나와의 채팅'으로 원본 사진을 보내 PC에서 저장(카카오톡 받은 파일)하거나, "
+              "USB·메일로 받은 사진은 PC에 옮긴 뒤 [사진 가져오기…]로 넣으세요."),
 )
 
 
 class ReceiptSourcesTab:
-    """[영수증 불러오기] 탭: 영수증을 찾을 폴더 여러 곳, 이 PC에서 찾은 곳, 사진 파일 직접 가져오기"""
+    """[영수증 불러오기] 탭: 영수증을 찾을 폴더 여러 곳([폴더 추가 ▾]에 이 PC에서 찾은 곳), 사진 가져오기, 이 달 사진 수(자동)"""
 
     def __init__(self, app, parent):
         tk, ttk = app.tk, app.ttk
+        px = app.px
         self.app, self.tk = app, tk
         cfg, _ = load_settings(app.base / SETTINGS_FILE_NAME)
         self.folders = [str(f) for f in receipt_folders(cfg)]
         self.counts = {}
+        self.counting, self.recount = False, False
         parent.columnconfigure(0, weight=1)
 
-        ttk.Label(parent, foreground="#555", wraplength=820, justify="left", text=(
-            "영수증 사진이 있는 곳을 모두 넣어 두세요. 프로그램이 이 폴더들(하위 폴더 포함)에서 처리할 달 영수증을 찾습니다. "
-            "아이폰이 아니어도 사진이 PC 폴더에 있기만 하면 됩니다. 영수증이 아닌 사진은 자동으로 뺍니다.")
-        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(parent, text="영수증을 찾을 폴더", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(parent, style="CardMuted.TLabel", wraplength=px(820), justify="left", text=(
+            "영수증 사진이 있는 폴더를 모두 넣어 두세요. 하위 폴더까지 찾고, 영수증이 아닌 사진은 자동으로 뺍니다. "
+            "오른쪽 숫자는 처리할 달 영수증일 수 있는 사진 수입니다.")).grid(row=1, column=0, sticky="w", pady=(px(2), px(10)))
 
-        box = ttk.LabelFrame(parent, text=" 영수증을 찾을 폴더 ", padding=8)
-        box.grid(row=1, column=0, sticky="ew")
+        box = ttk.Frame(parent, style="Pane.TFrame")
+        box.grid(row=2, column=0, sticky="ew")
         box.columnconfigure(0, weight=1)
         self.tree = ttk.Treeview(box, columns=("folder", "count"), show="headings", height=5, selectmode="browse")
         self.tree.heading("folder", text="폴더")
         self.tree.heading("count", text="이 달 사진")
-        self.tree.column("folder", width=560, anchor="w")
-        self.tree.column("count", width=120, anchor="w")
+        self.tree.column("folder", width=px(600), anchor="w")
+        self.tree.column("count", width=px(110), anchor="center", stretch=False)
         self.tree.grid(row=0, column=0, sticky="ew")
-        bf = ttk.Frame(box)
-        bf.grid(row=0, column=1, sticky="n", padx=(8, 0))
-        for text, cmd in (("폴더 추가…", self.add_folder_dialog), ("빼기", self.remove_selected),
-                          ("폴더 열기", self.open_selected), ("이 달 사진 세기", self.count_photos)):
-            ttk.Button(bf, text=text, command=cmd, width=14).pack(fill="x", pady=1)
+        sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=sb.set)
 
-        sug = ttk.LabelFrame(parent, text=" 이 PC에서 찾은 곳 (골라서 [추가]) ", padding=8)
-        sug.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        self.suggestions = suggested_receipt_folders()
-        self.sug_box = None
-        if self.suggestions:
-            self.sug_box = ttk.Combobox(sug, state="readonly", width=80,
-                                        values=[f"{label}  —  {path}" for label, path in self.suggestions])
-            self.sug_box.current(0)
-            self.sug_box.pack(side="left", fill="x", expand=True)
-            ttk.Button(sug, text="추가", command=self.add_suggestion).pack(side="left", padx=(6, 0))
-        else:
-            ttk.Label(sug, foreground="#777", text=(
-                "iCloud·OneDrive·구글 드라이브·카카오톡 받은 파일 폴더를 찾지 못했습니다. [폴더 추가…]로 직접 고르세요.")).pack(anchor="w")
+        bf = ttk.Frame(parent, style="Pane.TFrame")
+        bf.grid(row=3, column=0, sticky="ew", pady=(px(10), 0))
+        self.add_button = ttk.Button(bf, text="폴더 추가 ▾", style="Accent.TButton", command=self.show_add_menu)
+        self.add_button.pack(side="left")
+        ttk.Button(bf, text="사진 가져오기…", command=self.import_dialog).pack(side="left", padx=(px(6), 0))
+        ttk.Button(bf, text="폴더 열기", command=self.open_selected).pack(side="left", padx=(px(6), 0))
+        ttk.Button(bf, text="빼기", command=self.remove_selected).pack(side="left", padx=(px(6), 0))
+        self.import_status = ttk.Label(bf, text="", style="AccentText.TLabel")
+        self.import_status.pack(side="left", padx=(px(12), 0))
 
-        imp = ttk.LabelFrame(parent, text=" 사진 직접 가져오기 ", padding=8)
-        imp.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        ttk.Label(imp, wraplength=800, justify="left", text=(
-            "USB로 옮긴 사진, 이메일·메신저로 받은 사진 등 아무 곳의 사진을 골라 프로그램의 '가져온 영수증' 폴더에 복사합니다"
-            "(원본은 그대로). 이 폴더는 자동으로 위 목록에 들어갑니다.")).pack(anchor="w")
-        row = ttk.Frame(imp)
-        row.pack(fill="x", pady=(6, 0))
-        ttk.Button(row, text="사진 고르기…", command=self.import_dialog).pack(side="left")
-        ttk.Button(row, text="가져온 영수증 폴더 열기", command=self.open_imported).pack(side="left", padx=6)
-        self.import_status = ttk.Label(row, text="", foreground="#1a4d8f")
-        self.import_status.pack(side="left", padx=6)
-
-        guide = ttk.LabelFrame(parent, text=" 휴대폰별 안내 ", padding=8)
-        guide.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        ttk.Label(guide, wraplength=820, justify="left", foreground="#444", text=PHONE_GUIDE).pack(anchor="w")
+        hline(parent, tk).grid(row=4, column=0, sticky="ew", pady=(px(14), px(12)))
+        ttk.Label(parent, text="휴대폰별 사진 넣는 방법", style="Section.TLabel").grid(row=5, column=0, sticky="w", pady=(0, px(6)))
+        guide = ttk.Frame(parent, style="Pane.TFrame")
+        guide.grid(row=6, column=0, sticky="ew")
+        guide.columnconfigure(1, weight=1)
+        for i, (phone, how) in enumerate(PHONE_GUIDE):
+            ttk.Label(guide, text=phone, style="Field.TLabel").grid(row=i, column=0, sticky="nw", padx=(0, px(14)), pady=px(2))
+            ttk.Label(guide, text=how, style="Card.TLabel", wraplength=px(700), justify="left").grid(
+                row=i, column=1, sticky="w", pady=px(2))
+        ttk.Label(parent, style="CardMuted.TLabel", wraplength=px(820), justify="left",
+                  text="같은 영수증을 두 가지 방법으로 넣으면 두 장으로 보일 수 있으니 한 가지 방법만 쓰세요.").grid(
+            row=7, column=0, sticky="w", pady=(px(8), 0))
         self.refresh()
 
     # ---------- 목록 ----------
@@ -3784,7 +4091,7 @@ class ReceiptSourcesTab:
             elif _norm_folder(folder) in self.counts:
                 count = f"{self.counts[_norm_folder(folder)]}장"
             else:
-                count = "-"
+                count = "세는 중…" if self.counting else "-"
             self.tree.insert("", "end", iid=str(i), values=(folder, count))
         self.app.update_folder_summary(self.folders)
 
@@ -3801,7 +4108,37 @@ class ReceiptSourcesTab:
         self.folders.append(folder)
         self.save()
         self.refresh()
+        self.auto_count()
         return True
+
+    def add_place(self, label, path):
+        if self.add_folder(path):
+            self.app.append(f"영수증 폴더 추가: {label} ({path})")
+
+    def show_add_menu(self):
+        """[폴더 추가 ▾]: 이 PC에서 찾은 곳(iCloud·OneDrive 갤럭시 사진·구글 드라이브·카카오톡·다운로드) + 직접 고르기"""
+        tk, c = self.tk, THEME
+        menu = tk.Menu(self.add_button, tearoff=0, bg=c["card"], fg=c["text"], activebackground=c["accent_soft"],
+                       activeforeground=c["text"], disabledforeground="#a3abb5", relief="flat", borderwidth=1,
+                       font=self.app.font(10))
+        added = {_norm_folder(f) for f in self.folders}
+        places = suggested_receipt_folders()
+        for label, path in places:
+            if _norm_folder(path) in added:
+                menu.add_command(label=f"✓  {label}  (이미 있음)", state="disabled")
+            else:
+                shown = str(path) if len(str(path)) <= 48 else "…" + str(path)[-47:]
+                menu.add_command(label=f"{label}   —   {shown}", command=lambda l=label, p=path: self.add_place(l, p))
+        if places:
+            menu.add_separator()
+        menu.add_command(label="다른 폴더 직접 고르기…", command=self.add_folder_dialog)
+        self.add_menu = menu
+        x, y = self.add_button.winfo_rootx(), self.add_button.winfo_rooty() + self.add_button.winfo_height()
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+        return menu
 
     def add_folder_dialog(self):
         start = self.folders[0] if self.folders and Path(self.folders[0]).is_dir() else str(Path.home())
@@ -3811,16 +4148,6 @@ class ReceiptSourcesTab:
                 self.app.append(f"영수증 폴더 추가: {Path(d)}")
             else:
                 self.app.mb.showinfo("폴더 추가", "이미 목록에 있는 폴더입니다.")
-
-    def add_suggestion(self):
-        i = self.sug_box.current() if self.sug_box is not None else -1
-        if i < 0:
-            return
-        label, path = self.suggestions[i]
-        if self.add_folder(path):
-            self.app.append(f"영수증 폴더 추가: {label} ({path})")
-        else:
-            self.app.mb.showinfo("폴더 추가", "이미 목록에 있는 폴더입니다.")
 
     def selected(self):
         sel = self.tree.selection()
@@ -3845,16 +4172,29 @@ class ReceiptSourcesTab:
             return
         open_path(Path(self.folders[i]))
 
-    def open_imported(self):
-        self.imported_folder().mkdir(parents=True, exist_ok=True)
-        open_path(self.imported_folder())
+    # ---------- 이 달 사진 세기(탭을 열 때·폴더를 바꿀 때 자동) ----------
+    def visible(self) -> bool:
+        try:
+            return self.app.notebook.nametowidget(self.app.notebook.select()) is self.app.sources_frame
+        except Exception:
+            return False
 
-    # ---------- 이 달 사진 세기 ----------
-    def count_photos(self, wait=False):
+    def auto_count(self):
+        if not self.visible():
+            return
+        if self.counting:
+            self.recount = True
+            return
+        self.count_photos(quiet=True)
+
+    def count_photos(self, wait=False, quiet=False):
         tm = resolve_target_month(self.app.month.get())
         cfg, _ = load_settings(self.app.base / SETTINGS_FILE_NAME)
         set_receipt_folders(cfg, self.folders)
-        self.app.append(f"{tm.prefix} 영수증일 수 있는 사진을 세는 중… (사진이 많으면 조금 걸립니다)")
+        self.counting = True
+        self.refresh()
+        if not quiet:
+            self.app.append(f"{tm.prefix} 영수증일 수 있는 사진을 세는 중… (사진이 많으면 조금 걸립니다)")
 
         def work():
             try:
@@ -3866,9 +4206,9 @@ class ReceiptSourcesTab:
                     _save_json(cache_path, cache)
                 except OSError:
                     pass
-                self.app.q.put(("call", lambda: self.show_counts(tm, counts)))
+                self.app.q.put(("call", lambda: self.show_counts(tm, counts, quiet)))
             except Exception as e:
-                self.app.q.put(("log", f"사진 세기 실패: {e}"))
+                self.app.q.put(("call", lambda: self.count_failed(e)))
 
         t = threading.Thread(target=work, daemon=True)
         t.start()
@@ -3876,14 +4216,25 @@ class ReceiptSourcesTab:
             t.join()
         return t
 
-    def show_counts(self, tm, counts):
-        start, end = photo_window(load_settings(self.app.base / SETTINGS_FILE_NAME)[0], tm)
-        self.app.append(f"{tm.prefix} 영수증일 수 있는 사진({start:%m/%d} ~ {end - timedelta(days=1):%m/%d} 촬영):")
+    def count_failed(self, e):
+        self.counting = False
+        self.refresh()
+        self.app.append(f"사진 세기 실패: {e}")
+
+    def show_counts(self, tm, counts, quiet=False):
+        self.counting = False
+        if not quiet:
+            start, end = photo_window(load_settings(self.app.base / SETTINGS_FILE_NAME)[0], tm)
+            self.app.append(f"{tm.prefix} 영수증일 수 있는 사진({start:%m/%d} ~ {end - timedelta(days=1):%m/%d} 촬영):")
         for folder, n in counts:
             if n is not None:
                 self.counts[_norm_folder(folder)] = n
-            self.app.append(f"   {folder}: " + ("폴더 없음" if n is None else f"{n}장"))
+            if not quiet:
+                self.app.append(f"   {folder}: " + ("폴더 없음" if n is None else f"{n}장"))
         self.refresh()
+        if self.recount:
+            self.recount = False
+            self.auto_count()
 
     # ---------- 사진 가져오기 ----------
     def import_dialog(self):
@@ -3905,6 +4256,9 @@ class ReceiptSourcesTab:
         msg = ", ".join(parts)
         self.import_status.configure(text=msg)
         self.app.append(f"사진 가져오기: {msg} → {dest}")
+        self.counts.pop(_norm_folder(dest), None)
+        self.refresh()
+        self.auto_count()
         return result
 
 
@@ -3913,45 +4267,45 @@ class BackupTab:
 
     def __init__(self, app, parent):
         tk, ttk = app.tk, app.ttk
+        px = app.px
         self.app = app
         self.items = []
         parent.columnconfigure(0, weight=1)
-        ttk.Label(parent, foreground="#555", wraplength=820, justify="left", text=(
-            "자동 입력 규칙(자동 입력 편집에서 만든 것), 병원 목록, 설정, 영수증 목록을 파일 하나(zip)로 묶어 둡니다.\n"
-            "• 자동 백업: 프로그램을 켤 때·끌 때·자동 입력을 저장할 때, 바뀐 것이 있으면 아래 백업 폴더에 저장합니다(최근 20개).\n"
-            "• 새 판으로 바꿀 때: 같은 폴더에 프로그램 파일만 바꾸면 규칙이 그대로 쓰입니다. "
-            "새 폴더에 두었다면 처음 켤 때 최근 백업을 되살릴지 물어봅니다.\n"
-            "• 되살리기 전 상태도 자동으로 백업하므로, 잘못 되살렸으면 바로 위의 '되살리기 전' 백업을 다시 되살리면 됩니다.")
-        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(parent, text="백업·되살리기", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(parent, style="CardMuted.TLabel", wraplength=px(820), justify="left", text=(
+            "자동 입력 규칙·병원 목록·설정·영수증 목록을 파일 하나(zip)로 묶어 둡니다. 켤 때·끌 때·자동 입력을 저장할 때 "
+            "바뀐 것이 있으면 자동으로 백업합니다(최근 20개). 새 판을 같은 폴더에 덮어쓰면 그대로 쓰이고, 새 폴더에 두면 "
+            "처음 켤 때 되살릴지 물어봅니다. 되살리기 전 상태도 자동으로 백업하므로 언제든 되돌릴 수 있습니다.")
+        ).grid(row=1, column=0, sticky="w", pady=(px(2), px(10)))
 
-        folder_row = ttk.Frame(parent)
-        folder_row.grid(row=1, column=0, sticky="ew")
-        ttk.Label(folder_row, text="백업 폴더:").pack(side="left")
-        self.folder_label = ttk.Label(folder_row, text="", foreground="#1a4d8f")
-        self.folder_label.pack(side="left", padx=6)
-        ttk.Button(folder_row, text="폴더 열기", command=self.open_folder).pack(side="right")
+        folder_row = ttk.Frame(parent, style="Pane.TFrame")
+        folder_row.grid(row=2, column=0, sticky="ew", pady=(0, px(8)))
+        ttk.Label(folder_row, text="백업 폴더", style="Field.TLabel").pack(side="left")
+        self.folder_label = ttk.Label(folder_row, text="", style="Card.TLabel")
+        self.folder_label.pack(side="left", padx=(px(10), 0))
+        ttk.Button(folder_row, text="폴더 열기", style="Tool.TButton", command=self.open_folder).pack(side="right")
 
-        box = ttk.Frame(parent)
-        box.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        box = ttk.Frame(parent, style="Pane.TFrame")
+        box.grid(row=3, column=0, sticky="ew")
         box.columnconfigure(0, weight=1)
-        self.tree = ttk.Treeview(box, columns=("when", "kind", "version", "files"), show="headings", height=9,
+        self.tree = ttk.Treeview(box, columns=("when", "kind", "version", "files"), show="headings", height=7,
                                  selectmode="browse")
-        for col, text, width in (("when", "만든 시각", 140), ("kind", "종류", 260), ("version", "프로그램 판", 260),
-                                 ("files", "파일 수", 70)):
+        for col, text, width, anchor in (("when", "만든 시각", 150, "w"), ("kind", "종류", 220, "w"),
+                                         ("version", "프로그램 판", 280, "w"), ("files", "파일 수", 80, "center")):
             self.tree.heading(col, text=text)
-            self.tree.column(col, width=width, anchor="w")
+            self.tree.column(col, width=px(width), anchor=anchor)
         self.tree.grid(row=0, column=0, sticky="ew")
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=sb.set)
 
-        bf = ttk.Frame(parent)
-        bf.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        for text, cmd in (("지금 백업하기", self.backup_now), ("고른 백업 되살리기", self.restore_selected),
-                          ("다른 백업 파일에서 되살리기…", self.restore_from_file), ("새로 고침", self.refresh)):
-            ttk.Button(bf, text=text, command=cmd).pack(side="left", padx=3)
-        self.status = ttk.Label(parent, text="", foreground="#1a4d8f", wraplength=820, justify="left")
-        self.status.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        bf = ttk.Frame(parent, style="Pane.TFrame")
+        bf.grid(row=4, column=0, sticky="ew", pady=(px(10), 0))
+        ttk.Button(bf, text="지금 백업하기", style="Accent.TButton", command=self.backup_now).pack(side="left")
+        ttk.Button(bf, text="고른 백업 되살리기", command=self.restore_selected).pack(side="left", padx=(px(6), 0))
+        ttk.Button(bf, text="다른 백업 파일에서 되살리기…", command=self.restore_from_file).pack(side="left", padx=(px(6), 0))
+        self.status = ttk.Label(parent, text="", style="AccentText.TLabel", wraplength=px(820), justify="left")
+        self.status.grid(row=5, column=0, sticky="w", pady=(px(10), 0))
         self.refresh()
 
     def folder(self) -> Path:
@@ -3976,7 +4330,7 @@ class BackupTab:
         except Exception as e:
             self.app.mb.showerror("백업", str(e))
             return None
-        self.status.configure(text=f"백업했습니다: {path}")
+        self.status.configure(text=f"백업했습니다: {path.name}")
         self.app.append(f"백업했습니다: {path}")
         self.refresh()
         return path
@@ -4049,62 +4403,72 @@ class CategoryEditor:
         self.city_choices = [CITY_FROM_RECEIPT] + sorted((c for c in cities if c), key=str.lower)
         self.current, self.visible, self.dirty, self.loading = None, [], False, False
 
+        px, font, c = app.px, app.font, THEME
         win = self.win = tk.Toplevel(app.root)
         win.title("자동 입력 편집")
-        win.geometry("1060x650")
-        win.minsize(900, 560)
+        win.configure(bg=c["bg"])
+        width = min(px(1080), app.root.winfo_screenwidth() - px(40))
+        height = min(px(680), app.root.winfo_screenheight() - px(90))
+        win.geometry(f"{width}x{height}")
+        win.minsize(min(px(900), width), min(px(560), height))
         win.transient(app.root)
         win.protocol("WM_DELETE_WINDOW", self.close)
-        outer = ttk.Frame(win, padding=12)
+        outer = ttk.Frame(win, padding=(px(16), px(14)))
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(1, weight=1)
         outer.rowconfigure(1, weight=1)
 
-        ttk.Label(outer, foreground="#555", wraplength=960, justify="left", text=(
+        ttk.Label(outer, foreground=c["muted"], font=font(9), wraplength=px(1020), justify="left", text=(
             "왼쪽에서 항목을 고르고 오른쪽에 적으면 됩니다. 항목 이름은 한글로 마음대로 적고, 그 아래 칸들은 Concur 경비 화면에 "
             "위에서 아래 순서대로 들어갑니다. ● = 설정됨(영수증에 맞춰짐), ○ = 아직 안 함. "
             "'영수증에서 찾을 글자'가 비어 있는 항목은 영수증에 맞춰지지 않으니, 실제로 쓰는 항목만 채우세요. "
-            "위에 있는 항목이 먼저 맞춰집니다(▲▼로 순서 바꿈).")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            "위에 있는 항목이 먼저 맞춰집니다(▲▼로 순서 바꿈).")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, px(10)))
 
-        # 왼쪽: 목록
-        left = ttk.Frame(outer)
-        left.grid(row=1, column=0, sticky="nsw", padx=(0, 12))
+        # 왼쪽: 목록 카드
+        left = ttk.Frame(outer, style="Card.TFrame", padding=px(12))
+        left.grid(row=1, column=0, sticky="nsw", padx=(0, px(12)))
         left.rowconfigure(2, weight=1)
-        sf = ttk.Frame(left)
+        sf = ttk.Frame(left, style="Pane.TFrame")
         sf.grid(row=0, column=0, columnspan=2, sticky="ew")
-        ttk.Label(sf, text="찾기").pack(side="left")
+        ttk.Label(sf, text="찾기", style="Field.TLabel").pack(side="left")
         self.filter = tk.StringVar()
         fe = ttk.Entry(sf, textvariable=self.filter, width=22)
-        fe.pack(side="left", padx=4)
+        fe.pack(side="left", padx=(px(8), 0), fill="x", expand=True)
         fe.bind("<KeyRelease>", lambda e: self.refresh_list())
         self.only_on = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="설정한 항목만 보기", variable=self.only_on,
-                        command=self.refresh_list).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
-        self.listbox = tk.Listbox(left, width=34, height=22, exportselection=False, font=("Malgun Gothic", 10))
-        self.listbox.grid(row=2, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
-        sb.grid(row=2, column=1, sticky="ns")
+        ttk.Checkbutton(left, text="설정한 항목만 보기", variable=self.only_on, style="Card.TCheckbutton",
+                        command=self.refresh_list).grid(row=1, column=0, columnspan=2, sticky="w", pady=px(6))
+        lb_frame = tk.Frame(left, bg=c["card"], highlightthickness=1, highlightbackground=c["border"],
+                            highlightcolor=c["border"])
+        lb_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        self.listbox = tk.Listbox(lb_frame, width=30, height=18, exportselection=False, font=font(10), relief="flat",
+                                  borderwidth=0, highlightthickness=0, bg=c["card"], fg=c["text"], activestyle="none",
+                                  selectbackground=c["accent_soft"], selectforeground=c["text"])
+        sb = ttk.Scrollbar(lb_frame, orient="vertical", command=self.listbox.yview)
+        sb.pack(side="right", fill="y")
+        self.listbox.pack(side="left", fill="both", expand=True, padx=(px(4), 0), pady=px(4))
         self.listbox.configure(yscrollcommand=sb.set)
         self.listbox.bind("<<ListboxSelect>>", lambda e: self.on_select())
-        bf = ttk.Frame(left)
-        bf.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        bf = ttk.Frame(left, style="Pane.TFrame")
+        bf.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(px(8), 0))
         for text, cmd in (("새 항목", self.add), ("삭제", self.remove), ("▲ 위로", lambda: self.move(-1)),
                           ("▼ 아래로", lambda: self.move(1))):
-            ttk.Button(bf, text=text, command=cmd).pack(side="left", padx=2)
+            ttk.Button(bf, text=text, style="Tool.TButton", command=cmd).pack(side="left", padx=(0, px(4)))
 
-        # 오른쪽: 입력 칸 (항목 이름·찾을 글자, 그다음 Concur 경비 화면 위에서 아래 순서)
-        right = ttk.Frame(outer)
+        # 오른쪽: 입력 칸 카드 (항목 이름·찾을 글자, 그다음 Concur 경비 화면 위에서 아래 순서)
+        right = ttk.Frame(outer, style="Card.TFrame", padding=(px(18), px(12)))
         right.grid(row=1, column=1, sticky="nsew")
         right.columnconfigure(1, weight=1)
         self.vars = {}
-        hint_style = {"foreground": "#777", "wraplength": 470, "justify": "left"}
+        hint_style = {"style": "CardMuted.TLabel", "wraplength": px(430), "justify": "left"}
         r = 0
 
-        def label(text, row, top=5):
-            ttk.Label(right, text=text).grid(row=row, column=0, sticky="w", pady=(top, 0), padx=(0, 10))
+        def label(text, row, top=7):
+            ttk.Label(right, text=text, style="Field.TLabel").grid(row=row, column=0, sticky="w", pady=(px(top), 0),
+                                                                  padx=(0, px(14)))
 
         def hint(text, row):
-            ttk.Label(right, text=text, **hint_style).grid(row=row, column=1, sticky="w")
+            ttk.Label(right, text=text, **hint_style).grid(row=row, column=1, sticky="w", pady=(px(2), 0))
 
         def entry(key, text, hint_text="", combo=None, readonly=False):
             nonlocal r
@@ -4115,7 +4479,7 @@ class CategoryEditor:
             else:
                 w = ttk.Combobox(right, textvariable=var, values=combo, state="readonly" if readonly else "normal")
                 w.bind("<<ComboboxSelected>>", lambda e: self.on_edit())
-            w.grid(row=r, column=1, sticky="ew", pady=(5, 0))
+            w.grid(row=r, column=1, sticky="ew", pady=(px(7), 0))
             w.bind("<KeyRelease>", lambda e: self.on_edit())
             r += 1
             if hint_text:
@@ -4125,9 +4489,9 @@ class CategoryEditor:
 
         self.name_entry = entry("name", "항목 이름", "한글로 알아보기 쉬운 이름 (예: 톨게이트, 택시, 주유)")
         entry("keywords", "영수증에서 찾을 글자", "영수증에 이 글자가 있으면 이 항목 (쉼표로 여러 개)")
-        ttk.Separator(right).grid(row=r, column=0, columnspan=2, sticky="ew", pady=(10, 2))
+        hline(right, tk).grid(row=r, column=0, columnspan=2, sticky="ew", pady=(px(14), px(8)))
         r += 1
-        ttk.Label(right, text="Concur 경비 화면에 넣을 값 (화면 위에서 아래 순서대로 입력)", foreground="#1a4d8f").grid(
+        ttk.Label(right, text="Concur 경비 화면에 넣을 값 (화면 위에서 아래 순서대로 입력)", style="AccentText.TLabel").grid(
             row=r, column=0, columnspan=2, sticky="w")
         r += 1
         self.etype_box = entry("etype", "Expense Type", "Concur에 Undefined일 때 고름 (비우면 그대로 두고 '확인 필요')",
@@ -4138,20 +4502,20 @@ class CategoryEditor:
         entry("receipt", "Receipt Status", combo=RECEIPT_CHOICES)
         label("Personal Expense", r)
         self.personal = tk.BooleanVar(value=False)
-        ttk.Checkbutton(right, text="체크하기 (개인 경비로 처리할 항목만)",
-                        variable=self.personal, command=self.on_edit).grid(row=r, column=1, sticky="w", pady=(5, 0))
+        ttk.Checkbutton(right, text="체크하기 (개인 경비로 처리할 항목만)", style="Card.TCheckbutton",
+                        variable=self.personal, command=self.on_edit).grid(row=r, column=1, sticky="w", pady=(px(7), 0))
         r += 1
         entry("comment", "Comment", "{hospital} 자리에 병원 영문명 (병원을 못 찾으면 ' in {hospital}'은 빠짐)")
 
-        self.status = ttk.Label(right, text="", foreground="#b05000", wraplength=470, justify="left")
-        self.status.grid(row=r, column=1, sticky="w", pady=(10, 0))
+        self.status = ttk.Label(right, text="", style="Warn.TLabel", wraplength=px(430), justify="left")
+        self.status.grid(row=r, column=1, sticky="w", pady=(px(12), 0))
 
         # 아래: 저장
         bottom = ttk.Frame(outer)
-        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        ttk.Button(bottom, text="닫기", command=self.close).pack(side="right", padx=3)
-        ttk.Button(bottom, text="엑셀로 열기", command=self.open_excel).pack(side="right", padx=3)
-        ttk.Button(bottom, text="저장", style="Big.TButton", command=self.save).pack(side="right", padx=3)
+        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(px(12), 0))
+        ttk.Button(bottom, text="닫기", command=self.close).pack(side="right", padx=(px(6), 0))
+        ttk.Button(bottom, text="엑셀로 열기", command=self.open_excel).pack(side="right", padx=(px(6), 0))
+        ttk.Button(bottom, text="저장", style="Accent.TButton", command=self.save).pack(side="right")
 
         self.refresh_list()
         first = next((i for i, row in enumerate(self.visible) if self.rows[row][1].strip()), 0 if self.visible else None)
