@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""자동 입력 편집 창: 읽기·저장·미리보기·확인할 것, 그리고 (창을 띄울 수 있으면) 실제 창"""
+"""자동 입력 편집 창: 읽기·저장·확인할 것, 그리고 (창을 띄울 수 있으면) 실제 창"""
 
 import os
 
@@ -24,21 +24,6 @@ def test_load_and_save_rows(tmp_path):
     assert cfg["항목_추가_입력"]["Taxi"] == {"도시": "Mokpo, KOREA, REPUBLIC OF", "LCRT": "NA",
                                          "Receipt Status": "Receipt", "Personal Expense": True}
     assert cfg["항목_추가_입력"]["주차"] == {"도시": "", "LCRT": "", "Receipt Status": "", "Personal Expense": False}
-
-
-def test_preview():
-    text = ca.category_preview(["톨게이트", "통행료", "Toll fee for service in {hospital}", "For service", "Parking & Toll"])
-    lines = [l.strip() for l in text.splitlines()]
-    assert lines[1:] == ["Expense Type: Parking & Toll  (Concur에 Undefined일 때만)",       # Concur 화면 위에서 아래 순서
-                         "Business Purpose: For service",
-                         "City: 영수증 주소의 도시 (못 찾으면 Gwangju (ex Kwangju))",
-                         "LCRT: NA",
-                         "Receipt Status: Receipt  (영수증을 붙일 때)",
-                         "Personal Expense: 체크 안 함",
-                         "Comment: Toll fee for service in Chosun University Hospital",
-                         "병원을 못 찾으면: Toll fee for service"]                       # 병원을 못 찾으면 ' in …' 뺌
-    empty = ca.category_preview(["주유", "", "Fuel", ""])
-    assert "Business Purpose: (비어 있음)" in empty and "Expense Type: (비어 있음" in empty
 
 
 def test_problems():
@@ -79,7 +64,6 @@ def test_editor_window(tmp_path):
         ed.vars["purpose"].set("For service")
         ed.on_edit()
         assert ed.listbox.get(3).startswith("● Taxi") and ed.dirty
-        assert "Taxi fee for service in Chosun University Hospital" in ed.preview.cget("text")
         ed.move(-1)                                                  # Taxi를 주차 위로
         assert [r[0] for r in ed.rows][:4] == ["식대", "카페", "Taxi", "주차"]
         ed.only_on.set(True)
@@ -142,10 +126,8 @@ def test_korean_name_and_concur_expense_type(tmp_path):
         ed.vars["comment"].set("Taxi fee for service in {hospital}")
         ed.vars["purpose"].set("For service")
         ed.on_edit()
-        assert "Expense Type: (비어 있음" in ed.preview.cget("text")
         ed.vars["etype"].set("Taxi")
         etype_box.event_generate("<<ComboboxSelected>>")
-        assert "Expense Type: Taxi" in ed.preview.cget("text")
         assert ed.listbox.get(ed.visible.index(ed.current)) == "● 택시   → Taxi"
         assert ed.save()
         rows = ca.load_category_rows(tmp_path / ca.CATEGORY_FILE_NAME, cfg)

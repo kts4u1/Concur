@@ -173,8 +173,10 @@ def test_editor_fields_in_concur_order(tmp_path):
                   if w.winfo_class() == "TLabel"]
         assert labels == ["항목 이름", "영수증에서 찾을 글자", "Concur 경비 화면에 넣을 값 (화면 위에서 아래 순서대로 입력)",
                           "Expense Type", "Business Purpose", "City", "LCRT", "Receipt Status", "Personal Expense",
-                          "Comment", "미리보기"]
-        assert not any("어느 항목에도 안 맞을 때" in t for t in all_texts(ed.win))      # 아래 기본 Expense Type 칸은 없앰
+                          "Comment"]
+        texts = all_texts(ed.win)
+        assert not any("어느 항목에도 안 맞을 때" in t for t in texts)      # 아래 기본 Expense Type 칸은 없앰
+        assert not any("미리보기" in t or "병원 예:" in t for t in texts) and not hasattr(ed, "preview")   # 미리보기도 없앰
 
         ed.select_visible([ed.rows[i][0] for i in ed.visible].index("주차"))
         assert ed.vars["city"].get() == ca.CITY_FROM_RECEIPT and ed.vars["lcrt"].get() == "NA"
@@ -183,9 +185,6 @@ def test_editor_fields_in_concur_order(tmp_path):
         ed.city_box.event_generate("<<ComboboxSelected>>")
         ed.personal.set(True)
         ed.on_edit()
-        text = ed.preview.cget("text")
-        assert "City: Mokpo, KOREA, REPUBLIC OF" in text and "Personal Expense: 체크" in text
-        assert text.index("Expense Type") < text.index("Business Purpose") < text.index("City") < text.index("Comment")
         assert ed.save()
         parking = next(r for r in ca.load_category_rows(tmp_path / ca.CATEGORY_FILE_NAME, cfg) if r[0] == "주차")
         assert parking[ca.C_CITY:] == ["Mokpo, KOREA, REPUBLIC OF", "NA", "Receipt", "O"]

@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-14 자동 입력 항목 늘림·Concur 순서대로"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-14 편집 창 미리보기 없앰"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -983,33 +983,6 @@ def load_category_rows(path: Path, cfg: dict) -> list:
 
 def save_category_rows(path: Path, rows: list):
     write_csv(path, CATEGORY_HEADER, [_category_row(r) for r in rows if str(r[C_NAME]).strip()])
-
-
-def category_preview(row, default_city: str = "Gwangju (ex Kwangju), KOREA, REPUBLIC OF",
-                     hospital: str = "Chosun University Hospital") -> str:
-    """편집 창 미리보기: Concur 경비 화면 위에서 아래 순서로 실제로 들어갈 값"""
-    row = _category_row(row)
-    cfg = {"입력_문구": {"x": {k: v for k, v in (("Comment", row[C_COMMENT]), ("Business Purpose", row[C_PURPOSE])) if v}}}
-    rec = Receipt(original=Path("x"), ocr_file=Path("x"), category="x", hospital_en=hospital)
-    found = texts_for(rec, cfg)
-    rec.hospital_en = ""
-    missing = texts_for(rec, cfg)
-    extra = item_extras(row)
-
-    def text(name):
-        a, b = found.get(name, "(비어 있음)"), missing.get(name, "(비어 있음)")
-        return a if a == b else f"{a}\n         병원을 못 찾으면: {b}"
-
-    etype = f"{row[C_TYPE]}  (Concur에 Undefined일 때만)" if row[C_TYPE] else "(비어 있음: Concur에 Undefined면 그대로 두고 '확인 필요')"
-    city = extra["도시"] or f"영수증 주소의 도시 (못 찾으면 {city_name(default_city)})"
-    return (f"병원 예: {hospital}\n"
-            f"   Expense Type: {etype}\n"
-            f"   Business Purpose: {text('Business Purpose')}\n"
-            f"   City: {city}\n"
-            f"   LCRT: {extra['LCRT'] or 'NA'}\n"
-            f"   Receipt Status: {extra['Receipt Status'] or 'Receipt'}  (영수증을 붙일 때)\n"
-            f"   Personal Expense: {'체크' if extra['Personal Expense'] else '체크 안 함'}\n"
-            f"   Comment: {text('Comment')}")
 
 
 def category_problems(rows: list) -> list:
@@ -4105,8 +4078,8 @@ class CategoryEditor:
 
         win = self.win = tk.Toplevel(app.root)
         win.title("자동 입력 편집")
-        win.geometry("1060x780")
-        win.minsize(900, 600)
+        win.geometry("1060x650")
+        win.minsize(900, 560)
         win.transient(app.root)
         win.protocol("WM_DELETE_WINDOW", self.close)
         outer = ttk.Frame(win, padding=12)
@@ -4197,12 +4170,8 @@ class CategoryEditor:
         r += 1
         entry("comment", "Comment", "{hospital} 자리에 병원 영문명 (병원을 못 찾으면 ' in {hospital}'은 빠짐)")
 
-        ttk.Label(right, text="미리보기").grid(row=r, column=0, sticky="nw", pady=(10, 0))
-        self.preview = ttk.Label(right, text="", justify="left", wraplength=470, foreground="#1a4d8f")
-        self.preview.grid(row=r, column=1, sticky="w", pady=(10, 0))
-        r += 1
         self.status = ttk.Label(right, text="", foreground="#b05000", wraplength=470, justify="left")
-        self.status.grid(row=r, column=1, sticky="w", pady=(6, 0))
+        self.status.grid(row=r, column=1, sticky="w", pady=(10, 0))
 
         # 아래: 저장
         bottom = ttk.Frame(outer)
@@ -4256,7 +4225,7 @@ class CategoryEditor:
             self.vars["receipt"].set(RECEIPT_CHOICES[0])
         self.personal.set(item_extras(row)["Personal Expense"])
         self.loading = False
-        self.update_preview()
+        self.update_status()
 
     # ---------- 입력 ----------
     def on_edit(self):
@@ -4274,14 +4243,13 @@ class CategoryEditor:
             self.listbox.delete(pos)
             self.listbox.insert(pos, self.label(row))
             self.listbox.selection_set(pos)
-        self.update_preview()
+        self.update_status()
 
-    def update_preview(self):
+    def update_status(self):
         if self.current is None:
-            self.preview.configure(text="")
+            self.status.configure(text="")
             return
         row = self.rows[self.current]
-        self.preview.configure(text=category_preview(row, self.default_city))
         self.status.configure(text="" if row[1].strip() else
                               "아직 '영수증에서 찾을 글자'가 비어 있어 이 항목은 영수증에 맞춰지지 않습니다.")
 
@@ -4331,7 +4299,7 @@ class CategoryEditor:
         else:
             for v in self.vars.values():
                 v.set("")
-            self.preview.configure(text="")
+            self.status.configure(text="")
 
     def move(self, delta: int):
         i = self.current
