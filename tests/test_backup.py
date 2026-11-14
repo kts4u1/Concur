@@ -17,9 +17,9 @@ def make_base(base: Path, city="Gwangju (ex Kwangju), KOREA, REPUBLIC OF", rule=
     cfg = ca.default_settings()
     cfg["기본_도시"] = city
     ca.save_settings(base / ca.SETTINGS_FILE_NAME, cfg)
-    rows, default_type = ca.load_category_rows(base / ca.CATEGORY_FILE_NAME, cfg)
+    rows = ca.load_category_rows(base / ca.CATEGORY_FILE_NAME, cfg)
     rows.append([rule, "통행료, 톨게이트", "Toll fee for service in {hospital}", "For service", "Parking & Toll", ""])
-    ca.save_category_rows(base / ca.CATEGORY_FILE_NAME, rows, default_type)
+    ca.save_category_rows(base / ca.CATEGORY_FILE_NAME, rows)
     (base / ca.HOSPITAL_FILE_NAME).write_text("찾을 글자,영문 이름\n원광대,Wonkwang University Hospital\n", encoding="utf-8-sig")
     (base / "결과").mkdir(exist_ok=True)
     (base / "결과" / "영수증목록_2026-11.csv").write_text("파일,금액\nIMG_0001.JPG,3000\n", encoding="utf-8-sig")
@@ -44,7 +44,7 @@ def test_backup_and_restore_into_new_folder(tmp_path):
     assert sorted(names) == sorted(info["파일"])
     for name in names:
         assert (new / name).read_bytes() == (old / name).read_bytes()
-    rows, _ = ca.load_category_rows(new / ca.CATEGORY_FILE_NAME, ca.default_settings())
+    rows = ca.load_category_rows(new / ca.CATEGORY_FILE_NAME, ca.default_settings())
     assert "톨게이트" in [r[0] for r in rows]                               # 만든 규칙이 새 프로그램에 그대로
     assert not (new / "실행기록").exists() and not (new / "결과" / "화면.png").exists()
 
@@ -71,18 +71,18 @@ def test_restore_keeps_undo_backup(tmp_path):
     base = make_base(tmp_path / "app", rule="톨게이트")
     folder = tmp_path / "백업"
     ca.make_backup(base, folder / "직접백업_old.zip", "직접 백업")
-    rows, d = ca.load_category_rows(base / ca.CATEGORY_FILE_NAME, ca.default_settings())
+    rows = ca.load_category_rows(base / ca.CATEGORY_FILE_NAME, ca.default_settings())
     rows.append(["택시", "택시", "Taxi fee", "For service", "Taxi", ""])
-    ca.save_category_rows(base / ca.CATEGORY_FILE_NAME, rows, d)        # 그 뒤에 규칙을 더 만듦
+    ca.save_category_rows(base / ca.CATEGORY_FILE_NAME, rows)        # 그 뒤에 규칙을 더 만듦
 
     ca.restore_backup(folder / "직접백업_old.zip", base, folder)
-    names = [r[0] for r in ca.load_category_rows(base / ca.CATEGORY_FILE_NAME, ca.default_settings())[0]]
+    names = [r[0] for r in ca.load_category_rows(base / ca.CATEGORY_FILE_NAME, ca.default_settings())]
     assert "택시" not in names                                             # 예전 상태로
     undo, info = ca.list_backups(folder)[0]
     assert info["메모"] == "되살리기 전"
     assert ca.backup_label(undo, info)[1] == "자동 (되살리기 전)"
     ca.restore_backup(undo, base, folder)                                 # 되돌리기
-    names = [r[0] for r in ca.load_category_rows(base / ca.CATEGORY_FILE_NAME, ca.default_settings())[0]]
+    names = [r[0] for r in ca.load_category_rows(base / ca.CATEGORY_FILE_NAME, ca.default_settings())]
     assert "택시" in names
 
 
@@ -161,7 +161,7 @@ def test_new_folder_offers_restore_and_backup_tab(tmp_path, backup_folder, monke
         ed.close()
         assert tab.restore(manual, ask=False)
         assert app.city.get() == "Iksan, KOREA, REPUBLIC OF"              # 창에도 바로 반영
-        rows, _ = ca.load_category_rows(new / ca.CATEGORY_FILE_NAME, ca.default_settings())
+        rows = ca.load_category_rows(new / ca.CATEGORY_FILE_NAME, ca.default_settings())
         assert next(r for r in rows if r[0] == "톨게이트")[1] == "통행료, 톨게이트"
         app.on_close()                                                    # 끌 때도 자동 백업(바뀐 게 있으면)
     except Exception:

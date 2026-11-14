@@ -15,7 +15,7 @@
 4. 이 프로그램 전용 Edge 창을 열어 Concur에서 다음을 합니다.
    - 지난달 리포트 만들기
    - 지난달 경비를 리포트에 넣기
-   - 경비마다 Comment, Business Purpose, Receipt, LCRT, Expense Type, 도시를 채우고 영수증 사진 첨부
+   - 경비마다 Concur 화면 위에서 아래 순서로 Expense Type, Business Purpose, 도시, LCRT, Receipt Status, (Personal Expense), Comment를 채우고 영수증 사진 첨부
    - 저장
 5. **제출은 하지 않습니다.** `결과\경비처리_YYYY-MM.csv`의 '확인 필요' 칸을 보고 사용자가 직접 제출합니다.
 
@@ -46,7 +46,7 @@
 - **로그인:** 전용 Edge 창에서 처음 한 번 회사 계정으로 로그인하면 다음부터는 로그인 상태가 유지됩니다.
 - **동료 설명서와 일부러 다르게 한 부분** (모두 설정 파일 `concur_settings.json`에서 바꿀 수 있습니다)
   - 같은 날짜·같은 금액 영수증이 여러 장이면: 건너뛰지 않고 순서대로 첨부한 뒤 '확인 필요'로 표시합니다.
-  - Expense Type이 Undefined이면: 주차는 `Parking & Toll`, 나머지는 `Other Staff Expenses`를 고르고 '확인 필요'로 표시합니다.
+  - Expense Type이 Undefined이면: 자동 입력 편집의 항목에 정한 Expense Type을 고릅니다. 맞는 항목이 없으면 Undefined 그대로 두고 '확인 필요'(2026-11-14부터, 예전에는 '분류 없음'이면 `Other Staff Expenses`).
   - 식대 Comment 문구: 흐름 파일("Overtime meal during service")과 설명서("Overtime meal fee for service")가 달라서 설명서 문구를 따랐습니다.
 - **Concur는 한국어 화면을 기준으로 하고 영어도 받습니다.** 버튼은 '리포트 생성', '경비 저장' 같은 글자로 찾는데, `화면_문구`에 `한국어|영어`처럼 여러 글자를 적어 두어 둘 중 하나가 보이면 됩니다(`_alts`, `_re`). 2026-11-12에 로그인 화면이 갑자기 영어(Sign In / Next)로 바뀌어 [다음]을 못 누른 일이 있어서, Edge를 한국어로 열고(`launch_options`: `locale=ko-KR`, `--lang=ko-KR`, 번역 창 끔) 영어 글자도 같이 찾게 했습니다. 예전 설정 파일에 저장된 한국어 하나짜리 문구는 `load_settings`가 새 기본값으로 바꿉니다(사용자가 직접 바꾼 값은 그대로). 영어 [이메일 링크로 로그인] 버튼 글자는 확인하지 못해 여러 후보와 'email…link' 정규식으로 찾습니다.
 - **단축어 없이 쓰기 (2026-11-12 추가):** 사용자가 단축어 앱이 불편하다고 해서, 카메라로 찍기만 해도 되게 바꿨습니다.
@@ -94,7 +94,7 @@
   - **다음 Claude가 고칠 때:** 사용자에게 화면조사 txt·png와 실행 기록을 받아, '없음'인 키의 새 id/name을 `DEFAULT_ELEMENTS`에 반영하고(사용자 설정 파일에 예전 값이 저장돼 있으면 `load_settings`에서 옮겨 주기), 버튼 글자는 `화면_문구`에 `|`로 덧붙이고, `tests/test_screen_change.py`처럼 가짜 화면 테스트를 더합니다. 아직 설정으로 못 옮긴 것: `JS_SELECT_MONTH`의 체크박스 클래스, 진행 표시("3 of 4") 정규식, 로그인 확인용 `#cnqr-app-content`.
 - **끝나도 Edge 열어 두기 (2026-11-13, 사용자 요청):** "다시 직접 보고 수정해야 하니 닫지 말아 달라". `작업_후_Edge_열어두기`(기본 true)면 ②·③이 끝나거나 오류가 나도 `run_job`의 finally에서 `bot.wait_until_closed(stop_flag)`로 사용자가 Edge 창을 닫을 때까지(또는 [중지]) 기다린 뒤 정리합니다. 그동안 작업 스레드가 살아 있어 실행 버튼은 눌리지 않습니다. 사용자가 취소(Cancelled)한 경우는 바로 닫습니다.
 - **Concur Expense Type 목록 가져오기 (2026-11-13, 사용자 질문 "골라야 할 항목이 엄청 많은데 쉽게 넣는 방법"):** 이 클라우드 환경은 사용자 회사 계정으로 Concur에 들어갈 수 없어 직접 볼 수 없습니다. 대신 [화면 조사]가 경비 편집 화면에서 Expense Type 드롭다운을 열어 목록을 모두 읽고(`read_dropdown_options`: 화면에 보이는 만큼만 그리는 목록도 아래로 내리며 읽음, Recently Used 같은 제목은 뺌) 화면조사 파일에 적은 뒤, `add_expense_types_to_table`이 자동입력표에 없는 항목을 '(분류 없음)' 위에 줄로 더합니다(찾을 글자는 비워 둠 → 사용자가 적기 전에는 영수증에 안 맞춰짐, 이미 Expense Type 칸에 쓰는 이름·Undefined는 뺌). 확인한 항목 일부: Car mileage, Parking & Toll, Meals & Drinks, Other, Training. 식대를 지금처럼 Other Staff Expenses로 둘지 Meals & Drinks로 바꿀지는 사용자 결정.
-- **자동 입력 편집 창 (2026-11-13, 사용자 요청 "엑셀로는 힘들다, Expense Type을 고르면 넣을 글을 직접 만드는 창"):** 창의 [자동 입력 편집] → `CategoryEditor`(tkinter Toplevel). 왼쪽 목록(● 설정됨 / ○ 안 함, 찾기·설정한 항목만), 오른쪽 입력칸(항목 이름·찾을 글자·Comment·Business Purpose·Expense Type 콤보), 미리보기(`category_preview`: 병원 있을 때/없을 때), [새 항목]·[삭제]·▲▼·[저장]·[엑셀로 열기]·[닫기](저장 안 했으면 물어봄). 저장 전 `category_problems`(같은 이름, 같은 찾을 글자가 여러 항목, 찾을 글자는 있는데 문구 빈 항목). 파일 읽기·쓰기는 `load_category_rows`/`save_category_rows`(‘(분류 없음)’ 줄은 아래 기본 Expense Type 칸). 사용자는 실제로 10개 정도만 쓴다고 함.
+- **자동 입력 편집 창 (2026-11-13, 사용자 요청 "엑셀로는 힘들다, Expense Type을 고르면 넣을 글을 직접 만드는 창"):** 창의 [자동 입력 편집] → `CategoryEditor`(tkinter Toplevel). 왼쪽 목록(● 설정됨 / ○ 안 함, 찾기·설정한 항목만), 오른쪽 입력칸(항목 이름·찾을 글자·Comment·Business Purpose·Expense Type 콤보), 미리보기(`category_preview`: 병원 있을 때/없을 때), [새 항목]·[삭제]·▲▼·[저장]·[엑셀로 열기]·[닫기](저장 안 했으면 물어봄). 저장 전 `category_problems`(같은 이름, 같은 찾을 글자가 여러 항목, 찾을 글자는 있는데 문구 빈 항목). 파일 읽기·쓰기는 `load_category_rows`/`save_category_rows`(아래 기본 Expense Type 칸과 ‘(분류 없음)’ 줄은 2026-11-14에 없앰). 사용자는 실제로 10개 정도만 쓴다고 함.
 - **넣을 경비가 없을 때 (2026-11-13, 사용자 요청):** "No Available Expenses"(Select from Available Expenses (0)) 화면에서 예전에는 체크박스를 60초 기다리다 오류로 끝났습니다. 이제 `add_available_expenses`가 체크박스와 `화면_문구` "사용 가능한 경비 없음" 중 먼저 뜨는 것을 보고, 없으면 `NoExpenses`(오류 아님)를 냅니다. 그 달 경비가 0건일 때, ③에서 연 리포트가 빈 리포트(빈 리포트 카드가 보임)일 때(`open_first_expense`)도 같습니다. `run_job`은 "넣을 경비 없음" 안내를 띄우고 Edge 창은 열어 둡니다(사용자가 닫을 때까지).
 - **도시 찾기 보강 (2026-11-13, 사용자 요청 "영수증에서 지역이 보이면 그쪽으로"):** `DEFAULT_CITIES`에 광주·전라 시·군 전부와 주요 도시를 더했습니다(Concur 이름은 추측, 설정 파일의 `도시_목록`은 사전 합치기라 새 기본 도시가 자동으로 들어감). `detect_city`가 'OO시/군' 말고도 도 이름 뒤의 도시(`전북 익산…`, `PROVINCES`)와 광역시 뒤의 구(`대전 유성구…`, `METRO_CITIES`)도 봅니다(경기 광주 제외). `fill_expense`는 Receipt Status·LCRT·Expense Type·도시를 하나 못 골라도 `safely`로 '확인 필요'에 남기고 다음 칸과 **영수증 첨부까지 계속**합니다(예전에는 예외로 그 경비의 첨부가 빠졌음). 찾은 도시를 못 고르면 기본 도시로 다시 고릅니다(`_try_choose_city`).
 - **항목 고르기·빠른 입력 (2026-11-13, 사용자 요청):** 편집 창의 Expense Type·기본 Expense Type은 Concur 항목 목록(`type_choices` = 설정 `Concur_경비_유형`(기본 `KNOWN_EXPENSE_TYPES`: 사용자 화면에서 본 Car mileage, Meals & Drinks, Other, Other Staff Expenses, Parking & Toll, Training) ∪ 표의 Expense Type)에서 고르는 콤보입니다. [화면 조사]가 읽은 Expense Type은 자동입력표에 줄을 늘리지 않고 설정 목록에 더합니다(`remember_expense_types`). 사용자가 "글을 천천히 한 글자씩 치는 게 원래 그런가" 물어서, `type_text`가 `fill`로 한꺼번에 넣고 값이 안 들어가면 한 글자씩(0.01초) 치게 바꿨습니다(설정 `글자_입력_방식`="한 글자씩"이면 예전 방식).
@@ -115,12 +115,17 @@
   - 되살리기(`restore_backup`): 이 프로그램이 만든 zip만(백업정보 필요), 알려진 개인 파일 이름과 `결과/이름.csv|json`만(`_restorable`, zip 경로 공격 방지). 되살리기 전 상태를 '되살리기 전' 자동 백업으로 남겨 되돌릴 수 있음. 엑셀에 열린 파일은 오류 안내. 예전 판 설정은 `load_settings`의 옮기기 규칙이 처리.
   - 창: 설정 파일이 없는 새 폴더에서 처음 켤 때(`offer_restore_on_first_run`, root를 먼저 만들고 load_settings 전에) 최근 백업을 되살릴지 물음. [백업·되살리기] 탭(`BackupTab`): 백업 폴더, 목록(만든 시각·종류·프로그램 판·파일 수), [지금 백업하기]·[고른 백업 되살리기]·[다른 백업 파일에서 되살리기…]·[새로 고침]. 작업 중이거나 자동 입력 편집 창이 열려 있으면 되살리지 않음. 되살린 뒤 `reload_from_settings`로 창에 반영. 테스트 `tests/test_backup.py`.
   - 테스트 주의: 여러 창 테스트를 이어서 돌리면 닫은 창의 tk 변수를 작업 스레드가 치우다 멈춰 수십 초 걸리는 일이 있어, `conftest.py`가 테스트마다 `gc.collect()`를 합니다.
+- **자동 입력 항목 늘림·Concur 순서대로 (2026-11-14, 사용자 요청):**
+  - "병원 이름이 없는 영수증이 많으니 무시하고 진행": '병원 없음'을 `receipt_issues`(영수증 목록 '확인 필요'·입력 전 확인 창)와 경비처리 결과 '확인 필요'("병원명 없음")에서 뺐습니다. Comment에서 ' in {hospital}'만 빠집니다.
+  - "Concur 경비 화면의 칸을 전부 자동 입력 편집에서": 자동입력표에 칸 4개를 더했습니다(`CATEGORY_HEADER` 10칸, 위치 상수 `C_NAME`…`C_PERSONAL`): `City(비우면 영수증 주소)`, `LCRT`, `Receipt Status`, `Personal Expense(O면 체크)`. `apply_category_table`이 `cfg["항목_추가_입력"][분류] = item_extras(row)`({도시, LCRT, Receipt Status, Personal Expense})로 넣고 `fill_expense`가 씁니다. 빈칸이면 예전 동작(영수증 주소의 도시→기본 도시, NA, Receipt, 건드리지 않음). 도시 우선순위: 영수증 목록에서 직접 고친 도시 > 항목에 정한 도시 > 영수증 주소 > 기본 도시(`city_to_choose(..., fixed)`). Transaction Date·Amount·Currency는 카드 정보라 넣지 않음. Personal Expense 체크박스는 `화면_문구` "Personal Expense"(개인 경비|Personal Expense) 라벨로 찾습니다(실제 화면 구조는 모름).
+  - "어느 항목에도 안 맞을 때 Expense Type은 삭제": 편집 창 아래 칸과 자동입력표의 `(분류 없음)` 줄, 설정의 `분류없음` 기본값을 없앴습니다. 맞는 항목이 없으면 Undefined 그대로 두고 '확인 필요'("Expense Type 직접 고르기(맞는 자동 입력 항목 없음)"). 예전 파일의 `(분류 없음)` 줄은 읽을 때 건너뛰고 저장하면 없어집니다. `load_category_rows`는 이제 줄 목록만 돌려주고 `save_category_rows(path, rows)`는 인자가 둘입니다. 자동입력표대로 고른 Expense Type은 더 이상 '확인 필요'로 남기지 않습니다(사용자가 직접 정한 규칙이라).
+  - "입력 순서를 Concur 화면처럼 위에서 아래로": 편집 창 칸 순서 = 항목 이름, 찾을 글자, ─ Concur 경비 화면에 넣을 값 ─ Expense Type, Business Purpose, City(콤보: `(영수증 주소에서 찾기)` + 도시 목록), LCRT(콤보 NA), Receipt Status(콤보 Receipt/No Receipt), Personal Expense(체크), Comment, 미리보기(`category_preview(row, default_city)`, 같은 순서). `fill_expense`도 같은 순서로 넣고 영수증 첨부는 맨 끝. Expense Type을 맨 먼저 고르는 것은 Concur가 유형에 따라 칸을 바꿀 수 있어서이기도 합니다. 이미 맞는 값이 들어 있는 LCRT·Receipt Status는 건드리지 않습니다. 테스트 `tests/test_item_fields.py`(사용자 화면과 같은 칸 순서의 가짜 경비 화면에서 입력 순서 확인).
 - 분류 키워드와 병원 표에 있는 이상한 글자('주자', '메리카', '중남대' 등)는 OCR이 잘못 읽은 글자에 맞춘 것이라 일부러 둔 것입니다. 지우면 안 됩니다.
 
 ## 어디까지 확인했나
 
 - 이전 채팅에서: 글자 분석·매칭 테스트, Concur를 흉내 낸 가짜 화면에서 처음부터 저장까지 실행, 프로그램 창이 뜨는지 확인했습니다. 다만 그 테스트 코드와 가짜 화면은 넘어오지 않았습니다.
-- 이 저장소에서: `tests` 폴더에 테스트 254개가 있습니다(창 테스트 4개는 화면이 있을 때만). 날짜·금액·분류·병원 뽑기, 엑셀로 고친 내용 유지, 경비와 영수증 맞추기, 설정 파일, 지난달 경비만 고르기, 촬영 날짜로 사진 고르기, HEIC 읽기·JPEG 변환, 영수증 아닌 사진 빼기, 영수증 날짜로 달 정하기(늦게 찍은 영수증, 다른 달 영수증, 날짜 못 읽은 영수증에 날짜 적기), 이번 달 처리, 이메일 링크 자동 로그인(가짜 Concur 로그인 화면과 가짜 Outlook), 병원 찾기(엑셀 가져오기·한글→영문·같은 날·가게 이름·영수증 글자의 새 병원), 도시 자동 선택(가짜 도시 드롭다운), 쉼표 없는 금액·두 자리 연도, 리포트 만들기 값(가짜 리포트 생성 화면), 영수증 폴더 여러 곳·사진 가져오기·안드로이드 파일 이름 날짜, 백업·되살리기를 확인합니다. 모두 통과합니다.
+- 이 저장소에서: `tests` 폴더에 테스트 261개가 있습니다(창 테스트 5개는 화면이 있을 때만). 날짜·금액·분류·병원 뽑기, 엑셀로 고친 내용 유지, 경비와 영수증 맞추기, 설정 파일, 지난달 경비만 고르기, 촬영 날짜로 사진 고르기, HEIC 읽기·JPEG 변환, 영수증 아닌 사진 빼기, 영수증 날짜로 달 정하기(늦게 찍은 영수증, 다른 달 영수증, 날짜 못 읽은 영수증에 날짜 적기), 이번 달 처리, 이메일 링크 자동 로그인(가짜 Concur 로그인 화면과 가짜 Outlook), 병원 찾기(엑셀 가져오기·한글→영문·같은 날·가게 이름·영수증 글자의 새 병원), 도시 자동 선택(가짜 도시 드롭다운), 쉼표 없는 금액·두 자리 연도, 리포트 만들기 값(가짜 리포트 생성 화면), 영수증 폴더 여러 곳·사진 가져오기·안드로이드 파일 이름 날짜, 백업·되살리기, 자동 입력 항목의 Concur 칸을 화면 위에서 아래 순서로 넣기를 확인합니다. 모두 통과합니다.
 - **실제 Concur와 실제 Windows OCR에서는 아직 한 번도 돌려 보지 않았습니다.**
 - 프로그램 창(tkinter): 2026-11-13에 이 환경에 `python3-tk`(시스템 Python 3.12용)와 한글 글꼴을 설치해 가상 화면(Xvfb)에서 처음 띄워 봤습니다. 메인 창과 자동 입력 편집 창이 제대로 뜨고, 편집·저장이 됩니다(`tests/test_category_editor.py`의 창 테스트는 화면이 있을 때만 돎). 다시 하려면 아래 '창 테스트'를 보세요.
 - 아직 확인 못 한 것(로그인): 실제 Concur 로그인 화면에서 버튼·입력칸을 찾는지, 회사 PC의 Outlook이 클래식인지와 pywin32 접근이 막히지 않는지, 메일 링크가 메일 보안에 감싸져도 열리는지.

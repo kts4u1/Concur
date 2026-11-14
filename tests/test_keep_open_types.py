@@ -82,7 +82,7 @@ def test_expense_types_added_to_table_once(tmp_path):
     types = ["Car mileage", "Parking & Toll", "Meals & Drinks", "Other Staff Expenses", "Undefined", "Training"]
     assert ca.add_expense_types_to_table(path, types, cfg) == 3      # 이미 쓰는 Parking & Toll·Other Staff Expenses 빼고
     rows = ca.read_csv_dicts(path)
-    assert [r["분류"] for r in rows] == ["식대", "카페", "주차", "Car mileage", "Meals & Drinks", "Training", "(분류 없음)"]
+    assert [r["분류"] for r in rows] == ["식대", "카페", "주차", "Car mileage", "Meals & Drinks", "Training"]
     new = rows[4]
     assert (new["영수증에서 찾을 글자(쉼표로 구분)"], new["Expense Type이 Undefined일 때"]) == ("", "Meals & Drinks")
     assert ca.add_expense_types_to_table(path, types, cfg) == 0      # 두 번째는 그대로

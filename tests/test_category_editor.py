@@ -11,22 +11,34 @@ import concur_auto as ca
 def test_load_and_save_rows(tmp_path):
     cfg = ca.default_settings()
     path = tmp_path / ca.CATEGORY_FILE_NAME
-    rows, default_type = ca.load_category_rows(path, cfg)
-    assert [r[0] for r in rows] == ["식대", "카페", "주차"] and default_type == "Other Staff Expenses"
-    rows.append(["Taxi", "택시, 콜택시", "Taxi fee for service in {hospital}", "For service", "Taxi", ""])
+    rows = ca.load_category_rows(path, cfg)
+    assert [r[0] for r in rows] == ["식대", "카페", "주차"] and all(len(r) == ca.CATEGORY_ROW_LEN for r in rows)
+    rows.append(["Taxi", "택시, 콜택시", "Taxi fee for service in {hospital}", "For service", "Taxi", "",
+                 "Mokpo, KOREA, REPUBLIC OF", "NA", "Receipt", "O"])
     rows.append(["", "버려짐", "", "", "", ""])                      # 이름이 빈 줄은 저장하지 않음
-    ca.save_category_rows(path, rows, "Other")
-    again, default_type = ca.load_category_rows(path, cfg)
-    assert [r[0] for r in again] == ["식대", "카페", "주차", "Taxi"] and default_type == "Other"
+    ca.save_category_rows(path, rows)
+    again = ca.load_category_rows(path, cfg)
+    assert [r[0] for r in again] == ["식대", "카페", "주차", "Taxi"]
     assert ca.apply_category_table(cfg, path) == ["식대", "카페", "주차", "Taxi"]
-    assert cfg["Undefined일_때_선택할_유형"]["분류없음"] == "Other"
+    assert "분류없음" not in cfg["Undefined일_때_선택할_유형"]                 # '어느 항목에도 안 맞을 때'는 없앰
+    assert cfg["항목_추가_입력"]["Taxi"] == {"도시": "Mokpo, KOREA, REPUBLIC OF", "LCRT": "NA",
+                                         "Receipt Status": "Receipt", "Personal Expense": True}
+    assert cfg["항목_추가_입력"]["주차"] == {"도시": "", "LCRT": "", "Receipt Status": "", "Personal Expense": False}
 
 
 def test_preview():
-    text = ca.category_preview("Toll fee for service in {hospital}", "For service")
-    assert "Comment: Toll fee for service in Chosun University Hospital" in text
-    assert "Comment: Toll fee for service\n" in text                  # 병원을 못 찾으면 ' in …' 뺌
-    assert "Business Purpose: (비어 있음)" in ca.category_preview("Fuel", "")
+    text = ca.category_preview(["톨게이트", "통행료", "Toll fee for service in {hospital}", "For service", "Parking & Toll"])
+    lines = [l.strip() for l in text.splitlines()]
+    assert lines[1:] == ["Expense Type: Parking & Toll  (Concur에 Undefined일 때만)",       # Concur 화면 위에서 아래 순서
+                         "Business Purpose: For service",
+                         "City: 영수증 주소의 도시 (못 찾으면 Gwangju (ex Kwangju))",
+                         "LCRT: NA",
+                         "Receipt Status: Receipt  (영수증을 붙일 때)",
+                         "Personal Expense: 체크 안 함",
+                         "Comment: Toll fee for service in Chosun University Hospital",
+                         "병원을 못 찾으면: Toll fee for service"]                       # 병원을 못 찾으면 ' in …' 뺌
+    empty = ca.category_preview(["주유", "", "Fuel", ""])
+    assert "Business Purpose: (비어 있음)" in empty and "Expense Type: (비어 있음" in empty
 
 
 def test_problems():
@@ -86,7 +98,7 @@ def test_editor_window(tmp_path):
         ed.vars["comment"].set("Fuel for service")
         ed.on_edit()
         assert ed.save() and not ed.dirty
-        rows, _ = ca.load_category_rows(tmp_path / ca.CATEGORY_FILE_NAME, cfg)
+        rows = ca.load_category_rows(tmp_path / ca.CATEGORY_FILE_NAME, cfg)
         assert [r[0] for r in rows] == ["식대", "카페", "Taxi", "주차", "Hotel", "주유"]
         assert rows[2][1] == "택시, 콜택시"
         ed.close()
@@ -130,13 +142,13 @@ def test_korean_name_and_concur_expense_type(tmp_path):
         ed.vars["comment"].set("Taxi fee for service in {hospital}")
         ed.vars["purpose"].set("For service")
         ed.on_edit()
-        assert "Expense Type: Other Staff Expenses (비어 있어 아래 기본값)" in ed.preview.cget("text")
+        assert "Expense Type: (비어 있음" in ed.preview.cget("text")
         ed.vars["etype"].set("Taxi")
         etype_box.event_generate("<<ComboboxSelected>>")
         assert "Expense Type: Taxi" in ed.preview.cget("text")
         assert ed.listbox.get(ed.visible.index(ed.current)) == "● 택시   → Taxi"
         assert ed.save()
-        rows, _ = ca.load_category_rows(tmp_path / ca.CATEGORY_FILE_NAME, cfg)
+        rows = ca.load_category_rows(tmp_path / ca.CATEGORY_FILE_NAME, cfg)
         taxi = next(r for r in rows if r[0] == "택시")
         assert taxi[:5] == ["택시", "택시, 콜택시", "Taxi fee for service in {hospital}", "For service", "Taxi"]
         assert "새 항목" not in [r[0] for r in rows]

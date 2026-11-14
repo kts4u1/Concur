@@ -61,7 +61,7 @@ def test_fields_found_by_label_when_position_changed(page):
     assert bot.field("Comment").get_attribute("id") == "f3"
     rec = ca.Receipt(original=Path("a.jpg"), ocr_file=Path("a.jpg"), category="주차", hospital_en="Chosun University Hospital")
     done = bot.fill_expense(rec, None, [])
-    assert done[:2] == ["Comment 입력", "Business Purpose 입력"]
+    assert done == ["Business Purpose 입력", "Comment 입력"]                # 화면 위에서 아래 순서
     assert page.input_value("#f3") == "Parking fee for service in Chosun University Hospital"
     assert page.input_value("#f4") == "For service"
 

@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-14 백업·되살리기"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-14 자동 입력 항목 늘림·Concur 순서대로"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -266,12 +266,12 @@ def default_settings():
             "카페": {"Comment": "Cafe for wifi in {hospital}", "Business Purpose": "For wifi"},
             "식대": {"Comment": "Overtime meal fee for service in {hospital}", "Business Purpose": "For Overtime meal"},
         },
-        "_Undefined_설명": "자동입력표.csv를 처음 만들 때만 씁니다. Expense Type이 Undefined인 경비에 고를 유형. 결과 파일에 '확인 필요'로 표시됩니다.",
+        "_Undefined_설명": ("자동입력표.csv를 처음 만들 때만 씁니다. Expense Type이 Undefined인 경비에 고를 유형. "
+                          "어느 항목에도 맞지 않는 경비는 Undefined 그대로 두고 결과 파일 '확인 필요'에 남깁니다."),
         "Undefined일_때_선택할_유형": {
             "주차": "Parking & Toll",
             "카페": "Other Staff Expenses",
             "식대": "Other Staff Expenses",
-            "분류없음": "Other Staff Expenses",
         },
         "_화면_문구_설명": "Concur 화면에 보이는 글자. '|'로 나눠 여러 개를 적으면 그중 하나가 보이면 됩니다(예: 다음|Next). 화면이 영어로 바뀌어도 되도록 영어도 같이 적어 두었습니다.",
         "화면_문구": {
@@ -290,6 +290,7 @@ def default_settings():
             "Receipt": "Receipt",
             "NA": "NA",
             "Undefined": "Undefined",
+            "Personal Expense": "개인 경비|Personal Expense",
         },
         "_Concur_경비_유형_설명": "자동 입력 편집 창에서 고를 Concur Expense Type 목록. [화면 조사]를 경비 편집 화면에서 하면 Concur의 전체 목록을 읽어 여기에 더합니다.",
         "Concur_경비_유형": list(KNOWN_EXPENSE_TYPES),
@@ -898,8 +899,23 @@ def hospital_from_merchant(text: str, hospitals: list) -> tuple:
 # ---------- 자동 입력표 (분류마다 찾을 글자·Comment·Business Purpose·Expense Type) ----------
 
 CATEGORY_HEADER = ["분류", "영수증에서 찾을 글자(쉼표로 구분)", "Comment", "Business Purpose",
-                   "Expense Type이 Undefined일 때", "설명"]
-NO_CATEGORY = "(분류 없음)"
+                   "Expense Type이 Undefined일 때", "설명", "City(비우면 영수증 주소)", "LCRT", "Receipt Status",
+                   "Personal Expense(O면 체크)"]
+CATEGORY_ROW_LEN = len(CATEGORY_HEADER)
+# 한 줄(항목)의 칸 위치
+C_NAME, C_KEYWORDS, C_COMMENT, C_PURPOSE, C_TYPE, C_NOTE, C_CITY, C_LCRT, C_RECEIPT, C_PERSONAL = range(CATEGORY_ROW_LEN)
+NO_CATEGORY = "(분류 없음)"            # 예전 판이 만든 줄(이제 쓰지 않음, 읽을 때 건너뜀)
+CITY_FROM_RECEIPT = "(영수증 주소에서 찾기)"
+LCRT_CHOICES = ["NA"]
+RECEIPT_CHOICES = ["Receipt", "No Receipt"]
+
+
+def _category_row(values) -> list:
+    return ([str(v or "").strip() for v in values] + [""] * CATEGORY_ROW_LEN)[:CATEGORY_ROW_LEN]
+
+
+def _is_no_category(name: str) -> bool:
+    return compact(name) in ("(분류없음)", "분류없음")
 
 
 def category_rows_from_cfg(cfg: dict) -> list:
@@ -910,83 +926,90 @@ def category_rows_from_cfg(cfg: dict) -> list:
     rows = []
     for cat in order:
         t = (cfg.get("입력_문구") or {}).get(cat, {})
-        rows.append([cat, ", ".join((cfg.get("키워드") or {}).get(cat, [])), t.get("Comment", ""),
-                     t.get("Business Purpose", ""), types.get(cat, ""), ""])
+        rows.append(_category_row([cat, ", ".join((cfg.get("키워드") or {}).get(cat, [])), t.get("Comment", ""),
+                                   t.get("Business Purpose", ""), types.get(cat, ""), ""]))
     if rows:
-        rows[0][5] = "위에 있는 분류가 먼저 맞춰집니다. {hospital}(또는 {병원}) 자리에 병원 영문명이 들어가고, 병원을 못 찾으면 ' in {hospital}'은 빠집니다."
-    rows.append([NO_CATEGORY, "", "", "", types.get("분류없음", "Other Staff Expenses"),
-                 "어느 분류에도 맞지 않는 영수증과 영수증 없는 경비의 Expense Type"])
+        rows[0][C_NOTE] = "위에 있는 분류가 먼저 맞춰집니다. {hospital}(또는 {병원}) 자리에 병원 영문명이 들어가고, 병원을 못 찾으면 ' in {hospital}'은 빠집니다."
     return rows
 
 
+def item_extras(row) -> dict:
+    """항목의 City·LCRT·Receipt Status·Personal Expense (빈칸은 기본: 영수증 주소의 도시, NA, Receipt, 체크 안 함)"""
+    city = row[C_CITY] if row[C_CITY] != CITY_FROM_RECEIPT else ""
+    return {"도시": city, "LCRT": row[C_LCRT], "Receipt Status": row[C_RECEIPT],
+            "Personal Expense": row[C_PERSONAL].strip().upper() in ("O", "Y", "YES", "V", "✓", "TRUE", "1")}
+
+
 def apply_category_table(cfg: dict, path: Path, log=None) -> list:
-    """자동입력표.csv(없으면 설정으로 만듦)를 읽어 분류·찾을 글자·입력 문구·Expense Type을 설정에 반영합니다. → 분류 목록"""
+    """자동입력표.csv(없으면 설정으로 만듦)를 읽어 분류·찾을 글자·입력 문구·Expense Type과
+    City·LCRT·Receipt Status·Personal Expense를 설정에 반영합니다. → 분류 목록"""
     if not path.exists():
         write_csv(path, CATEGORY_HEADER, category_rows_from_cfg(cfg))
-    order, keywords, texts = [], {}, {}
-    types = {"분류없음": (cfg.get("Undefined일_때_선택할_유형") or {}).get("분류없음", "Other Staff Expenses")}
-    for row in read_csv_dicts(path):
-        vals = [str(v or "").strip() for v in row.values()] + [""] * 6
-        cat, kw, comment, purpose, etype = vals[:5]
-        if not cat:
-            continue
-        if compact(cat) in ("(분류없음)", "분류없음"):
-            if etype:
-                types["분류없음"] = etype
-            continue
-        if cat in order:
+    order, keywords, texts, types, extras = [], {}, {}, {}, {}
+    for r in read_csv_dicts(path):
+        row = _category_row(r.values())
+        cat = row[C_NAME]
+        if not cat or _is_no_category(cat) or cat in order:
             continue
         order.append(cat)
-        keywords[cat] = [compact(k) for k in re.split(r"[,，/]", kw) if compact(k)]
+        keywords[cat] = [compact(k) for k in re.split(r"[,，/]", row[C_KEYWORDS]) if compact(k)]
         texts[cat] = {name: value.replace("{병원}", "{hospital}")
-                      for name, value in (("Comment", comment), ("Business Purpose", purpose)) if value}
-        if etype:
-            types[cat] = etype
+                      for name, value in (("Comment", row[C_COMMENT]), ("Business Purpose", row[C_PURPOSE])) if value}
+        if row[C_TYPE]:
+            types[cat] = row[C_TYPE]
+        extras[cat] = item_extras(row)
     if not order:
         if log:
             log(f"자동 입력표에 분류가 없어 설정 파일의 값을 씁니다: {path.name}")
         return list(cfg.get("분류_우선순위") or CATEGORIES)
     cfg["분류_우선순위"], cfg["키워드"], cfg["입력_문구"], cfg["Undefined일_때_선택할_유형"] = order, keywords, texts, types
+    cfg["항목_추가_입력"] = extras
     if log:
         log(f"자동 입력표: 분류 {len(order)}개 ({', '.join(order)})")
     return order
 
 
-def load_category_rows(path: Path, cfg: dict) -> tuple:
-    """자동입력표 → ([[분류, 찾을 글자, Comment, Business Purpose, Expense Type, 설명], ...], '(분류 없음)'일 때 Expense Type)"""
+def load_category_rows(path: Path, cfg: dict) -> list:
+    """자동입력표 → [[분류, 찾을 글자, Comment, Business Purpose, Expense Type, 설명, City, LCRT, Receipt Status, Personal], ...]"""
     if not path.exists():
         write_csv(path, CATEGORY_HEADER, category_rows_from_cfg(cfg))
-    default_type = (cfg.get("Undefined일_때_선택할_유형") or {}).get("분류없음", "Other Staff Expenses")
     rows = []
     for r in read_csv_dicts(path):
-        vals = ([str(v or "").strip() for v in r.values()] + [""] * 6)[:6]
-        if not vals[0]:
-            continue
-        if compact(vals[0]) in ("(분류없음)", "분류없음"):
-            default_type = vals[4] or default_type
-            continue
-        rows.append(vals)
-    return rows, default_type
+        row = _category_row(r.values())
+        if row[C_NAME] and not _is_no_category(row[C_NAME]):
+            rows.append(row)
+    return rows
 
 
-def save_category_rows(path: Path, rows: list, default_type: str):
-    out = [(list(r) + [""] * 6)[:6] for r in rows if str(r[0]).strip()]
-    out.append([NO_CATEGORY, "", "", "", default_type or "Other Staff Expenses",
-                "어느 분류에도 맞지 않는 영수증과 영수증 없는 경비의 Expense Type"])
-    write_csv(path, CATEGORY_HEADER, out)
+def save_category_rows(path: Path, rows: list):
+    write_csv(path, CATEGORY_HEADER, [_category_row(r) for r in rows if str(r[C_NAME]).strip()])
 
 
-def category_preview(comment: str, purpose: str, hospital: str = "Chosun University Hospital") -> str:
-    """편집 창 미리보기: 병원을 찾았을 때와 못 찾았을 때 실제로 들어갈 글"""
-    cfg = {"입력_문구": {"x": {k: v for k, v in (("Comment", comment), ("Business Purpose", purpose)) if v}}}
+def category_preview(row, default_city: str = "Gwangju (ex Kwangju), KOREA, REPUBLIC OF",
+                     hospital: str = "Chosun University Hospital") -> str:
+    """편집 창 미리보기: Concur 경비 화면 위에서 아래 순서로 실제로 들어갈 값"""
+    row = _category_row(row)
+    cfg = {"입력_문구": {"x": {k: v for k, v in (("Comment", row[C_COMMENT]), ("Business Purpose", row[C_PURPOSE])) if v}}}
     rec = Receipt(original=Path("x"), ocr_file=Path("x"), category="x", hospital_en=hospital)
     found = texts_for(rec, cfg)
     rec.hospital_en = ""
     missing = texts_for(rec, cfg)
-    return (f"병원을 찾았을 때 ({hospital})\n"
-            f"   Comment: {found.get('Comment', '(비어 있음)')}\n   Business Purpose: {found.get('Business Purpose', '(비어 있음)')}\n"
-            f"병원을 못 찾았을 때\n"
-            f"   Comment: {missing.get('Comment', '(비어 있음)')}\n   Business Purpose: {missing.get('Business Purpose', '(비어 있음)')}")
+    extra = item_extras(row)
+
+    def text(name):
+        a, b = found.get(name, "(비어 있음)"), missing.get(name, "(비어 있음)")
+        return a if a == b else f"{a}\n         병원을 못 찾으면: {b}"
+
+    etype = f"{row[C_TYPE]}  (Concur에 Undefined일 때만)" if row[C_TYPE] else "(비어 있음: Concur에 Undefined면 그대로 두고 '확인 필요')"
+    city = extra["도시"] or f"영수증 주소의 도시 (못 찾으면 {city_name(default_city)})"
+    return (f"병원 예: {hospital}\n"
+            f"   Expense Type: {etype}\n"
+            f"   Business Purpose: {text('Business Purpose')}\n"
+            f"   City: {city}\n"
+            f"   LCRT: {extra['LCRT'] or 'NA'}\n"
+            f"   Receipt Status: {extra['Receipt Status'] or 'Receipt'}  (영수증을 붙일 때)\n"
+            f"   Personal Expense: {'체크' if extra['Personal Expense'] else '체크 안 함'}\n"
+            f"   Comment: {text('Comment')}")
 
 
 def category_problems(rows: list) -> list:
@@ -1022,14 +1045,14 @@ def add_expense_types_to_table(path: Path, types: list, cfg: dict) -> int:
     찾을 글자를 비워 두므로 사용자가 적기 전에는 영수증에 맞춰지지 않습니다."""
     if not path.exists():
         write_csv(path, CATEGORY_HEADER, category_rows_from_cfg(cfg))
-    rows = [([str(v or "").strip() for v in r.values()] + [""] * 6)[:6] for r in read_csv_dicts(path)]
-    known = {r[0] for r in rows} | {r[4] for r in rows if r[4]}
-    new = [[t, "", "", "", t, "Concur 항목: '영수증에서 찾을 글자'를 적어야 영수증에 맞춰집니다"]
+    rows = [_category_row(r.values()) for r in read_csv_dicts(path)]
+    rows = [r for r in rows if r[C_NAME] and not _is_no_category(r[C_NAME])]
+    known = {r[C_NAME] for r in rows} | {r[C_TYPE] for r in rows if r[C_TYPE]}
+    new = [_category_row([t, "", "", "", t, "Concur 항목: '영수증에서 찾을 글자'를 적어야 영수증에 맞춰집니다"])
            for t in types if t and t not in known and t.lower() != "undefined"]
     if not new:
         return 0
-    at = next((i for i, r in enumerate(rows) if compact(r[0]) in ("(분류없음)", "분류없음")), len(rows))
-    write_csv(path, CATEGORY_HEADER, rows[:at] + new + rows[at:])
+    write_csv(path, CATEGORY_HEADER, rows + new)
     return len(new)
 
 
@@ -1829,8 +1852,7 @@ def receipt_issues(rec: Receipt, receipts: list) -> list:
         issues.append("금액 못 읽음")
     if not rec.category:
         issues.append("분류 없음")
-    if not rec.hospital_en:
-        issues.append("병원 없음")
+    # 병원 이름이 없는 영수증이 많아 '병원 없음'은 확인할 것으로 치지 않음(Comment에서 ' in {hospital}'만 빠짐)
     if duplicate_count(rec, receipts) > 1:
         issues.append("같은 날짜·금액 영수증 있음")
     return issues
@@ -2134,13 +2156,14 @@ def find_receipt_by_date_only(receipts: list, iso_date: str):
     return pool[0] if len(pool) == 1 else None
 
 
-def city_to_choose(rec, current: str, default: str):
+def city_to_choose(rec, current: str, default: str, fixed: str = ""):
     """Concur 도시 칸에 고를 도시(바꿀 필요가 없으면 None).
-    영수증이 있으면 영수증에서 찾은 도시, 못 찾았으면 기본 도시(광주)로 맞춥니다(카드 정보로 서울 등이 미리 들어가 있어도).
+    영수증이 있으면 (자동 입력 항목에 정해 둔 도시 →) 영수증에서 찾은 도시, 못 찾았으면 기본 도시(광주)로 맞춥니다
+    (카드 정보로 서울 등이 미리 들어가 있어도). 영수증 목록에서 도시를 직접 고쳤으면 그 도시가 먼저입니다.
     영수증이 없는 경비는 칸이 비어 있을 때만 기본 도시를 넣습니다."""
     if rec is None:
         return default if not (current or "").strip() else None
-    want = rec.city or default
+    want = (rec.city if "도시" in rec.edited else "") or fixed or rec.city or default
     return want if city_name(current).lower() != city_name(want).lower() else None
 
 
@@ -2997,21 +3020,20 @@ class ConcurBot:
 
     # ---------- 경비 하나 입력 ----------
     def fill_expense(self, rec, upload, checks: list) -> list:
-        """rec가 있으면 문구·Receipt·첨부까지, 없어도 LCRT·Expense Type·도시는 처리"""
+        """Concur 경비 화면에 위에서 아래 순서로 넣습니다: Expense Type → Business Purpose → City → LCRT →
+        Receipt Status → Personal Expense → Comment → 영수증 첨부. 값은 자동 입력 편집의 항목에서 가져옵니다.
+        (Transaction Date·Amount·Currency는 카드 정보로 들어와 있어 건드리지 않음)"""
         page, t, done = self.page, self.t, []
         try:
             page.locator(f'{self.sel("Receipt Status")}, {self.sel("Comment")}').first.wait_for(state="attached", timeout=8000)
         except Exception:
             pass
-
-        for field_name in ("Comment", "Business Purpose"):
-            text = texts_for(rec, self.cfg).get(field_name) if rec else None
-            if text:
-                self.type_text(self.field(field_name), text)
-                done.append(f"{field_name} 입력")
+        category = rec.category if rec else ""
+        extra = (self.cfg.get("항목_추가_입력") or {}).get(category) or {}
+        texts = texts_for(rec, self.cfg) if rec else {}
 
         def safely(step: str, action) -> bool:
-            """드롭다운 하나를 못 골라도 다음 칸과 영수증 첨부는 계속합니다(결과 파일 '확인 필요'에 남김)."""
+            """칸 하나를 못 채워도 다음 칸과 영수증 첨부는 계속합니다(결과 파일 '확인 필요'에 남김)."""
             try:
                 action()
                 return True
@@ -3025,27 +3047,29 @@ class ConcurBot:
                     pass
                 return False
 
-        if rec:
-            trigger, value = self.find_select(self.sel("Receipt Status"))
-            if trigger is not None and value == t["No Receipt"] and safely("Receipt Status", lambda: self.choose_option(trigger, t["Receipt"])):
-                done.append("Receipt 선택")
+        def type_field(field_name):
+            text = texts.get(field_name)
+            if text:
+                self.type_text(self.field(field_name), text)
+                done.append(f"{field_name} 입력")
 
-        trigger, _ = self.find_select(self.sel("LCRT"))
-        if trigger is not None and safely("LCRT", lambda: self.choose_option(trigger, t["NA"])):
-            done.append("LCRT=NA")
-
+        # 1. Expense Type (Concur에 Undefined일 때만, 고르면 화면 칸이 바뀔 수 있어 맨 먼저)
         trigger, value = self.find_select(self.sel("Expense Type"))
         if trigger is not None and value == t["Undefined"]:
-            types = self.cfg["Undefined일_때_선택할_유형"]
-            new_type = types.get((rec.category if rec else "") or "분류없음") or types.get("분류없음")
-            if new_type and safely(f"Expense Type({new_type})", lambda: self.choose_option(trigger, new_type)):
+            new_type = (self.cfg.get("Undefined일_때_선택할_유형") or {}).get(category) if category else ""
+            if not new_type:
+                checks.append("Expense Type 직접 고르기(맞는 자동 입력 항목 없음)")
+            elif safely(f"Expense Type({new_type})", lambda: self.choose_option(trigger, new_type)):
                 done.append(f"Expense Type={new_type}")
-                checks.append(f"Expense Type 자동 선택({new_type})")
 
+        # 2. Business Purpose
+        type_field("Business Purpose")
+
+        # 3. City
         trigger, value = self.find_select(self.sel("도시"))
         if trigger is not None:
-            city = city_to_choose(rec, value, self.cfg["기본_도시"])
             default = self.cfg["기본_도시"]
+            city = city_to_choose(rec, value, default, extra.get("도시", ""))
             if city:
                 if self._try_choose_city(trigger, city):
                     done.append(f"도시={city_name(city)}")
@@ -3055,6 +3079,30 @@ class ConcurBot:
                 else:
                     checks.append("도시 확인")
 
+        # 4. LCRT
+        trigger, value = self.find_select(self.sel("LCRT"))
+        want = extra.get("LCRT") or t["NA"]
+        if trigger is not None and value != want and safely(f"LCRT({want})", lambda: self.choose_option(trigger, want)):
+            done.append(f"LCRT={want}")
+
+        # 5. Receipt Status (영수증을 붙일 때)
+        if rec:
+            trigger, value = self.find_select(self.sel("Receipt Status"))
+            want_receipt = extra.get("Receipt Status") or t["Receipt"]
+            if trigger is not None and value != want_receipt and safely(
+                    f"Receipt Status({want_receipt})", lambda: self.choose_option(trigger, want_receipt)):
+                done.append(f"Receipt Status={want_receipt}")
+
+        # 6. Personal Expense (항목에서 체크한 것만)
+        if extra.get("Personal Expense"):
+            box = page.get_by_label(self._re("Personal Expense", exact=False)).first
+            if safely("Personal Expense", lambda: box.check(timeout=3000)):
+                done.append("Personal Expense 체크")
+
+        # 7. Comment
+        type_field("Comment")
+
+        # 8. 영수증 첨부(오른쪽 영수증 칸)
         if rec and upload:
             self.attach_receipt(upload, done, checks)
         return done
@@ -3166,8 +3214,6 @@ class ConcurBot:
                         checks.append("금액 못 읽은 영수증을 날짜로 첨부")
                     if not rec.category:
                         checks.append("분류 없음(영수증만 첨부)")
-                    elif not rec.hospital_en:
-                        checks.append("병원명 없음")
                     if duplicate_count(rec, receipts) > 1:
                         checks.append("같은 날짜·금액 영수증 여러 장")
                     upload = prepare_upload_file(rec, self.cfg, work_dir)
@@ -4035,8 +4081,12 @@ class BackupTab:
 
 
 class CategoryEditor:
-    """자동 입력 편집 창: 왼쪽에서 항목을 고르고 오른쪽에서 이름(한글 마음대로)·찾을 글자·Comment·Business Purpose를 적고
-    Expense Type은 Concur 목록에서 고릅니다."""
+    """자동 입력 편집 창: 왼쪽에서 항목을 고르고, 오른쪽에서 이름(한글 마음대로)·찾을 글자와
+    Concur 경비 화면의 칸(Expense Type·Business Purpose·City·LCRT·Receipt Status·Personal Expense·Comment)을
+    Concur 화면 위에서 아래 순서대로 정합니다."""
+    # (키, 칸 위치)
+    FIELDS = (("name", C_NAME), ("keywords", C_KEYWORDS), ("etype", C_TYPE), ("purpose", C_PURPOSE), ("city", C_CITY),
+              ("lcrt", C_LCRT), ("receipt", C_RECEIPT), ("comment", C_COMMENT))
     MARK_ON, MARK_OFF = "●", "○"
 
     def __init__(self, app):
@@ -4044,15 +4094,19 @@ class CategoryEditor:
         self.app, self.tk = app, tk
         self.path = app.base / CATEGORY_FILE_NAME
         cfg, _ = load_settings(app.base / SETTINGS_FILE_NAME)
-        self.rows, self.default_type = load_category_rows(self.path, cfg)
+        self.rows = load_category_rows(self.path, cfg)
         self.type_choices = sorted(set(cfg.get("Concur_경비_유형") or KNOWN_EXPENSE_TYPES)
-                                   | {r[4] for r in self.rows if r[4]} | {self.default_type}, key=str.lower)
+                                   | {r[C_TYPE] for r in self.rows if r[C_TYPE]}, key=str.lower)
+        self.default_city = cfg.get("기본_도시", "")
+        cities = list(dict.fromkeys([self.default_city] + list((cfg.get("도시_목록") or {}).values())
+                                    + [r[C_CITY] for r in self.rows if r[C_CITY] and r[C_CITY] != CITY_FROM_RECEIPT]))
+        self.city_choices = [CITY_FROM_RECEIPT] + sorted((c for c in cities if c), key=str.lower)
         self.current, self.visible, self.dirty, self.loading = None, [], False, False
 
         win = self.win = tk.Toplevel(app.root)
         win.title("자동 입력 편집")
-        win.geometry("1000x620")
-        win.minsize(860, 560)
+        win.geometry("1060x780")
+        win.minsize(900, 600)
         win.transient(app.root)
         win.protocol("WM_DELETE_WINDOW", self.close)
         outer = ttk.Frame(win, padding=12)
@@ -4061,8 +4115,8 @@ class CategoryEditor:
         outer.rowconfigure(1, weight=1)
 
         ttk.Label(outer, foreground="#555", wraplength=960, justify="left", text=(
-            "왼쪽에서 항목을 고르고 오른쪽에 적으면 됩니다. 항목 이름은 한글로 마음대로 적고, Concur에서 고를 항목은 "
-            "'Expense Type'에서 고르세요. ● = 설정됨(영수증에 맞춰짐), ○ = 아직 안 함. "
+            "왼쪽에서 항목을 고르고 오른쪽에 적으면 됩니다. 항목 이름은 한글로 마음대로 적고, 그 아래 칸들은 Concur 경비 화면에 "
+            "위에서 아래 순서대로 들어갑니다. ● = 설정됨(영수증에 맞춰짐), ○ = 아직 안 함. "
             "'영수증에서 찾을 글자'가 비어 있는 항목은 영수증에 맞춰지지 않으니, 실제로 쓰는 항목만 채우세요. "
             "위에 있는 항목이 먼저 맞춰집니다(▲▼로 순서 바꿈).")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
@@ -4080,7 +4134,7 @@ class CategoryEditor:
         self.only_on = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="설정한 항목만 보기", variable=self.only_on,
                         command=self.refresh_list).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
-        self.listbox = tk.Listbox(left, width=40, height=22, exportselection=False, font=("Malgun Gothic", 10))
+        self.listbox = tk.Listbox(left, width=34, height=22, exportselection=False, font=("Malgun Gothic", 10))
         self.listbox.grid(row=2, column=0, sticky="nsew")
         sb = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
         sb.grid(row=2, column=1, sticky="ns")
@@ -4092,50 +4146,67 @@ class CategoryEditor:
                           ("▼ 아래로", lambda: self.move(1))):
             ttk.Button(bf, text=text, command=cmd).pack(side="left", padx=2)
 
-        # 오른쪽: 입력 칸
+        # 오른쪽: 입력 칸 (항목 이름·찾을 글자, 그다음 Concur 경비 화면 위에서 아래 순서)
         right = ttk.Frame(outer)
         right.grid(row=1, column=1, sticky="nsew")
         right.columnconfigure(1, weight=1)
         self.vars = {}
-        types = self.type_choices
-        fields = (("name", "항목 이름", "한글로 알아보기 쉬운 이름을 마음대로 적으세요. 예: 톨게이트, 택시, 주유. "
-                   "영수증 목록의 '분류' 칸에 이 이름이 나옵니다."),
-                  ("keywords", "영수증에서 찾을 글자", "영수증에 이 글자가 있으면 이 항목. 쉼표로 여러 개. 예: 통행료, 톨게이트, 하이패스"),
-                  ("comment", "Comment", "{hospital} 자리에 병원 영문명이 들어갑니다. 예: Toll fee for service in {hospital}"),
-                  ("purpose", "Business Purpose", "예: For service"),
-                  ("etype", "Expense Type", "▼를 눌러 Concur 항목을 고르세요. Concur의 Expense Type이 Undefined(비어 있음)일 때 "
-                   "이 항목을 고릅니다. 목록에 없는 항목은 Concur 경비 편집 화면에서 [화면 조사]를 하면 읽어 옵니다."))
+        hint_style = {"foreground": "#777", "wraplength": 470, "justify": "left"}
         r = 0
-        for key, label, hint in fields:
-            ttk.Label(right, text=label).grid(row=r, column=0, sticky="w", pady=(6, 0), padx=(0, 10))
-            var = self.vars[key] = tk.StringVar()
-            if key == "etype":
-                w = ttk.Combobox(right, textvariable=var, values=types)
-                w.bind("<<ComboboxSelected>>", lambda e: self.on_edit())
-            else:
-                w = ttk.Entry(right, textvariable=var)
-                if key == "name":
-                    self.name_entry = w
-            w.grid(row=r, column=1, sticky="ew", pady=(6, 0))
-            w.bind("<KeyRelease>", lambda e: self.on_edit())
-            ttk.Label(right, text=hint, foreground="#777", wraplength=420, justify="left").grid(row=r + 1, column=1, sticky="w")
-            r += 2
-        ttk.Label(right, text="미리보기").grid(row=r, column=0, sticky="nw", pady=(12, 0))
-        self.preview = ttk.Label(right, text="", justify="left", wraplength=420, foreground="#1a4d8f")
-        self.preview.grid(row=r, column=1, sticky="w", pady=(12, 0))
-        r += 1
-        self.status = ttk.Label(right, text="", foreground="#b05000", wraplength=420, justify="left")
-        self.status.grid(row=r, column=1, sticky="w", pady=(8, 0))
 
-        # 아래: 기본 Expense Type, 저장
+        def label(text, row, top=5):
+            ttk.Label(right, text=text).grid(row=row, column=0, sticky="w", pady=(top, 0), padx=(0, 10))
+
+        def hint(text, row):
+            ttk.Label(right, text=text, **hint_style).grid(row=row, column=1, sticky="w")
+
+        def entry(key, text, hint_text="", combo=None, readonly=False):
+            nonlocal r
+            label(text, r)
+            var = self.vars[key] = tk.StringVar()
+            if combo is None:
+                w = ttk.Entry(right, textvariable=var)
+            else:
+                w = ttk.Combobox(right, textvariable=var, values=combo, state="readonly" if readonly else "normal")
+                w.bind("<<ComboboxSelected>>", lambda e: self.on_edit())
+            w.grid(row=r, column=1, sticky="ew", pady=(5, 0))
+            w.bind("<KeyRelease>", lambda e: self.on_edit())
+            r += 1
+            if hint_text:
+                hint(hint_text, r)
+                r += 1
+            return w
+
+        self.name_entry = entry("name", "항목 이름", "한글로 알아보기 쉬운 이름 (예: 톨게이트, 택시, 주유)")
+        entry("keywords", "영수증에서 찾을 글자", "영수증에 이 글자가 있으면 이 항목 (쉼표로 여러 개)")
+        ttk.Separator(right).grid(row=r, column=0, columnspan=2, sticky="ew", pady=(10, 2))
+        r += 1
+        ttk.Label(right, text="Concur 경비 화면에 넣을 값 (화면 위에서 아래 순서대로 입력)", foreground="#1a4d8f").grid(
+            row=r, column=0, columnspan=2, sticky="w")
+        r += 1
+        self.etype_box = entry("etype", "Expense Type", "Concur에 Undefined일 때 고름 (비우면 그대로 두고 '확인 필요')",
+                               combo=self.type_choices)
+        entry("purpose", "Business Purpose")
+        self.city_box = entry("city", "City", "보통은 영수증 주소에서 찾기 (못 찾으면 기본 도시)", combo=self.city_choices)
+        entry("lcrt", "LCRT", combo=LCRT_CHOICES)
+        entry("receipt", "Receipt Status", combo=RECEIPT_CHOICES)
+        label("Personal Expense", r)
+        self.personal = tk.BooleanVar(value=False)
+        ttk.Checkbutton(right, text="체크하기 (개인 경비로 처리할 항목만)",
+                        variable=self.personal, command=self.on_edit).grid(row=r, column=1, sticky="w", pady=(5, 0))
+        r += 1
+        entry("comment", "Comment", "{hospital} 자리에 병원 영문명 (병원을 못 찾으면 ' in {hospital}'은 빠짐)")
+
+        ttk.Label(right, text="미리보기").grid(row=r, column=0, sticky="nw", pady=(10, 0))
+        self.preview = ttk.Label(right, text="", justify="left", wraplength=470, foreground="#1a4d8f")
+        self.preview.grid(row=r, column=1, sticky="w", pady=(10, 0))
+        r += 1
+        self.status = ttk.Label(right, text="", foreground="#b05000", wraplength=470, justify="left")
+        self.status.grid(row=r, column=1, sticky="w", pady=(6, 0))
+
+        # 아래: 저장
         bottom = ttk.Frame(outer)
-        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        ttk.Label(bottom, text="어느 항목에도 안 맞을 때 Expense Type").pack(side="left")
-        self.default_var = tk.StringVar(value=self.default_type)
-        dc = ttk.Combobox(bottom, textvariable=self.default_var, values=types, width=28)
-        dc.pack(side="left", padx=6)
-        dc.bind("<<ComboboxSelected>>", lambda e: self.mark_dirty())
-        dc.bind("<KeyRelease>", lambda e: self.mark_dirty())
+        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Button(bottom, text="닫기", command=self.close).pack(side="right", padx=3)
         ttk.Button(bottom, text="엑셀로 열기", command=self.open_excel).pack(side="right", padx=3)
         ttk.Button(bottom, text="저장", style="Big.TButton", command=self.save).pack(side="right", padx=3)
@@ -4175,8 +4246,15 @@ class CategoryEditor:
         self.current = self.visible[sel[0]]
         row = self.rows[self.current]
         self.loading = True
-        for key, value in zip(("name", "keywords", "comment", "purpose", "etype"), row[:5]):
-            self.vars[key].set(value)
+        for key, col in self.FIELDS:
+            self.vars[key].set(row[col])
+        if not row[C_CITY]:
+            self.vars["city"].set(CITY_FROM_RECEIPT)
+        if not row[C_LCRT]:
+            self.vars["lcrt"].set(LCRT_CHOICES[0])
+        if not row[C_RECEIPT]:
+            self.vars["receipt"].set(RECEIPT_CHOICES[0])
+        self.personal.set(item_extras(row)["Personal Expense"])
         self.loading = False
         self.update_preview()
 
@@ -4185,7 +4263,11 @@ class CategoryEditor:
         if self.loading or self.current is None:
             return
         row = self.rows[self.current]
-        row[:5] = [self.vars[k].get().strip() for k in ("name", "keywords", "comment", "purpose", "etype")]
+        for key, col in self.FIELDS:
+            row[col] = self.vars[key].get().strip()
+        if row[C_CITY] == CITY_FROM_RECEIPT:
+            row[C_CITY] = ""
+        row[C_PERSONAL] = "O" if self.personal.get() else ""
         self.mark_dirty()
         if self.current in self.visible:
             pos = self.visible.index(self.current)
@@ -4199,8 +4281,7 @@ class CategoryEditor:
             self.preview.configure(text="")
             return
         row = self.rows[self.current]
-        etype = row[4] or f"{self.default_var.get().strip()} (비어 있어 아래 기본값)"
-        self.preview.configure(text=category_preview(row[2], row[3]) + f"\nExpense Type: {etype}")
+        self.preview.configure(text=category_preview(row, self.default_city))
         self.status.configure(text="" if row[1].strip() else
                               "아직 '영수증에서 찾을 글자'가 비어 있어 이 항목은 영수증에 맞춰지지 않습니다.")
 
@@ -4224,7 +4305,7 @@ class CategoryEditor:
         existing = next((i for i, r in enumerate(self.rows) if r[0] == name), None)
         if existing is None:
             at = self.current + 1 if self.current is not None else 0
-            self.rows.insert(at, [name, "", "", "", "", ""])
+            self.rows.insert(at, _category_row([name]))
             existing = at
             self.mark_dirty()
         self.current = existing
@@ -4269,7 +4350,7 @@ class CategoryEditor:
                 parent=self.win):
             return False
         try:
-            save_category_rows(self.path, self.rows, self.default_var.get().strip())
+            save_category_rows(self.path, self.rows)
         except PermissionError:
             self.app.mb.showerror("저장", "자동입력표.csv가 엑셀에 열려 있습니다. 엑셀을 닫고 다시 저장하세요.", parent=self.win)
             return False

@@ -29,7 +29,7 @@ def test_first_table_has_current_settings(tmp_path):
     cfg, order, path, lines = table(tmp_path)
     assert order == ["식대", "카페", "주차"]
     rows = [r for r in ca.read_csv_dicts(path)]
-    assert [r["분류"] for r in rows] == ["식대", "카페", "주차", "(분류 없음)"]
+    assert [r["분류"] for r in rows] == ["식대", "카페", "주차"]               # '(분류 없음)' 줄은 이제 없음
     parking = rows[2]
     assert parking["영수증에서 찾을 글자(쉼표로 구분)"] == "주차, 입차, 출차, 주자"
     assert parking["Comment"] == "Parking fee for service in {hospital}"
@@ -60,7 +60,7 @@ def test_add_new_category_and_change_existing_text(tmp_path):
     assert ca.texts_for(parking, cfg) == {"Comment": "Parking fee for customer visit in Wonkwang University Hospital",
                                           "Business Purpose": "Customer visit"}
     assert analyze(cfg, "김밥천국 합계 8,000").category == "식대"            # 새로 넣은 찾을 글자
-    assert cfg["Undefined일_때_선택할_유형"] == {"분류없음": "Miscellaneous", "톨게이트": "Parking & Toll",
+    assert cfg["Undefined일_때_선택할_유형"] == {"톨게이트": "Parking & Toll",          # 예전 '(분류 없음)' 줄은 무시
                                              "식대": "Other Staff Expenses", "카페": "Other Staff Expenses",
                                              "주차": "Parking & Toll"}
 
