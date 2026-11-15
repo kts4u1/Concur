@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 작은 글자 크게 읽기"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 톨게이트 묶음"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -171,12 +171,14 @@ CAFE_MORE_WORDS = ["커피", "라떼", "카푸치노", "에스프레소", "프�
 PARKING_WORDS = ["주차", "입차", "출차", "주자"]              # '주자'는 OCR이 '주차'를 잘못 읽은 것
 PARKING_MORE_WORDS = ["입출차", "파킹", "발렛", "parking", "valet"]
 # 예전 자동입력표에 판마다 한 번씩만 더할 글자(사용자가 나중에 지운 글자는 다시 넣지 않음)
-DEFAULT_WORDS_VERSION = 4
+TOLL_DEFAULT_WORDS = ["톨게이트", "통행료", "하이패스", "한국도로공사", "도로공사", "hi-pass", "사용내역"]
+DEFAULT_WORDS_VERSION = 5
 DEFAULT_WORDS_BY_VERSION = {
     1: {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS},
     2: {"카페": CAFE_WORDS + CAFE_MORE_WORDS, "주차": PARKING_WORDS + PARKING_MORE_WORDS},
     3: {},                                                 # 판 3: 문구 철자 고치기(SPELLING_FIXES)
     4: {},                                                 # 판 4: {hospital} → hospital, 식대의 '버터' 빼기
+    5: {"톨게이트": TOLL_DEFAULT_WORDS},                    # 판 5: 사용자가 만든 '톨게이트' 항목에 하이패스 글자
 }
 SPELLING_FIXES = [(re.compile(r"\bAccomodation", re.I), "Accommodation")]
 REMOVED_WORDS = {"식대": ["버터"]}                         # 사용자가 빼 달라고 한 기본 글자(판 4)
@@ -1889,6 +1891,11 @@ class Receipt:
     biz_no: str = ""                                # 사업자등록번호(가게 기억에 씀)
     extra_comment: str = ""                         # 영수증 확인 창에서 적은 글(서비스 오더 번호 등) → Comment 맨 뒤
     remembered: bool = False                        # 가게 기억으로 분류·병원·도시를 채웠는지
+    bundle: list = field(default_factory=list)      # 함께 첨부할 사진(하이패스 사용내역 + 영수증 인쇄물)
+    bundle_note: str = ""                           # 묶음 설명(건수·총액·영수증 합계 비교)
+    bundle_issue: str = ""                          # 묶음 확인할 것(합계가 다를 때)
+    period: tuple = ()                              # 사용내역 기간(시작, 끝) — 이 안의 Concur 경비와 맞춤
+    bundled_into: str = ""                          # 이 사진이 함께 붙는 사용내역 사진 이름
 
     @property
     def main_date(self) -> str:
@@ -2313,6 +2320,93 @@ def category_from_vendor(vendor: str, cfg: dict) -> str:
     return detect_category(compact(vendor), cfg.get("키워드") or {}, cfg.get("분류_우선순위")) if vendor else ""
 
 
+# ---------- 톨게이트: 하이패스 '기간별 사용내역' + 영수증 인쇄물 묶음 (2026-11-15 사용자 설명) ----------
+# 사용내역(총 13건 / 총액 61,500원)의 총액이 경비 금액이고, 하이패스 영수증 인쇄물(한 장에 여러 장)은
+# 사용내역 순서대로의 영수증이라 같은 경비에 함께 올리기만 합니다.
+TOLL_WORDS = ("hi-pass", "hipass", "하이패스", "선불", "통행", "톨게이트", "도로공사")
+
+
+def toll_statement_info(text: str):
+    """하이패스 '기간별 사용내역'이면 {'total': 총액, 'count': 건수}, 아니면 None"""
+    t = compact(_fix_amount_text(text))
+    if "사용내역" not in t or not any(w in t.lower() for w in TOLL_WORDS):
+        return None
+    m = re.search(r"총액[:：]?(\d[\d,]{2,})원", t)
+    n = re.search(r"총(\d{1,3})건", t)
+    return {"total": int(m.group(1).replace(",", "")) if m else 0, "count": int(n.group(1)) if n else None}
+
+
+def hipass_sheet_info(text: str):
+    """하이패스 영수증 인쇄물이면 {'amounts': 영수증마다 금액, 'footer': (건수, 합계) 또는 None}, 아니면 None"""
+    t = compact(_fix_amount_text(text))
+    if "영수증" not in t or not ("하이패스" in t or "도로공사" in t or "통행료" in t):
+        return None
+    amounts = [int(a.replace(",", "")) for a in re.findall(r"(\d[\d,]{2,})원\(카드\)", t)]
+    f = re.search(r"총(\d{1,3})건/?(\d[\d,]{2,})원", t)
+    return {"amounts": amounts, "footer": (int(f.group(1)), int(f.group(2).replace(",", ""))) if f else None}
+
+
+def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
+    """이 달 하이패스 사용내역마다 같은 달 하이패스 영수증 인쇄물을 묶습니다.
+    사용내역 = 경비 하나(금액 = 총액, 기간 안의 Concur 경비와 맞춤), 인쇄물 = 함께 첨부(따로 맞추지 않음). → 묶은 사용내역 수"""
+    prefix = tm.prefix + "-"
+    in_month = lambda r: any(d.startswith(prefix) for d in (r.ocr_dates or r.dates[:1]))
+    stmts = [(r, i) for r, i in ((r, toll_statement_info(r.ocr_text)) for r in receipts) if i and in_month(r)]
+    if not stmts:
+        return 0
+    stmt_ids = {id(r) for r, _ in stmts}
+    sheets = [(r, i) for r, i in ((r, hipass_sheet_info(r.ocr_text)) for r in receipts if id(r) not in stmt_ids) if i]
+
+    def near(a, b):                                       # 찍은 시각이 하루 안
+        return a.taken and b.taken and abs((a.taken - b.taken).total_seconds()) <= 86400
+
+    for sheet, _ in sheets:                               # 인쇄물마다 맞는 사용내역 하나
+        if sheet.ocr_dates and not in_month(sheet):
+            continue
+        scored = [(len(set(sheet.ocr_dates) & set(s.ocr_dates)), bool(near(sheet, s)), -abs(((sheet.taken or datetime.min)
+                   - (s.taken or datetime.min)).total_seconds()), s) for s, _ in stmts]
+        scored = [x for x in scored if x[0] or x[1] or len(stmts) == 1 and (sheet.ocr_dates or near(sheet, x[3]))]
+        if scored:
+            owner = max(scored, key=lambda x: x[:3])[3]
+            sheet.bundled_into = owner.original.name
+    for s, info in stmts:
+        members = sorted([(r, i) for r, i in sheets if r.bundled_into == s.original.name],
+                         key=lambda x: (min(x[0].ocr_dates) if x[0].ocr_dates else "9999", x[0].original.name.lower()))
+        footer = next((i["footer"] for _, i in members if i["footer"]), None)
+        total = info["total"] or (footer[1] if footer else 0) or s.total
+        if total:
+            s.total, s.is_receipt = total, True
+            s.amounts = [total] + [a for a in s.amounts if a != total]
+        mine = sorted(d for d in s.ocr_dates + [d for r, _ in members for d in r.ocr_dates] if d.startswith(prefix))
+        if mine:
+            s.period = (mine[0], mine[-1])
+        s.bundle = [r.original for r, _ in members]
+        if not s.category:
+            text = compact(s.ocr_text + "".join(r.ocr_text for r, _ in members))
+            s.category = detect_category(text, keywords or {}, priority) or next((r.category for r, _ in members if r.category), "")
+        for r, _ in members:
+            r.use, r.skip_reason = False, f"하이패스 사용내역({s.original.name})에 함께 첨부"
+        read = [a for _, i in members for a in i["amounts"]]
+        head = f"사용내역 {info['count'] or '?'}건 {total:,}원" + (f", 영수증 인쇄물 {len(members)}장 함께 첨부" if members else "")
+        s.bundle_issue = ""
+        if not members:
+            note = "함께 붙일 하이패스 영수증 인쇄물을 못 찾음"
+        elif footer and footer[1] == total and (info["count"] in (None, footer[0])):
+            note = f"영수증 {footer[0]}건 {footer[1]:,}원 맞음"
+        elif footer:
+            note = f"영수증 {footer[0]}건 {footer[1]:,}원"
+            s.bundle_issue = f"하이패스 영수증 합계({footer[1]:,}원)가 사용내역 총액({total:,}원)과 다름"
+        elif read and sum(read) == total:
+            note = f"영수증 {len(read)}건 {sum(read):,}원 맞음"
+        elif read and info["count"] and len(read) == info["count"]:
+            note = f"영수증 {len(read)}건 {sum(read):,}원"
+            s.bundle_issue = f"하이패스 영수증 합계({sum(read):,}원)가 사용내역 총액({total:,}원)과 다름"
+        else:
+            note = f"영수증에서 읽은 것 {len(read)}건 {sum(read):,}원(일부만 읽음, 사진으로 확인)" if read else "영수증 금액은 못 읽음"
+        s.bundle_note = f"{head} ({note})"
+    return len(stmts)
+
+
 def receipt_issues(rec: Receipt, receipts: list) -> list:
     issues = []
     if not rec.use:
@@ -2326,6 +2420,8 @@ def receipt_issues(rec: Receipt, receipts: list) -> list:
     # 병원 이름이 없는 영수증이 많아 '병원 없음'은 확인할 것으로 치지 않음(Comment에서 ' in hospital'만 빠짐)
     if duplicate_count(rec, receipts) > 1:
         issues.append("같은 날짜·금액 영수증 있음")
+    if rec.bundle_issue:
+        issues.append(rec.bundle_issue)
     return issues
 
 
@@ -2337,7 +2433,8 @@ def duplicate_count(rec: Receipt, receipts: list) -> int:
 
 LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "병원 근거", "도시", "확인 필요",
                "OCR 앞부분", "[자동] 사용", "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문", "[자동] 도시",
-               "날짜 후보", "금액 후보", "찾은 병원 글자", "사진 위치", "사업자번호", "가게 기억", "추가 Comment"]
+               "날짜 후보", "금액 후보", "찾은 병원 글자", "사진 위치", "사업자번호", "가게 기억", "추가 Comment",
+               "함께 첨부"]
 NOT_RECEIPT_NOTE = "영수증 아닌 것 같음(자동 제외)"
 UNDATED_NOTE = "날짜 못 읽음: 영수증 날짜를 적어 주세요(자동 제외)"
 OTHER_MONTH_NOTE = "다른 달 영수증({date})(자동 제외)"
@@ -2442,6 +2539,7 @@ def save_receipt_list(receipts: list, auto: dict, path: Path):
             "O" if a.use else "X", a.main_date, a.total or "", a.category, a.hospital_en, city_name(a.city),
             " ".join(a.dates), " ".join(str(x) for x in a.amounts), a.hospital_key, str(r.original),
             r.biz_no, "O" if a.remembered else "", r.extra_comment,
+            (", ".join(p.name for p in r.bundle) + f" | {r.bundle_note}") if r.bundle or r.bundle_note else "",
         ])
     write_csv(path, LIST_HEADER, rows)
 
@@ -2667,6 +2765,9 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         log(f"   기억해 둔 가게의 영수증 {remembered}장은 그때 고른 분류·병원·도시로 맞췄습니다.")
 
     for group in (list(auto.values()), receipts):
+        if group_toll_bundles(group, tm, cfg.get("키워드"), cfg.get("분류_우선순위")) and group is receipts:
+            for s in (r for r in receipts if r.bundle_note):
+                log(f"   톨게이트: {s.original.name} {s.bundle_note}")
         fill_same_day_hospitals(group)
         fill_same_day_cities(group)
     list_path = list_csv_path(results_dir, tm)
@@ -2727,7 +2828,8 @@ def concur_amount_to_int(text: str):
 
 def find_receipt(receipts: list, iso_date: str, amount: int):
     """날짜·금액이 맞는 영수증. 영수증 날짜(대표 날짜)가 같은 것을 먼저 보고, 촬영 날짜 등 다른 후보는 나중에 봅니다."""
-    pool = [r for r in receipts if r.use and not r.used_for and iso_date in r.dates]
+    pool = [r for r in receipts if r.use and not r.used_for
+            and (iso_date in r.dates or (r.period and r.period[0] <= iso_date <= r.period[1]))]
     for main_first in (True, False):
         candidates = [r for r in pool if (r.main_date == iso_date) == main_first]
         for r in candidates:
@@ -2767,6 +2869,36 @@ def texts_for(rec: Receipt, cfg: dict) -> dict:
     if extra:
         out["Comment"] = f"{out.get('Comment', '')} {extra}".strip()
     return out
+
+
+def prepare_bundle_pdf(files: list, cfg: dict, work_dir: Path) -> Path:
+    """사진 여러 장을 차례대로 PDF 한 파일로(사용내역 → 영수증 인쇄물). Concur 크기 제한 안으로 줄입니다."""
+    from PIL import Image, ImageOps
+    if any(Path(f).suffix.lower() in HEIC_EXTENSIONS for f in files) and not _register_heif():
+        raise RuntimeError("HEIC 사진을 읽으려면 pillow-heif 가 필요합니다:  pip install -r requirements.txt")
+    limit = float(cfg.get("업로드_최대_MB", 5)) * 1024 * 1024
+    pages = []
+    for f in files:
+        with Image.open(f) as im:
+            pages.append(ImageOps.exif_transpose(im).convert("RGB"))
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out = work_dir / f"{Path(files[0]).stem}_묶음{len(files)}장.pdf"
+    for long_side, quality in ((2400, 85), (2000, 80), (1700, 75), (1400, 70), (1100, 65), (900, 60)):
+        scaled = []
+        for im in pages:
+            k = min(1.0, long_side / max(im.size))
+            scaled.append(im if k == 1.0 else im.resize((round(im.width * k), round(im.height * k)), Image.LANCZOS))
+        scaled[0].save(out, "PDF", save_all=True, append_images=scaled[1:], resolution=200, quality=quality)
+        if out.stat().st_size <= limit * 0.95:
+            return out
+    raise RuntimeError(f"묶음 PDF를 업로드 크기 제한 안으로 줄이지 못했습니다: {out.name}")
+
+
+def upload_file_for(rec: Receipt, cfg: dict, work_dir: Path) -> Path:
+    """Concur에 올릴 파일: 함께 첨부할 사진이 있으면 PDF 하나로 묶고, 아니면 사진 한 장"""
+    if rec.bundle:
+        return prepare_bundle_pdf([rec.original] + list(rec.bundle), cfg, work_dir)
+    return prepare_upload_file(rec, cfg, work_dir)
 
 
 def prepare_upload_file(rec: Receipt, cfg: dict, work_dir: Path) -> Path:
@@ -4265,7 +4397,9 @@ class ConcurBot:
                         checks.append("분류 없음(영수증만 첨부)")
                     if duplicate_count(rec, receipts) > 1:
                         checks.append("같은 날짜·금액 영수증 여러 장")
-                    upload = prepare_upload_file(rec, self.cfg, work_dir)
+                    upload = upload_file_for(rec, self.cfg, work_dir)
+                    if rec.bundle:
+                        self.log(f"   하이패스 사용내역과 영수증 인쇄물 {len(rec.bundle)}장을 PDF 하나로 묶어 올립니다.")
                 done = self.fill_expense(rec, upload, checks)
                 row["처리"] = ", ".join(done) or "변경 없음"
                 self.log(f"   ({i}/{total}) {date_text} {amount_text}원 → "
@@ -5717,6 +5851,8 @@ class ReceiptReview:
         issue = g("확인 필요") or "없음"
         if g("가게 기억") == "O":
             issue += "  (기억해 둔 가게라 예전에 고른 분류·병원·도시로 맞춤)"
+        if g("함께 첨부"):
+            issue += f"\n함께 첨부: {g('함께 첨부')}"
         self.issue_label.configure(text=issue)
         self.ocr_label.configure(text=g("OCR 앞부분") or "(읽은 글자 없음)")
         self.status.configure(text="")

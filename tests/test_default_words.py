@@ -65,7 +65,8 @@ def test_old_table_gets_words_once(tmp_path):
     cafe = [k.strip() for k in by["카페"][ca.C_KEYWORDS].split(",")]
     assert cafe[:2] == ["메리카", "카페"] and "스타벅스" in cafe and "coffee" in cafe
     assert "parking" in by["주차"][ca.C_KEYWORDS] and by["주차"][ca.C_KEYWORDS].startswith("주차, 입차, ")
-    assert by["톨게이트"][ca.C_KEYWORDS] == "통행료"                                          # 사용자 항목은 그대로
+    assert by["톨게이트"][ca.C_KEYWORDS].startswith("통행료, 톨게이트, 하이패스")            # 사용자 글자 뒤에 판 5 글자
+    assert by["톨게이트"][ca.C_COMMENT] == "Toll fee"                                       # 문구는 그대로
     assert ca.load_settings(settings)[0]["_기본_찾을_글자_판"] == ca.DEFAULT_WORDS_VERSION
 
     rows = ca.load_category_rows(table, ca.default_settings())                           # 사용자가 글자를 지워도
@@ -129,12 +130,12 @@ def test_version_3_users_hospital_mark_and_butter(tmp_path):
             ["숙박", "모텔", "Accommodation fee for service in hospital", "For service in hospital", "Accommodation", ""]]
     ca.save_category_rows(table, rows)
     lines = []
-    assert ca.upgrade_category_table(table, settings, lines.append) == 0
+    assert ca.upgrade_category_table(table, settings, lines.append) == len(ca.TOLL_DEFAULT_WORDS) - 1   # 판 5: 톨게이트 글자
     by = {r[ca.C_NAME]: r for r in ca.load_category_rows(table, ca.default_settings())}
     assert by["식대"][ca.C_KEYWORDS] == "찌개, 한식, 식권"
     assert by["식대"][ca.C_COMMENT] == "Overtime meal fee for service in hospital"
     assert by["식대"][ca.C_NOTE] == ca.CATEGORY_NOTE and "{" not in by["식대"][ca.C_NOTE]
-    assert by["톨게이트"][ca.C_KEYWORDS] == "통행료, 버터"                          # 다른 항목에 적은 것은 그대로
+    assert by["톨게이트"][ca.C_KEYWORDS].startswith("통행료, 버터, 톨게이트")       # 다른 항목에 적은 버터는 그대로
     assert by["톨게이트"][ca.C_COMMENT] == "Toll fee at hospital"
     assert by["숙박"][ca.C_PURPOSE] == "For service in hospital"
     saved = ca.load_settings(settings)[0]
