@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 촬영 기간 제한 없앰"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 작은 글자 크게 읽기"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -1759,6 +1759,18 @@ def old_processed_note(cfg: dict) -> str:
 # 2. Windows OCR (PAD의 'Windows OCR'과 같은 엔진)
 # ============================================================
 
+def tile_boxes(width: int, height: int, tile: int, overlap: int = 160) -> list:
+    """사진을 tile 픽셀 이하 조각으로 나눈 상자들 [(x0, y0, x1, y1), ...]. 조각끼리 overlap만큼 겹쳐 줄이 잘려도 한쪽에는 다 들어갑니다.
+    위에서 아래, 왼쪽에서 오른쪽 순서."""
+    def starts(total):
+        if total <= tile:
+            return [0]
+        n = -(-(total - overlap) // (tile - overlap))          # 올림
+        step = (total - tile) / (n - 1)
+        return [round(i * step) for i in range(n)]
+    return [(x, y, min(x + tile, width), min(y + tile, height)) for y in starts(height) for x in starts(width)]
+
+
 class WindowsOcr:
     def __init__(self, temp_dir: Path):
         try:
@@ -1810,6 +1822,31 @@ class WindowsOcr:
             close = getattr(stream, "close", None)
             if close:
                 close()
+
+    def read_zoomed(self, path: Path, zoom: float = 1.5) -> str:
+        """작은 글자를 크게 읽기: 사진을 줄이지 않고 조각으로 나눠 zoom배로 키운 뒤 조각마다 읽어 이어 붙입니다.
+        (Windows OCR은 큰 사진을 한 번에 못 읽어 보통은 줄여서 읽는데, 영수증 여러 장을 한 장에 찍은 사진은
+        줄이면 글자가 너무 작아져 틀리게 읽힘)"""
+        cv2, _ = _cv2()
+        img = imread_unicode(path)
+        if img is None:
+            return ""
+        h, w = img.shape[:2]
+        tile = max(400, int((self.max_dim - 1) / zoom))
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        parts = []
+        for i, (x0, y0, x1, y1) in enumerate(tile_boxes(w, h, tile)):
+            piece = cv2.resize(img[y0:y1, x0:x1], None, fx=zoom, fy=zoom, interpolation=cv2.INTER_CUBIC)
+            tmp = self.temp_dir / f"ocr_{path.stem}_{i}.jpg"
+            imwrite_unicode(tmp, piece, ".jpg", [cv2.IMWRITE_JPEG_QUALITY, 95])
+            try:
+                parts.append(asyncio.run(self._read(tmp)))
+            finally:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        return "\n".join(t for t in parts if t.strip())
 
     def read(self, path: Path) -> str:
         src, temp = self._fit_size(path)
@@ -1893,7 +1930,12 @@ def parse_amount_cell(text: str):
     return int(digits) if digits else None
 
 
-def find_ocr_dates(ocr_text: str) -> list:
+DATE_NO_YEAR = re.compile(r"(?<!\d)(\d{1,2})\s*월\s*(\d{1,2})\s*일")      # 10월01일 (연도가 안 찍혔거나 못 읽음)
+
+
+def find_ocr_dates(ocr_text: str, ref=None) -> list:
+    """영수증 글자의 날짜들(ISO). 연도까지 있는 날짜가 하나도 없으면 '10월 01일'처럼 연도 없는 날짜를
+    ref(촬영 날짜)의 연도로 읽습니다(ref보다 뒤 달이면 전해)."""
     found = []
     candidates = [m.groups() for m in DATE_IN_TEXT.finditer(ocr_text)]
     candidates += [m.groups() for m in DATE_COMPACT.finditer(ocr_text)]
@@ -1902,6 +1944,13 @@ def find_ocr_dates(ocr_text: str) -> list:
         iso = normalize_date(y, mo, d)
         if iso and iso not in found:
             found.append(iso)
+    ref_day = _as_date(ref) if ref else None
+    if not found and ref_day:
+        for mo, d in (m.groups() for m in DATE_NO_YEAR.finditer(ocr_text)):
+            year = ref_day.year if int(mo) <= ref_day.month else ref_day.year - 1
+            iso = normalize_date(year, mo, d)
+            if iso and iso not in found:
+                found.append(iso)
     return found
 
 
@@ -1925,7 +1974,7 @@ def find_receipt_time(text: str):
     """영수증에 찍힌 시각 (시, 분). 날짜 바로 뒤의 시각을 먼저 보고, 없으면 '거래일시·결제·입실…' 같은 글자 뒤의 시각.
     영업시간처럼 아무 데나 있는 시각은 쓰지 않습니다. 못 찾으면 None."""
     text = text or ""
-    for date_re in (DATE_IN_TEXT, DATE_SHORT_YEAR, DATE_COMPACT):
+    for date_re in (DATE_IN_TEXT, DATE_SHORT_YEAR, DATE_COMPACT, DATE_NO_YEAR):
         for d in date_re.finditer(text):
             m = TIME_IN_TEXT.search(text[d.end():d.end() + 25])
             if m and text[d.end():d.end() + m.start()].count("\n") <= 1:     # 날짜와 같은 줄이나 바로 다음 줄
@@ -2101,6 +2150,12 @@ def detect_hospital(text_compact: str, mapping: list) -> tuple:
     return best
 
 
+def receipt_word_hits(text: str, cfg: dict) -> int:
+    """영수증에 흔한 글자(설정 '영수증_판별_단어')가 몇 개 보이는지"""
+    t = compact(text or "")
+    return sum(1 for w in (cfg.get("영수증_판별_단어") or []) if w and w in t)
+
+
 def looks_like_receipt(text_compact: str, amounts: list, has_ocr_date: bool, category: str, words) -> bool:
     """금액이 있고 (영수증 글자 / OCR 날짜 / 분류 키워드) 중 하나가 있으면 영수증.
     금액을 못 읽었어도 영수증 글자가 두 개 이상이면 영수증으로 봅니다."""
@@ -2151,7 +2206,7 @@ def fill_same_day_cities(receipts: list) -> int:
 def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, hospitals: list,
                     taken=None) -> Receipt:
     rec = Receipt(original=original, ocr_file=ocr_file, ocr_text=ocr_text, taken=taken)
-    rec.ocr_dates = find_ocr_dates(ocr_text)
+    rec.ocr_dates = find_ocr_dates(ocr_text, taken or file_name_date(original.name))
     rec.dates = list(rec.ocr_dates)
     rec.date_from_ocr = bool(rec.dates)
     fdate = taken.date().isoformat() if taken else file_name_date(original.name)
@@ -2507,7 +2562,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             pass
     memory = load_store_memory(memory_path)
     engine = []
-    counts = {"보정": 0, "나아짐": 0}
+    counts = {"보정": 0, "나아짐": 0, "크게": 0, "크게 나아짐": 0}
     note = old_processed_note(cfg)
     if note:
         log("   " + note)
@@ -2517,13 +2572,31 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         c = cache.get(key)
         if c and c.get("size") == st.st_size and c.get("mtime") == int(st.st_mtime) and "text" in c:
             return c["text"]
+        try:
+            text = ocr_engine().read(path)
+        except Exception as e:
+            log(f"   OCR 실패: {path.name} ({e})")
+            text = ""
+        cache[key] = {"size": st.st_size, "mtime": int(st.st_mtime), "text": text}
+        return text
+
+    def ocr_engine():
         if not engine:
             log("OCR 중... (사진 1장에 1~2초)")
             engine.append(WindowsOcr(work_dir))
+        return engine[0]
+
+    def zoomed_text(orig: Path, st) -> str:
+        """작은 글자를 크게 다시 읽은 글자(결과는 '파일이름#크게'로 기억)"""
+        key = orig.name + "#크게"
+        c = cache.get(key)
+        if c and c.get("size") == st.st_size and c.get("mtime") == int(st.st_mtime) and "text" in c:
+            return c["text"]
+        reader = getattr(ocr_engine(), "read_zoomed", None)
         try:
-            text = engine[0].read(path)
+            text = reader(orig) if reader else ""
         except Exception as e:
-            log(f"   OCR 실패: {path.name} ({e})")
+            log(f"   크게 읽기 실패: {orig.name} ({e})")
             text = ""
         cache[key] = {"size": st.st_size, "mtime": int(st.st_mtime), "text": text}
         return text
@@ -2552,11 +2625,24 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             ocr_file, text = orig, read_text(orig, st)
             first = analyze_receipt(orig, orig, text, cfg, hospitals, taken)
             first_is_receipt = first.is_receipt
-            # 사진은 그대로 읽고, 영수증인데 금액이나 날짜를 못 읽었을 때만 보정해서 한 번 더 읽음
-            if use_pre and first_is_receipt and (not first.total or not first.date_from_ocr):
+            best = info_score(first)
+            missing = not first.total or not first.date_from_ocr
+            # 날짜나 금액을 못 읽은 영수증(또는 영수증 글자가 보이는 사진)은 줄이지 않고 크게 다시 읽음
+            if missing and (first_is_receipt or receipt_word_hits(text, cfg)):
+                counts["크게"] += 1
+                big = zoomed_text(orig, st)
+                if big.strip():
+                    again = analyze_receipt(orig, orig, big, cfg, hospitals, taken)
+                    if info_score(again) > best:
+                        text, best = big, info_score(again)
+                        first_is_receipt = first_is_receipt or again.is_receipt
+                        missing = not again.total or not again.date_from_ocr
+                        counts["크게 나아짐"] += 1
+            # 그래도 금액이나 날짜를 못 읽었으면 보정(대비·선명하게)해서 한 번 더 읽음
+            if use_pre and first_is_receipt and missing:
                 counts["보정"] += 1
                 better = enhanced_text(orig, st)
-                if better.strip() and info_score(analyze_receipt(orig, orig, better, cfg, hospitals, taken)) > info_score(first):
+                if better.strip() and info_score(analyze_receipt(orig, orig, better, cfg, hospitals, taken)) > best:
                     text = better
                     counts["나아짐"] += 1
 
@@ -2572,6 +2658,8 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             receipts.append(analyze())
     finally:
         _save_json(cache_path, cache)       # 중간에 멈춰도 읽은 결과는 남김
+    if counts["크게"]:
+        log(f"   금액·날짜를 못 읽어 작은 글자를 크게 다시 읽은 사진 {counts['크게']}장, 그중 더 잘 읽힌 것 {counts['크게 나아짐']}장")
     if counts["보정"]:
         log(f"   금액·날짜를 못 읽어 보정해서 다시 읽은 영수증 {counts['보정']}장, 그중 더 잘 읽힌 것 {counts['나아짐']}장")
     remembered = sum(1 for r in receipts if r.remembered)
