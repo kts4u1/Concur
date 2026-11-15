@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 새 경비는 저장 뒤 사진 올리기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-15 묻지 않고 새 경비·함께 첨부 ✓"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -2754,8 +2754,9 @@ def duplicate_count(rec: Receipt, receipts: list) -> int:
 LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "분류", "병원 영문", "병원 근거", "도시", "확인 필요",
                "OCR 앞부분", "[자동] 사용", "[자동] 날짜", "[자동] 금액", "[자동] 분류", "[자동] 병원 영문", "[자동] 도시",
                "날짜 후보", "금액 후보", "찾은 병원 글자", "사진 위치", "사업자번호", "가게 기억", "추가 Comment",
-               "함께 첨부"]
+               "함께 첨부", "붙는 영수증"]
 NOT_RECEIPT_NOTE = "영수증 아닌 것 같음(자동 제외)"
+NOT_RECEIPT_ASK_NOTE = "영수증 글자를 못 읽음: 필요한 사진이면 날짜·금액을 적어 주세요(자동 제외)"   # 처리할 달에 찍은 사진
 UNDATED_NOTE = "날짜 못 읽음: 영수증 날짜를 적어 주세요(자동 제외)"
 OTHER_MONTH_NOTE = "다른 달 영수증({date})(자동 제외)"
 UNDATED_LATER_NOTE = "다른 달 사진({date} 촬영, 날짜 못 읽음)(자동 제외)"   # 처리할 달 다음 달보다 나중에 찍은 사진
@@ -2768,7 +2769,8 @@ def place_in_month(rec: Receipt, tm: TargetMonth):
     date_edited = "날짜" in rec.edited
     rec.skip_reason = ""
     if not rec.is_receipt and not date_edited:      # 날짜를 직접 적었으면 영수증으로 봄
-        rec.skip_reason = NOT_RECEIPT_NOTE
+        taken_here = bool(rec.taken) and f"{rec.taken:%Y-%m}" == tm.prefix
+        rec.skip_reason = NOT_RECEIPT_ASK_NOTE if taken_here else NOT_RECEIPT_NOTE   # 그 달에 찍은 사진은 '확인 필요'
     else:
         receipt_dates = rec.dates if date_edited else (rec.pay_dates or rec.ocr_dates)   # 승인일시가 있으면 그 날짜로
         if receipt_dates:
@@ -2829,17 +2831,20 @@ def apply_user_edits(rec: Receipt, row: dict, tm=None, cities=None, categories=N
         rec.edited.append("사용")
 
 
+ASK_NOTES = (UNDATED_NOTE, NOT_RECEIPT_ASK_NOTE)        # 사용 X지만 사용자가 봐야 하는 사진(영수증 확인 창 ⚠)
+
+
 def is_auto_excluded(rec: Receipt) -> bool:
     return not rec.use and bool(rec.skip_reason)
 
 
 def _list_order(r: Receipt):
-    """이 달 영수증(영수증 날짜 순) → 날짜 적어야 할 것 → 다른 달 영수증 → 영수증 아님"""
-    if not is_auto_excluded(r):
+    """이 달 영수증·함께 붙는 사진(날짜 순) → 날짜 적어야 할 것 → 다른 달 영수증 → 영수증 아님"""
+    if not is_auto_excluded(r) or r.bundled_into:        # 함께 붙는 사진은 이 달 영수증 사이에
         rank = 0
     elif r.skip_reason == NOT_RECEIPT_NOTE:
         rank = 3
-    elif r.skip_reason == UNDATED_NOTE:
+    elif r.skip_reason in ASK_NOTES:
         rank = 1
     else:
         rank = 2
@@ -2860,6 +2865,7 @@ def save_receipt_list(receipts: list, auto: dict, path: Path):
             " ".join(a.dates), " ".join(str(x) for x in a.amounts), a.hospital_key, str(r.original),
             r.biz_no, "O" if a.remembered else "", r.extra_comment,
             (", ".join(p.name for p in r.bundle) + f" | {r.bundle_note}") if r.bundle or r.bundle_note else "",
+            r.bundled_into,
         ])
     write_csv(path, LIST_HEADER, rows)
 
@@ -2881,14 +2887,32 @@ def review_row_edited(row: dict) -> bool:
 
 
 def review_status(row: dict) -> str:
-    """영수증 확인 창 목록의 상태: ✕ 뺌 / ✎ 고침 / ⚠ 확인 / ✓"""
-    if not parse_use_cell(str(row.get("사용(O/X)") or ""), True):
+    """영수증 확인 창 목록의 상태: ✕ 뺌 / ✎ 고침 / ⚠ 확인 / ✓.
+    다른 영수증에 함께 붙는 사진(계기판·인쇄물·인보이스·승인 메일)은 ✓, 그 달 사진인데 날짜·글자를 못 읽은 것은 ⚠
+    (필요해서 올린 사진이므로 — 사용자 요청 2026-11-15). ✕는 다른 달 영수증·영수증 아닌 사진·사용자가 뺀 것."""
+    g = lambda k: str(row.get(k) or "").strip()
+    if not parse_use_cell(g("사용(O/X)"), True):
+        if parse_use_cell(g("[자동] 사용"), True):         # 사용자가 뺌
+            return "✕ 뺌"
+        if g("붙는 영수증"):
+            return "✓"
+        if g("확인 필요") in ASK_NOTES:
+            return "✎ 고침" if review_row_edited(row) else "⚠ 확인"
         return "✕ 뺌"
     if review_row_edited(row):
         return "✎ 고침"
     if str(row.get("확인 필요") or "").strip():
         return "⚠ 확인"
     return "✓"
+
+
+def review_summary(rows: list) -> str:
+    """영수증 확인 창 위의 요약: 사용·함께 첨부·확인 필요·뺀 사진 수"""
+    used = sum(1 for r in rows if parse_use_cell(str(r.get("사용(O/X)") or ""), True))
+    marks = [review_status(r) for r in rows]
+    attached = sum(1 for r, m in zip(rows, marks) if m == "✓" and not parse_use_cell(str(r.get("사용(O/X)") or ""), True))
+    return (f"영수증 {used}장 사용" + (f" · 함께 첨부 {attached}장" if attached else "")
+            + f" · 확인 필요 {marks.count('⚠ 확인')}장 · 뺀 사진 {marks.count('✕ 뺌')}장")
 
 
 def save_review_rows(path: Path, rows: list):
@@ -3131,11 +3155,14 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         edited = f"  (고침: {', '.join(rec.edited)})" if rec.edited else ""
         log(f"   {rec.original.name} | {rec.main_date or '-'} | {rec.total:,}원 | {rec.category or '분류없음'} | "
             f"{rec.hospital_en or '병원없음'} | {city_name(rec.city) or '기본 도시'}{edited}{flag}")
-    excluded = [r for r in receipts if is_auto_excluded(r)]
+    attached = [r for r in receipts if r.bundled_into]
+    if attached:
+        log(f"   다른 영수증에 함께 붙는 사진 {len(attached)}장: " + ", ".join(f"{r.original.name}→{r.bundled_into}" for r in attached))
+    excluded = [r for r in receipts if is_auto_excluded(r) and not r.bundled_into]
     if excluded:
         other = sum(1 for r in excluded if r.skip_reason.startswith("다른 달"))
-        undated = sum(1 for r in excluded if r.skip_reason == UNDATED_NOTE)
-        log(f"   목록 맨 아래로 뺀 사진 {len(excluded)}장: 날짜 못 읽음 {undated}장 / 다른 달 영수증 {other}장 / "
+        undated = sum(1 for r in excluded if r.skip_reason in ASK_NOTES)
+        log(f"   목록 맨 아래로 뺀 사진 {len(excluded)}장: 날짜·글자 못 읽음(확인 필요) {undated}장 / 다른 달 영수증 {other}장 / "
             f"영수증 아님 {len(excluded) - other - undated}장")
         if undated:
             log("   날짜를 못 읽은 영수증은 영수증 목록에 날짜를 적어 주면 다음 실행부터 씁니다.")
@@ -5151,9 +5178,9 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         hospitals = load_hospitals(base / HOSPITAL_FILE_NAME)
         receipts = build_receipts(cfg, tm, hospitals, results_dir, work_dir, log, base / HOSPITAL_FILE_NAME)
         list_path = list_csv_path(results_dir, tm)
-        need = [r for r in receipts if receipt_issues(r, receipts) or r.skip_reason == UNDATED_NOTE]
+        need = [r for r in receipts if receipt_issues(r, receipts) or r.skip_reason in ASK_NOTES]
         used = [r for r in receipts if r.use]
-        skipped = [r for r in receipts if is_auto_excluded(r)]
+        skipped = [r for r in receipts if is_auto_excluded(r) and not r.bundled_into]
         log(f"{tm.prefix} 영수증 {len(used)}장 분석 완료(목록 맨 아래로 뺀 사진 {len(skipped)}장), "
             f"확인 필요 {len(need)}장 → {list_path.name}")
 
@@ -5239,19 +5266,23 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
             log(f"카드 경비는 없습니다({e}). 직접 만들 경비만 만듭니다.")
         manual = [r for r in manual if not r.used_for]
         others = [r for r in receipts if r.use and not r.new_kind and not r.used_for]   # 카드 경비가 없는 영수증(숙박 등)
-        if others:
-            lines = "\n".join(f"· {r.main_date} {r.total:,}원 {r.category or '분류 없음'} ({r.original.name})" for r in others[:8])
-            more = f"\n· 그 밖 {len(others) - 8}장" if len(others) > 8 else ""
-            if ui.confirm("카드 경비가 없는 영수증", (
-                    f"Concur에 맞는 카드 경비가 없는 영수증이 {len(others)}장 있습니다.\n{lines}{more}\n\n"
-                    "새 경비(Manually Create Expense)로 만들어 넣을까요?\n(카드 거래가 나중에 Concur에 들어오면 겹칠 수 있습니다.)")):
-                manual += others
+        if others:                                         # 넣을 카드 경비가 없으면 묻지 않고 새로 만듦(사용자 요청 2026-11-15)
+            log(f"Concur에 맞는 카드 경비가 없는 영수증 {len(others)}장은 새 경비로 만듭니다: "
+                + ", ".join(f"{r.main_date} {r.total:,}원 {r.category or '분류 없음'}" for r in others))
+            manual += others
         if not manual and no_cards is not None:
             raise no_cards
         if manual:
             kinds = "·".join(dict.fromkeys(r.new_kind or r.category or "영수증" for r in manual))
             log(f"카드 경비와 맞지 않은 {kinds} {len(manual)}건은 새 경비로 만듭니다.")
-            results += bot.create_manual_expenses(manual, work_dir, len(results) + 1)
+            made = bot.create_manual_expenses(manual, work_dir, len(results) + 1)
+            if no_cards is None:                           # 카드 경비가 있는 리포트: 금액·날짜를 잘못 읽어 겹쳤을 수 있음
+                names = {r.original.name for r in others}
+                for row in made:
+                    if row.get("영수증") in names:
+                        note = "카드 경비와 안 맞아 새로 만듦(같은 카드 경비가 있으면 하나 지우기)"
+                        row["확인 필요"] = ", ".join(x for x in (row.get("확인 필요"), note) if x)
+            results += made
 
         results_path = results_dir / f"경비처리_{tm.prefix}.csv"
         save_results_csv(results, results_path)
@@ -6459,9 +6490,7 @@ class ReceiptReview:
             self.tree.insert("", "end", iid=str(i), values=self.row_values(row))
         if keep is not None and self.tree.exists(str(keep)):
             self.tree.selection_set(str(keep))
-        used = [r for r in self.rows if parse_use_cell(str(r.get("사용(O/X)") or ""), True)]
-        need = [r for r in self.rows if review_status(r) == "⚠ 확인"]
-        self.summary.configure(text=f"영수증 {len(used)}장 사용 · 확인 필요 {len(need)}장 · 뺀 사진 {len(self.rows) - len(used)}장")
+        self.summary.configure(text=review_summary(self.rows))
 
     def on_select(self):
         sel = self.tree.selection()
@@ -6551,9 +6580,7 @@ class ReceiptReview:
         self.win.title(f"영수증 확인 {self.month_text} *")
         if self.tree.exists(str(self.current)):
             self.tree.item(str(self.current), values=self.row_values(row))
-        used = [r for r in self.rows if parse_use_cell(str(r.get("사용(O/X)") or ""), True)]
-        need = [r for r in self.rows if review_status(r) == "⚠ 확인"]
-        self.summary.configure(text=f"영수증 {len(used)}장 사용 · 확인 필요 {len(need)}장 · 뺀 사진 {len(self.rows) - len(used)}장")
+        self.summary.configure(text=review_summary(self.rows))
 
     def save(self) -> bool:
         try:

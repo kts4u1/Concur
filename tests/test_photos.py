@@ -203,7 +203,8 @@ def test_list_puts_excluded_photos_last_and_user_can_bring_back(tmp_path, monkey
         rows = ca.read_csv_dicts(list_path)
         assert [r["파일"] for r in rows] == ["2026-10-06_090000.jpg", "2026-10-07_090000.jpg", "2026-10-05_090000.jpg"]
         last = rows[-1]
-        assert (last["사용(O/X)"], last["[자동] 사용"], last["확인 필요"]) == ("X", "X", ca.NOT_RECEIPT_NOTE)
+        assert (last["사용(O/X)"], last["[자동] 사용"], last["확인 필요"]) == ("X", "X", ca.NOT_RECEIPT_ASK_NOTE)
+        assert ca.review_status(last) == "⚠ 확인"                 # 그 달에 찍은 사진은 필요해서 올린 것 → 뺌이 아니라 확인
         assert rows[0]["촬영 시각"] == "2026-10-06 09:00"
 
         last["사용(O/X)"] = "O"                      # 사실은 영수증이었음

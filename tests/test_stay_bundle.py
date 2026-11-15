@@ -147,6 +147,9 @@ def test_receipt_list_with_early_approval_mail(tmp_path, monkeypatch):
     rows = {r["파일"]: r for r in ca.read_csv_dicts(ca.list_csv_path(results, OCT))}
     assert rows["2026-10-06_211000.jpg"]["함께 첨부"] == "2026-09-30_152000.png | 승인 메일 2026-09-30_152000.png 함께 첨부"
     assert "함께 첨부" in rows["2026-09-30_152000.png"]["확인 필요"]
+    assert ca.review_status(rows["2026-09-30_152000.png"]) == "✓"
+    assert [r["파일"] for r in ca.read_csv_dicts(ca.list_csv_path(results, OCT))] == [
+        "2026-09-30_152000.png", "2026-10-06_211000.jpg"]                                # 함께 붙는 사진도 이 달 줄 사이에(날짜 순)
     assert any("숙박 승인 메일만 찾을 그 전 20일 사진 2장" in l for l in lines)
 
 

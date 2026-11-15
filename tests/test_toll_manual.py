@@ -306,7 +306,7 @@ def test_manual_accommodation_with_vendor(browser, tmp_path):
     assert saved["uploads"] == ["IMG_5646.jpg", "IMG_5647.jpg"] and rows[0]["오류"] == ""      # 영수증 → 인보이스
 
 
-def test_full_run_asks_to_create_unmatched_receipts(tmp_path, monkeypatch):
+def test_full_run_creates_unmatched_receipts_without_asking(tmp_path, monkeypatch):
     from test_stay_bundle import NOL_SLIP
     src = tmp_path / "src"
     src.mkdir()
@@ -336,6 +336,5 @@ def test_full_run_asks_to_create_unmatched_receipts(tmp_path, monkeypatch):
 
     ui = AskUI()
     ca.run_job("full", "2026-10", ui, base)
-    assert FakeBot.made == [("IMG_5646.JPG", [], 75000, "2026-10-20", 1)]
-    title, msg = next(a for a in asked if a[0] == "카드 경비가 없는 영수증")
-    assert "2026-10-20 75,000원 숙박 (IMG_5646.JPG)" in msg
+    assert FakeBot.made == [("IMG_5646.JPG", [], 75000, "2026-10-20", 1)]       # 넣을 카드 경비가 없으면 묻지 않고 만듦
+    assert not any(a[0] == "카드 경비가 없는 영수증" for a in asked)

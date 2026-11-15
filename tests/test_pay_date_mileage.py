@@ -186,7 +186,9 @@ def test_receipt_list_shows_mileage_bundle(tmp_path, monkeypatch):
     rows = {r["파일"]: r for r in ca.read_csv_dicts(ca.list_csv_path(results, OCT))}
     assert rows["IMG_5650.JPG"]["함께 첨부"].startswith("IMG_5649.JPG | 마일리지 신청서 1,250km 541,250원")
     assert rows["IMG_5650.JPG"]["날짜"] == "2026-10-31" and rows["IMG_5650.JPG"]["금액"] == "541250"
-    assert "함께 첨부" in rows["IMG_5649.JPG"]["확인 필요"]
+    assert "함께 첨부" in rows["IMG_5649.JPG"]["확인 필요"] and rows["IMG_5649.JPG"]["붙는 영수증"] == "IMG_5650.JPG"
+    assert ca.review_status(rows["IMG_5649.JPG"]) == "✓" and rows["IMG_5649.JPG"]["분류"] == "마일리지"   # 뺌이 아니라 ✓
+    assert ca.review_summary(list(rows.values())) == "영수증 1장 사용 · 함께 첨부 1장 · 확인 필요 0장 · 뺀 사진 0장"
     assert any("마일리지: IMG_5650.JPG 마일리지 신청서" in l for l in lines)
 
 
