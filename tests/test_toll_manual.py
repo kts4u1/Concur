@@ -47,8 +47,9 @@ REPORT = """<!doctype html><meta charset="utf-8">
     <button id="up2" onclick="document.getElementById('f2').click()">Upload New Receipt</button>
     <input type="file" id="f2" style="display:none" onchange="toLibrary(this)" MULTIPLE>
     <div id="cards"></div></div>
-  <div id="dlg" role="dialog" style="display:none"><h3>Receipt Image</h3><span id="dname"></span>
-    <button onclick="show('dlg', 0)">Delete</button><button onclick="attachDlg()">Attach</button></div></div>
+  <div id="dlg" style="display:none"><h3>Receipt Image</h3><div><div><span id="dname"></span></div>
+    <div><div onclick="show('dlg', 0)">Delete</div><div class="btn" onclick="attachDlg()">Attach</div></div></div>
+    <button onclick="show('dlg', 0)">Close</button></div></div>
 <div id="pop" style="display:none"><div id="items"></div></div>
 <script>
 window.steps = []; window.uploads = []; window.saved = null; window.expenses = []; let editing = null;
@@ -57,7 +58,8 @@ const PIX = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
 function toLibrary(inp) { const names = Array.from(inp.files).map(f => f.name); library.push(...names);
   steps.push('library ' + names.join(',')); inp.value = ''; drawCards(); }
 function drawCards() { document.getElementById('cards').innerHTML = library.map(n => '<div class="card"><div>' + n +
-  '</div><img src="' + PIX + '" width="60" height="40" onclick="openDlg(this.previousSibling.textContent)"></div>').join(''); }
+  '</div><img src="' + PIX + '" width="60" height="40" onclick="openDlg(this.previousSibling.textContent)">' +
+  '<button aria-label="Attach receipt" onclick="steps.push(&quot;card icon&quot;)">i</button></div>').join(''); }
 function openAvail() { show('avail', 1); show('pane', 0); drawCards(); }
 function closeAvail() { show('avail', 0); show('pane', 1); }
 function openDlg(n) { current = n; document.getElementById('dname').textContent = n; show('dlg', 1); }
@@ -171,6 +173,7 @@ def test_manual_toll_expense(page, tmp_path):
     assert steps.index("date") < steps.index("amount") < steps.index("save") < steps.index("edit") < steps.index(one)
     assert [x for x in steps if x.startswith("attach")] == [                       # 보관함에서 차례로 골라 Attach
         "attach IMG_5648.jpg", "attach IMG_5651.jpg", "attach IMG_5652.jpg"]
+    assert "card icon" not in steps                                                # 'Receipt Image' 창의 [Attach]를 누름
     assert steps[-1] == "save" and steps.count("save") == 2                        # 저장 → 다시 열어 사진 → 다시 저장
     assert saved["vendor"] == ""                                                   # Vendor Name은 숙박만
     assert rows[0]["순번"] == 5 and rows[0]["Concur 날짜"] == "10/22/2026" and rows[0]["확인 필요"] == ""

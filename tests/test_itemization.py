@@ -61,11 +61,12 @@ function saveAdd() { const r = document.getElementById('rate'); const v = r ? r.
   alerts('Error: This expense has itemizations with missing required fields. Missing required field: LCRT'); }
 function draw() { document.getElementById('head').textContent = 'Itemizations (' + (itemized ? 1 : 0) + ')';
   document.getElementById('rows').innerHTML = itemized ? '<div class="row" style="display:flex; gap:20px">'
-    + '<input type="checkbox" onchange="chk(this)"><span>Accommodation</span><span>11/02/2026</span>'
+    + '<input type="checkbox" onchange="chk(this)"><span onclick="openItem()">Accommodation</span><span>11/02/2026</span>'
     + '<span>' + (itemOk ? '' : 'Errors: 1') + '</span><span>KRW 70,000</span></div>' : ''; }
 function back() { steps.push('back'); show('add', 0); show('itemForm', 0); show('expense', 1); show('details', 1); }
 function chk(c) { steps.push('check'); document.getElementById('edit').disabled = !c.checked; }
 function edit() { steps.push('edit'); show('expense', 0); show('itemForm', 1); }
+function openItem() { steps.push('open item'); show('expense', 0); show('itemForm', 1); }
 function openList(el) { target = el; show('pop', 1); }
 function pick(el) { target.textContent = el.textContent; show('pop', 0); }
 function saveItem() { const l = document.querySelector('#itemForm .sapcnqr-select-field__input').textContent;
@@ -90,10 +91,10 @@ def browser():
         b.close()
 
 
-def bot_on(browser, rows=ROWS):
+def bot_on(browser, rows=ROWS, page=PAGE):
     pg = browser.new_page()
     pg.set_default_timeout(3000)
-    pg.set_content(PAGE.replace("{rows}", rows))
+    pg.set_content(page.replace("{rows}", rows))
     bot = ca.ConcurBot(ca.default_settings(), lambda s="": None)
     bot.page, bot.timeout_ms, bot.upload_wait_s, bot.upload_done_s = pg, 3000, 2, 2
     bot.screenshot = lambda name: None
@@ -108,7 +109,7 @@ def test_itemization_in_user_order(browser):
     bot.go_next(1, 2, checks, 70000)
     assert pg.evaluate("steps") == [
         "next", "yes", "close alerts", "tab items", "save add 70000",          # Room Rate에 금액 → 저장
-        "close alerts", "check", "edit",                                        # 항목 체크 → Edit
+        "close alerts", "open item",                                            # 오류가 뜬 Accommodation을 눌러 들어감
         "save item NA | Accommodation fee for service in Mokpo Hankook Hospital",   # 빈 LCRT·Comment 채우고 저장
         "next"]                                                                  # 다 채워져 그대로 다음 경비로
     assert pg.input_value("#itemForm #businessPurpose") == "For service"      # 이미 있는 값은 그대로
@@ -137,3 +138,24 @@ def test_column_input_under_header(browser):
     pg.evaluate("document.getElementById('add').style.display = 'block'")
     assert pg.evaluate(ca.JS_COLUMN_INPUT, ["Room Rate"])
     assert pg.get_attribute("[data-concur-auto]", "id") == "rate"              # Room Tax 칸이 아니라 Room Rate 칸
+
+
+def test_itemization_falls_back_to_check_and_edit(browser):
+    """항목 글자를 눌러도 안 열리면 예전처럼 체크 → [Edit]"""
+    bot, pg = bot_on(browser, page=PAGE.replace(' onclick="openItem()"', ""))
+    checks = []
+    bot.go_next(1, 2, checks, 70000)
+    steps = pg.evaluate("steps")
+    assert "check" in steps and "edit" in steps and "open item" not in steps
+    assert steps[-2] == "save item NA | Accommodation fee for service in Mokpo Hankook Hospital" and checks == []
+
+
+def test_itemization_lcrt_found_by_label(browser):
+    """Itemization 수정 화면의 LCRT 칸이 경비 화면과 다른 id여도 칸 이름(LCRT)으로 찾아 NA를 고름"""
+    page = PAGE.replace('<div id="custom32"><span class="sapcnqr-select-field__input" onclick="openList(this)"></span></div>',
+                        '<div id="lcrtBox"><span class="sapcnqr-select-field__input" onclick="openList(this)"></span></div>')
+    assert page != PAGE
+    bot, pg = bot_on(browser, page=page)
+    checks = []
+    bot.go_next(1, 2, checks, 70000)
+    assert "save item NA | Accommodation fee for service in Mokpo Hankook Hospital" in pg.evaluate("steps") and checks == []

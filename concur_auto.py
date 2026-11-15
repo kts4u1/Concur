@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 보관함에서 영수증 고르기·Vendor 영어"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-15 Attach 단추·Itemization 항목 누르기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -360,6 +360,7 @@ def default_settings():
             "사용 가능한 영수증": "Available Receipts|사용 가능한 영수증",
             "사용 가능한 영수증 닫기": "Close Available Receipts|사용 가능한 영수증 닫기",
             "영수증 붙이기": "Attach|첨부",
+            "LCRT 칸 이름": "LCRT|Legal compliance registration tool",
             "영수증 끌어 놓기": "Upload or drag-and-drop your receipts here|영수증을 업로드하거나 여기에 끌어",
             "영수증 더하기": "Add|추가",
             "Alerts": "Alerts|알림",
@@ -3431,8 +3432,10 @@ JS_MARK_RECEIPT_CARD = r"""
   document.querySelectorAll('[data-concur-auto-card],[data-concur-auto-cardattach]').forEach(e => {
     e.removeAttribute('data-concur-auto-card'); e.removeAttribute('data-concur-auto-cardattach'); });
   const want = name.trim().toLowerCase();
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
   const labels = Array.from(document.querySelectorAll('body *')).filter(e =>
-    e.children.length === 0 && (e.textContent || '').trim().toLowerCase() === want);
+    e.children.length === 0 && (e.textContent || '').trim().toLowerCase() === want)
+    .sort((a, b) => vis(b) - vis(a));                     // 보이는 카드 먼저
   for (const lab of labels) {
     let box = lab;
     for (let k = 0; k < 7 && box; k++, box = box.parentElement) {
@@ -3449,6 +3452,53 @@ JS_MARK_RECEIPT_CARD = r"""
     return 'name';
   }
   return '';
+}
+"""
+
+
+JS_MARK_ATTACH = r"""
+({name, words}) => {
+  // 'Receipt Image' 창의 [Attach]: 글자가 Attach인 보이는 단추 중 같은 파일 이름이 가까이 있는 것(없으면 하나뿐인 것)
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  document.querySelectorAll('[data-concur-auto-attach]').forEach(e => e.removeAttribute('data-concur-auto-attach'));
+  const re = new RegExp('^\\s*(?:' + words.join('|') + ')\\s*$', 'i');
+  const cands = Array.from(document.querySelectorAll('button, [role=button], a, div, span'))
+    .filter(e => vis(e) && re.test(e.innerText || '') && !Array.from(e.children).some(c => re.test(c.innerText || '')));
+  const want = (name || '').trim().toLowerCase();
+  for (const c of cands) {
+    let box = c;
+    for (let k = 0; k < 8 && box; k++, box = box.parentElement) {
+      if (want && (box.innerText || '').toLowerCase().includes(want)) {
+        (c.closest('button, [role=button], a') || c).setAttribute('data-concur-auto-attach', '1');
+        return true;
+      }
+    }
+  }
+  if (cands.length === 1) { (cands[0].closest('button, [role=button], a') || cands[0]).setAttribute('data-concur-auto-attach', '1'); return true; }
+  return false;
+}
+"""
+
+
+JS_LABELED_SELECT = r"""
+(words) => {
+  // 칸 이름(예: 'Legal compliance registration tool (LCRT)') 바로 아래의 목록 칸을 표시합니다(id로 못 찾을 때).
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  document.querySelectorAll('[data-concur-auto-select]').forEach(e => e.removeAttribute('data-concur-auto-select'));
+  const re = new RegExp(words.join('|'), 'i');
+  const labels = Array.from(document.querySelectorAll('label, span, div, p')).filter(e =>
+    vis(e) && re.test(e.innerText || '') && (e.innerText || '').length < 80 && !e.querySelector('input, [role=combobox]'));
+  labels.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+  for (const lab of labels) {
+    const r = lab.getBoundingClientRect();
+    const fields = Array.from(document.querySelectorAll(
+        '[role=combobox], select, .sapcnqr-select-field__input, [aria-haspopup=listbox], input'))
+      .filter(vis).map(f => [f, f.getBoundingClientRect()])
+      .filter(([f, b]) => b.top >= r.top - 2 && b.top - r.bottom < 80 && b.left < r.right + 40 && b.right > r.left - 40);
+    fields.sort((a, b) => a[1].top - b[1].top);
+    if (fields.length) { fields[0][0].setAttribute('data-concur-auto-select', '1'); return true; }
+  }
+  return false;
 }
 """
 
@@ -3586,6 +3636,16 @@ JS_ITEM_CHECKBOX = r"""
   const pick = withError || boxes[0];
   if (!pick) return false;
   pick.setAttribute('data-concur-auto', 'check');
+  // 사용자 설명: 오류가 뜬 항목(예: Accommodation)을 눌러 들어가면 고칠 수 있음 → 줄의 제목 글자에도 표시
+  document.querySelectorAll('[data-concur-auto-item]').forEach(e => e.removeAttribute('data-concur-auto-item'));
+  const row = rowOf(pick);
+  if (row) {
+    const title = Array.from(row.querySelectorAll('*')).filter(e => e.children.length === 0 && vis(e)).find(e => {
+      const t = (e.innerText || '').trim();
+      return /[A-Za-z가-힣]{3,}/.test(t) && !/error|오류|krw|원|\d{1,2}\/\d{1,2}\/\d{4}|select/i.test(t);
+    });
+    if (title) title.setAttribute('data-concur-auto-item', '1');
+  }
   return true;
 }
 """
@@ -4540,6 +4600,14 @@ class ConcurBot:
                 filled.append(name)
         want = values.get("LCRT") or self.t["NA"]
         trigger, value = self.find_select(self.sel("LCRT"))
+        if trigger is None:                               # id로 못 찾으면 칸 이름(LCRT) 아래의 목록 칸
+            try:
+                if self.page.evaluate(JS_LABELED_SELECT, self._alts("LCRT 칸 이름")):
+                    trigger = self.page.locator("[data-concur-auto-select]").first
+                    value = (trigger.input_value() if trigger.evaluate("e => e.tagName") == "INPUT"
+                             else trigger.inner_text()) or ""
+            except Exception:
+                trigger = None
         if trigger is None:
             checks.append("Itemizations의 LCRT 확인")
             self.log("   Itemizations 수정 화면에서 LCRT 칸을 찾지 못했습니다.")
@@ -4581,10 +4649,22 @@ class ConcurBot:
                     time.sleep(0.5)
             if not found:
                 raise RuntimeError("Itemizations 목록에서 항목을 찾지 못했습니다.")
-            self.click_checkbox(page.locator("[data-concur-auto]").first)
-            time.sleep(0.4)
-            self.close_alerts()
-            self._click_button("편집")
+            save_item = page.get_by_role("button", name=self._re("Save Itemization", exact=False))
+            opened = False
+            title = page.locator("[data-concur-auto-item]")
+            if title.count():                             # 오류가 뜬 항목(Accommodation)을 눌러 들어감(사용자 설명)
+                try:
+                    title.first.click()
+                    opened = self._visible(save_item.first, 8000)
+                except Exception:
+                    opened = False
+            if not opened:                                # 안 되면 체크 → [Edit]
+                self.close_alerts()
+                page.evaluate(JS_ITEM_CHECKBOX, self._alts("Itemizations"))
+                self.click_checkbox(page.locator("[data-concur-auto]").first)
+                time.sleep(0.4)
+                self.close_alerts()
+                self._click_button("편집")
             # 3. 빈 칸 채우고 [Save Itemization]
             filled = self.fill_blank_item_fields(getattr(self, "last_values", {}) or {}, checks)
             self._click_button("Save Itemization")
@@ -4876,18 +4956,27 @@ class ConcurBot:
         if not kind:
             return False
         page.locator("[data-concur-auto-card]").first.click()
-        dialog_attach = (page.locator("[role=dialog], [role=alertdialog], [aria-modal=true]")
-                         .filter(has_text=re.compile(re.escape(name), re.I))
-                         .get_by_role("button", name=self._re("영수증 붙이기")))
-        end = time.time() + 8
+        mark = page.locator("[data-concur-auto-attach]")
+        args = {"name": name, "words": [re.escape(a) for a in self._alts("영수증 붙이기")]}
+        end = time.time() + 10
         while time.time() < end:
-            btn = self._first_shown([dialog_attach])
+            btn = None
+            try:                                          # 'Receipt Image' 창(파일 이름 + [Delete]·[Attach])의 [Attach]
+                if page.evaluate(JS_MARK_ATTACH, args):
+                    btn = mark.first
+            except Exception:
+                btn = None
             if btn is None and time.time() > end - 5:     # 사진 창이 없으면 카드의 Attach 단추
                 btn = self._first_shown([page.locator("[data-concur-auto-cardattach]")])
             if btn is not None:
                 btn.click()
                 gone = time.time() + 15
-                while time.time() < gone and self._first_shown([dialog_attach]) is not None:
+                while time.time() < gone:
+                    try:
+                        if not page.evaluate(JS_MARK_ATTACH, args):
+                            break
+                    except Exception:
+                        break
                     time.sleep(0.3)
                 time.sleep(1.0)
                 return True
