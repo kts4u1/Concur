@@ -2,6 +2,7 @@
 """단축어 없이 찍은 사진(IMG_1234.HEIC 등)을 쓰는 기능 테스트:
 촬영 날짜로 지난달 사진 고르기, HEIC 읽기·JPEG 변환, 영수증이 아닌 사진 빼기"""
 
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -96,15 +97,48 @@ def test_taken_date_cache_is_reused(tmp_path, monkeypatch):
     assert ca.photo_taken_at(p, st, cache) == datetime(2026, 10, 7, 9, 30)
 
 
-def test_photo_window_crosses_year_and_is_configurable(tmp_path):
-    for name in ("2026-11-30_235959.jpg", "2026-12-31_235959.jpg", "2027-02-28_120000.jpg",
-                 "2027-03-01_235959.jpg", "2027-03-02_000000.jpg"):
+def test_photos_from_month_start_without_end_limit(tmp_path):
+    for name in ("2026-11-30_235959.jpg", "2026-12-01_000000.jpg", "2027-02-28_120000.jpg",
+                 "2027-03-02_000000.jpg", "2027-09-15_101010.jpg"):
         (tmp_path / name).write_bytes(b"x")
-    cfg = {"영수증_원본_폴더": str(tmp_path)}
-    found = ca.list_originals(cfg, ca.TargetMonth(2026, 12))          # 12월 + 60일 = 3월 1일까지
-    assert [p.name for p, _ in found] == ["2026-12-31_235959.jpg", "2027-02-28_120000.jpg", "2027-03-01_235959.jpg"]
-    cfg["영수증_촬영_허용_일수"] = 0
-    assert [p.name for p, _ in ca.list_originals(cfg, ca.TargetMonth(2026, 12))] == ["2026-12-31_235959.jpg"]
+    cfg = {"영수증_원본_폴더": str(tmp_path), "영수증_촬영_허용_일수": 0}      # 예전 설정 값은 무시
+    found = ca.list_originals(cfg, ca.TargetMonth(2026, 12))          # 12월 1일부터 찍은 사진은 모두(끝 제한 없음)
+    assert [p.name for p, _ in found] == ["2026-12-01_000000.jpg", "2027-02-28_120000.jpg",
+                                          "2027-03-02_000000.jpg", "2027-09-15_101010.jpg"]
+
+
+def test_old_photo_limit_setting_removed(tmp_path):
+    path = tmp_path / ca.SETTINGS_FILE_NAME
+    path.write_text(json.dumps({"영수증_촬영_허용_일수": 60}), encoding="utf-8")
+    cfg, _ = ca.load_settings(path)
+    assert "영수증_촬영_허용_일수" not in cfg and "영수증_촬영_허용_일수" not in ca.default_settings()
+
+
+def rec_taken(day, ocr_dates=()):
+    return ca.Receipt(original=Path("a.jpg"), ocr_file=Path("a.jpg"), dates=list(ocr_dates) + [day],
+                      ocr_dates=list(ocr_dates), is_receipt=True)
+
+
+def test_undated_photo_taken_much_later_is_quietly_left_out():
+    tm = ca.TargetMonth(2026, 10)
+    r = rec_taken("2026-10-20")                          # 이 달에 찍음 → 촬영 날짜로 이 달
+    ca.place_in_month(r, tm)
+    assert r.use and r.skip_reason == ""
+    r = rec_taken("2026-11-05")                          # 다음 달에 찍음 → 늦게 찍은 이 달 영수증일 수 있어 묻기
+    ca.place_in_month(r, tm)
+    assert not r.use and r.skip_reason == ca.UNDATED_NOTE
+    r = rec_taken("2027-01-05")                          # 훨씬 나중 → 다른 달 사진으로 빼 두기(묻지 않음)
+    ca.place_in_month(r, tm)
+    assert not r.use and r.skip_reason.startswith("다른 달 사진(2027-01-05 촬영")
+    r = rec_taken("2027-01-05", ["2026-10-12"])          # 영수증 날짜가 이 달이면 늦게 찍어도 이 달
+    ca.place_in_month(r, tm)
+    assert r.use and r.main_date == "2026-10-12"
+    r = rec_taken("2026-12-05")
+    ca.place_in_month(r, ca.TargetMonth(2026, 11))       # 11월의 다음 달은 12월
+    assert r.skip_reason == ca.UNDATED_NOTE
+    r = rec_taken("2027-01-05")
+    ca.place_in_month(r, ca.TargetMonth(2026, 12))       # 12월의 다음 달은 이듬해 1월
+    assert r.skip_reason == ca.UNDATED_NOTE
 
 
 # ---------- HEIC ----------

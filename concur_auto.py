@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 Itemizations"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 촬영 기간 제한 없앰"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -254,8 +254,7 @@ def default_settings():
         "_백업_폴더_설명": ("자동 입력 규칙·병원 목록·설정을 자동으로 백업해 두는 폴더. 비워 두면 문서\\Concur 경비 자동 입력 백업. "
                        "설정 폴더(문서\\Concur 경비 자동 입력)와 따로 두어야 그 폴더를 지워도 남습니다."),
         "백업_폴더": "",
-        "_영수증_날짜_설명": "어느 달 영수증인지는 영수증에 적힌 날짜로 정하고, 날짜를 못 읽은 영수증만 촬영 날짜를 참고합니다. 처리할 달이 끝나고 아래 일수 안에 찍은 사진까지 봅니다.",
-        "영수증_촬영_허용_일수": 60,
+        "_영수증_날짜_설명": "어느 달 영수증인지는 영수증에 적힌 날짜로 정하고, 날짜를 못 읽은 영수증만 촬영 날짜를 참고합니다. 처리할 달 1일 이후에 찍은 사진은 모두 봅니다(늦게 찍어도 됨).",
         "보정본_폴더": str(source / "Concur_Expenses_Processed"),
         "Concur_주소": "https://us2.concursolutions.com",
         "브라우저_프로필_폴더": str(home / "AppData" / "Local" / "ConcurAuto" / "edge-profile"),
@@ -740,6 +739,7 @@ def load_settings(path: Path) -> tuple:
             merged[k] = upgraded(v, defaults.get(k))
         if k.startswith("_") and isinstance(defaults.get(k), str):     # 설명 글은 늘 새 판의 글
             merged[k] = defaults[k]
+    merged.pop("영수증_촬영_허용_일수", None)                         # 2026-11-15: 촬영 기간 제한 없앰
     if user.get("병원_엑셀_탭") in ("MR System Information",):      # 예전 기본값 → 여러 탭
         merged["병원_엑셀_탭"] = defaults["병원_엑셀_탭"]
     if user.get("리포트_이름_형식") in OLD_REPORT_NAME_FORMATS:       # 예전 기본값 → Monthly Expense for Nov
@@ -1522,11 +1522,10 @@ def photo_taken_at(path: Path, st, cache: dict) -> datetime:
     return taken
 
 
-def photo_window(cfg: dict, tm: TargetMonth) -> tuple:
-    """(처리할 달 1일, 그 달이 끝나고 허용 일수가 지난 날) — 이 사이에 찍은 사진을 봅니다."""
-    start = datetime(tm.year, tm.month, 1)
-    month_end = datetime(tm.year + 1, 1, 1) if tm.month == 12 else datetime(tm.year, tm.month + 1, 1)
-    return start, month_end + timedelta(days=int(cfg.get("영수증_촬영_허용_일수", 60)))
+def photo_start(tm: TargetMonth) -> datetime:
+    """처리할 달 1일. 이날부터 찍은 사진은 모두 봅니다(그 전에 찍은 사진은 이 달 영수증일 수 없음).
+    예전에는 그 달이 끝나고 60일 안에 찍은 사진만 봤지만, 사용자 요청으로 늦게 찍은 사진도 봅니다(2026-11-15)."""
+    return datetime(tm.year, tm.month, 1)
 
 
 IMPORTED_FOLDER_NAME = "가져온 영수증"
@@ -1599,7 +1598,7 @@ def list_originals(cfg: dict, tm: TargetMonth, cache=None, log=None) -> list:
         if d not in existing:
             log(f"   영수증 폴더가 없어 건너뜁니다: {d}")
     cache = {} if cache is None else cache
-    start, end = photo_window(cfg, tm)
+    start = photo_start(tm)
     too_old = start - timedelta(days=2)
     found, seen, names, same_name, dup = [], set(), set(), set(), 0
     for folder in existing:
@@ -1620,7 +1619,7 @@ def list_originals(cfg: dict, tm: TargetMonth, cache=None, log=None) -> list:
             seen.add(key)
             names.add(key[0])
             taken = photo_taken_at(p, st, cache)
-            if start <= taken < end:
+            if taken >= start:
                 found.append((p, taken))
     if dup:
         log(f"   여러 폴더에 같은 사진이 있어 한 번만 씁니다: {dup}장")
@@ -2287,6 +2286,7 @@ LIST_HEADER = ["파일", "촬영 시각", "사용(O/X)", "날짜", "금액", "�
 NOT_RECEIPT_NOTE = "영수증 아닌 것 같음(자동 제외)"
 UNDATED_NOTE = "날짜 못 읽음: 영수증 날짜를 적어 주세요(자동 제외)"
 OTHER_MONTH_NOTE = "다른 달 영수증({date})(자동 제외)"
+UNDATED_LATER_NOTE = "다른 달 사진({date} 촬영, 날짜 못 읽음)(자동 제외)"   # 처리할 달 다음 달보다 나중에 찍은 사진
 
 
 def place_in_month(rec: Receipt, tm: TargetMonth):
@@ -2306,7 +2306,11 @@ def place_in_month(rec: Receipt, tm: TargetMonth):
             else:
                 rec.skip_reason = OTHER_MONTH_NOTE.format(date=receipt_dates[0])
         elif not rec.main_date.startswith(prefix):
-            rec.skip_reason = UNDATED_NOTE
+            nxt = f"{tm.year + 1}-01-" if tm.month == 12 else f"{tm.year}-{tm.month + 1:02d}-"
+            if not rec.main_date or rec.main_date.startswith(nxt):     # 다음 달에 찍었으면 늦게 찍은 이 달 영수증일 수 있음
+                rec.skip_reason = UNDATED_NOTE
+            else:
+                rec.skip_reason = UNDATED_LATER_NOTE.format(date=rec.main_date)
     rec.use = not rec.skip_reason
 
 
@@ -2484,9 +2488,8 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
     date_cache = _load_json(date_cache_path)
     originals = list_originals(cfg, tm, date_cache, log)
     _save_json(date_cache_path, date_cache)
-    start, end = photo_window(cfg, tm)
     log(f"{tm.prefix} 영수증을 찾을 사진: {len(originals)}장 "
-        f"({start:%Y-%m-%d} ~ {end - timedelta(days=1):%Y-%m-%d} 촬영. 어느 달인지는 영수증 날짜로 정함)")
+        f"({photo_start(tm):%Y-%m-%d}부터 찍은 사진. 어느 달인지는 영수증 날짜로 정함)")
     if not originals:
         return []
     use_pre = bool(cfg.get("영수증_보정_사용", True))
@@ -5094,7 +5097,7 @@ class ReceiptSourcesTab:
         box.columnconfigure(0, weight=1)
         self.tree = ttk.Treeview(box, columns=("folder", "count"), show="headings", height=4, selectmode="browse")
         self.tree.heading("folder", text="폴더")
-        self.tree.heading("count", text="이 달 사진")
+        self.tree.heading("count", text="볼 사진")
         self.tree.column("folder", width=px(300), minwidth=px(150), anchor="w", stretch=True)
         self.tree.column("count", width=px(100), minwidth=px(80), anchor="center", stretch=False)
         self.tree.grid(row=0, column=0, sticky="ew")
@@ -5268,8 +5271,7 @@ class ReceiptSourcesTab:
     def show_counts(self, tm, counts, quiet=False):
         self.counting = False
         if not quiet:
-            start, end = photo_window(load_settings(self.app.base / SETTINGS_FILE_NAME)[0], tm)
-            self.app.append(f"{tm.prefix} 영수증일 수 있는 사진({start:%m/%d} ~ {end - timedelta(days=1):%m/%d} 촬영):")
+            self.app.append(f"{tm.prefix} 영수증일 수 있는 사진({photo_start(tm):%Y-%m-%d}부터 찍은 사진):")
         for folder, n in counts:
             if n is not None:
                 self.counts[_norm_folder(folder)] = n
