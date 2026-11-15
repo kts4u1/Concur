@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 톨게이트 새 경비"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 영수증 여러 장 한 번에"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -4314,8 +4314,9 @@ class ConcurBot:
         첫 장을 올린 뒤 나머지를 차례로 더 올립니다(톨게이트: 사용내역 → 영수증 인쇄물).
         예전에는 버튼을 1.5초 안에 못 찾으면 '이미 첨부됨'으로 보고 건너뛰어, 영수증 칸이 늦게 뜨면 첨부가 빠졌습니다."""
         files = [Path(f) for f in upload] if isinstance(upload, (list, tuple)) else [Path(upload)]
-        if self._attach_one(files[0], done, checks) and len(files) > 1:
-            self._attach_more(files[1:], done, checks)
+        sent = self._attach_one(files, done, checks)
+        if 0 < sent < len(files):
+            self._attach_more(files[sent:], done, checks)
 
     def _attach_more(self, files: list, done: list, checks: list):
         """두 번째 장부터: [영수증 업로드] 버튼이 다시 보이면 그것으로, 아니면 영수증 칸의 파일 입력에 바로 넣습니다."""
@@ -4365,9 +4366,23 @@ class ConcurBot:
             time.sleep(0.5)
         time.sleep(0.5)
 
-    def _attach_one(self, upload: Path, done: list, checks: list) -> bool:
-        """사진 한 장 올리기(첫 장). 올렸으면 True"""
+    def _attach_one(self, uploads: list, done: list, checks: list) -> int:
+        """[Upload New Receipt]를 눌러 열린 파일 고르기 창에 사진을 넣습니다. 여러 장을 고를 수 있는 창이면 한 번에 다
+        (사용자 설명 2026-11-15), 아니면 첫 장만. → 올린 장 수(못 올렸거나 이미 붙어 있으면 0)"""
         page = self.page
+        upload = uploads[0]
+        sent = uploads[:1]
+
+        def give(target_files, chooser=None, inp=None):
+            nonlocal sent
+            many = len(uploads) > 1 and (chooser.is_multiple() if chooser is not None
+                                         else bool(inp.evaluate("e => e.multiple")))
+            sent = uploads if many else uploads[:1]
+            names = [str(f) for f in sent]
+            if chooser is not None:
+                chooser.set_files(names if many else names[0])
+            else:
+                inp.set_input_files(names if many else names[0])
         control = attached = None
         deadline = time.time() + self.upload_wait_s
         while True:
@@ -4378,24 +4393,24 @@ class ConcurBot:
             time.sleep(0.5)
         if control is None and attached is not None:
             done.append("이미 첨부됨(건너뜀)")
-            return False
+            return 0
         files = page.locator("input[type=file]")
         if control is not None:
             try:
                 with page.expect_file_chooser(timeout=15000) as chooser:
                     control.click()
-                chooser.value.set_files(str(upload))
+                give(uploads, chooser=chooser.value)
             except Exception:
                 if files.count() == 0:
                     raise
-                files.last.set_input_files(str(upload))
+                give(uploads, inp=files.last)
         elif files.count() > 0:
-            files.last.set_input_files(str(upload))       # 버튼은 못 찾았지만 숨은 파일 칸이 있음
+            give(uploads, inp=files.last)                  # 버튼은 못 찾았지만 숨은 파일 칸이 있음
         else:
             checks.append("영수증 첨부 버튼을 못 찾음(첨부됐는지 확인)")
             self.log("   영수증 첨부 버튼을 찾지 못했습니다. 화면을 저장합니다.")
             self.screenshot("upload_button")
-            return False
+            return 0
         # 올라가면 [영수증 업로드] 버튼이 사라짐
         finished = False
         end = time.time() + self.upload_done_s
@@ -4408,8 +4423,8 @@ class ConcurBot:
             checks.append("영수증이 올라갔는지 확인")
             self.log("   업로드가 끝났는지 확인하지 못했습니다. Concur 화면에서 영수증이 붙었는지 확인하세요.")
         time.sleep(1)
-        done.append(f"영수증 첨부({upload.name})")
-        return True
+        done.append(f"영수증 첨부({', '.join(f.name for f in sent)})")
+        return len(sent)
 
     # ---------- 직접 만드는 경비(톨게이트: 카드 거래가 아님) ----------
     def back_to_report(self):
@@ -4420,20 +4435,39 @@ class ConcurBot:
             page.goto(url)
         else:
             page.get_by_role("link", name=re.compile(re.escape(getattr(self, "report_name", "") or ""), re.I)).first.click()
-        add = page.get_by_role("button", name=self._re("경비 추가", exact=False))
-        add.first.wait_for(state="visible", timeout=self.timeout_ms)
+        deadline = time.time() + self.timeout_ms / 1000
+        while self._report_entry() is None:
+            if time.time() >= deadline:
+                raise RuntimeError("리포트 화면으로 돌아가지 못했습니다([Add Expense]를 찾지 못함).")
+            time.sleep(0.3)
+
+    def _report_entry(self):
+        """리포트 화면에서 새 경비를 여는 곳: [Add Expense] 버튼, 경비가 하나도 없으면 'Manually Create Expense' 카드"""
+        page = self.page
+        add = self._first_shown([page.get_by_role("button", name=self._re("경비 추가", exact=False))])
+        if add is not None:
+            return ("button", add)
+        card = self._first_shown([page.get_by_text(self._re("직접 경비 만들기"))])
+        return ("card", card) if card is not None else None
 
     def open_manual_expense(self, expense_type: str):
-        """[Add Expense] → [Manually Create Expense] → (목록에서) Expense Type → 새 경비 화면"""
+        """[Add Expense] → [Manually Create Expense] (경비가 없는 빈 리포트면 'Manually Create Expense' 카드)
+        → (목록에서) Expense Type → 새 경비 화면"""
         page = self.page
-        self._click_button("경비 추가")
-        item = self._first_shown([page.get_by_role("menuitem", name=self._re("직접 경비 만들기", exact=False)),
-                                  page.get_by_role("option", name=self._re("직접 경비 만들기", exact=False)),
-                                  page.locator("button, [role=button], a, li, [role=menuitem], [role=tab]")
-                                      .filter(has_text=self._re("직접 경비 만들기", exact=False))])
-        if item is not None:
-            item.click()
-            time.sleep(0.8)
+        entry = self._report_entry()
+        if entry is None:
+            raise RuntimeError("리포트 화면에서 [Add Expense]를 찾지 못했습니다.")
+        kind, el = entry
+        el.click()
+        time.sleep(0.8)
+        if kind == "button":
+            item = self._first_shown([page.get_by_role("menuitem", name=self._re("직접 경비 만들기", exact=False)),
+                                      page.get_by_role("option", name=self._re("직접 경비 만들기", exact=False)),
+                                      page.locator("button, [role=button], a, li, [role=menuitem], [role=tab]")
+                                          .filter(has_text=self._re("직접 경비 만들기", exact=False))])
+            if item is not None:
+                item.click()
+                time.sleep(0.8)
         search = self._first_shown([page.get_by_placeholder(re.compile(r"Search|검색", re.I))])
         if search is not None:
             try:
@@ -4487,14 +4521,14 @@ class ConcurBot:
                 done += self.fill_expense(rec, uploads, checks)
                 rec.used_for = f"새 경비 {us} {rec.total:,}"
                 page.get_by_role("button", name=self._re("경비 저장")).first.click()
-                add = page.get_by_role("button", name=self._re("경비 추가", exact=False))
-                box = self.missing_info_dialog(4.0, lambda: self._first_shown([add]) is not None)
+                box = self.missing_info_dialog(4.0, lambda: self._report_entry() is not None)
                 if box is not None:
                     checks.append("필수 정보 확인(저장해도 빠졌다고 함)")
                     self.answer_dialog(box, "아니요")
-                try:
-                    add.first.wait_for(state="visible", timeout=self.timeout_ms)
-                except Exception:
+                deadline = time.time() + self.timeout_ms / 1000
+                while self._report_entry() is None and time.time() < deadline:
+                    time.sleep(0.3)
+                if self._report_entry() is None:
                     checks.append("새 경비가 저장됐는지 확인")
                 row["처리"] = ", ".join(done)
                 self.log(f"   새 경비 저장: {row['처리']}")

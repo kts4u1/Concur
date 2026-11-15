@@ -13,7 +13,10 @@ import concur_auto as ca
 
 REPORT = """<!doctype html><meta charset="utf-8">
 <div id="report"><a href="#">Expense Reports</a><h1>Monthly Expense for Oct</h1><h2 id="count">Expenses (0)</h2>
-  <button onclick="document.getElementById('menu').style.display='block'">Add Expense</button>
+  <div id="empty" style="display:none"><h2>No Expenses</h2>
+    <div class="card" onclick="openDialog()"><b>Manually Create Expense</b><p>Enter expense details</p></div>
+    <div class="card"><b>Available Expenses (0)</b><p>Select from your list of expenses</p></div></div>
+  <button id="addbtn" onclick="document.getElementById('menu').style.display='block'">Add Expense</button>
   <div id="menu" role="menu" style="display:none">
     <div role="menuitem" onclick="openDialog()">Manually Create Expense</div>
     <div role="menuitem">Select from Available Expenses (0)</div></div></div>
@@ -31,7 +34,7 @@ REPORT = """<!doctype html><meta charset="utf-8">
   <p>Receipt Status *</p><span name="receiptType" onclick="openList('receipt', this)">None Selected</span>
   <label for="comment">Comment</label><textarea id="comment" oninput="note('comment')"></textarea>
   <div id="pane"><button id="up" onclick="document.getElementById('f').click()">Upload New Receipt</button></div>
-  <input type="file" id="f" style="display:none" onchange="uploaded(this)"></div>
+  <input type="file" id="f" style="display:none" onchange="uploaded(this)" MULTIPLE></div>
 <div id="pop" style="display:none"><div id="items"></div></div>
 <script>
 window.steps = []; window.uploads = []; window.saved = null;
@@ -50,15 +53,17 @@ function pickType(el) { steps.push('type ' + el.textContent); show('dialog', 0);
 function openList(w, el) { which = w; target = el; show('pop', 1); document.getElementById('items').innerHTML =
   lists[w].map(t => '<div class="sapcnqr-listbox-item__wrapper" onclick="pick(this)">' + t + '</div>').join(''); }
 function pick(el) { target.textContent = el.textContent; note(which); show('pop', 0); }
-function uploaded(inp) { const n = inp.files[0].name; uploads.push(n); steps.push('upload ' + n);
-  document.getElementById('up').style.display = 'none'; inp.value = ''; }
+function uploaded(inp) { const names = Array.from(inp.files).map(f => f.name); uploads.push(...names);
+  steps.push('upload ' + names.join(',')); document.getElementById('up').style.display = 'none'; inp.value = ''; }
+if (EMPTY) { document.getElementById('empty').style.display = 'block'; document.getElementById('addbtn').style.display = 'none'; }
 function save() { steps.push('save');
   saved = {type: document.getElementById('type').textContent, date: document.getElementById('transactionDate-date-input-field-input').value,
            amount: document.getElementById('transactionAmount').value, comment: document.getElementById('comment').value,
            purpose: document.getElementById('businessPurpose').value, city: document.getElementById('location').textContent,
            lcrt: document.querySelector('#custom32 span').textContent,
            receipt: document.querySelector('[name=receiptType]').textContent, uploads: uploads.slice()};
-  show('form', 0); show('report', 1); document.getElementById('count').textContent = 'Expenses (1)'; }
+  show('form', 0); show('report', 1); document.getElementById('count').textContent = 'Expenses (1)';
+  show('empty', 0); show('addbtn', 1); }
 </script>
 <style>span[name], #location, .sapcnqr-select-field__input { display:inline-block; min-width:220px; min-height:18px; border:1px solid #999 }
 .t { padding: 4px }</style>"""
@@ -66,17 +71,32 @@ function save() { steps.push('save');
 TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for service", "For service", "Parking & Toll", "", "", "", "", ""]
 
 
+def report_html(multiple=True, empty=False):
+    return (REPORT.replace(" MULTIPLE>", " multiple>" if multiple else ">")
+            .replace("if (EMPTY)", "if (true)" if empty else "if (false)"))
+
+
 @pytest.fixture
-def page():
+def browser():
     sync_api = pytest.importorskip("playwright.sync_api")
     exe = os.environ.get("PW_CHROMIUM") or "/opt/pw-browsers/chromium"
     with sync_api.sync_playwright() as p:
         b = p.chromium.launch(executable_path=exe if Path(exe).exists() else None)
-        pg = b.new_page()
-        pg.set_default_timeout(3000)
-        pg.route("**/report", lambda route: route.fulfill(body=REPORT, content_type="text/html; charset=utf-8"))
-        yield pg
+        yield b
         b.close()
+
+
+def open_report(browser, **kw):
+    pg = browser.new_page()
+    pg.set_default_timeout(3000)
+    html = report_html(**kw)
+    pg.route("**/report", lambda route: route.fulfill(body=html, content_type="text/html; charset=utf-8"))
+    return pg
+
+
+@pytest.fixture
+def page(browser):
+    return open_report(browser)
 
 
 def photos(tmp_path):
@@ -111,10 +131,47 @@ def test_manual_toll_expense(page, tmp_path):
     assert saved["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]    # PDF가 아니라 사진을 차례대로
     steps = page.evaluate("steps")
     assert steps[:2] == ["manual", "type Parking & Toll"] and steps[-1] == "save"
-    assert steps.index("date") < steps.index("amount") < steps.index("upload IMG_5648.jpg")
+    one = "upload IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"                          # 파일 고르기 창에서 한 번에 여러 장
+    assert steps.index("date") < steps.index("amount") < steps.index(one)
     assert rows[0]["순번"] == 5 and rows[0]["Concur 날짜"] == "10/22/2026" and rows[0]["확인 필요"] == ""
-    assert "영수증 더 첨부(IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"] and rec.used_for
+    assert "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"] and rec.used_for
     assert page.inner_text("#count") == "Expenses (1)"
+
+
+def make_bot(page, tmp_path):
+    cfg = ca.default_settings()
+    table = tmp_path / ca.CATEGORY_FILE_NAME
+    ca.save_category_rows(table, [TOLL])
+    ca.apply_category_table(cfg, table)
+    bot = ca.ConcurBot(cfg, lambda s="": None)
+    bot.page, bot.timeout_ms, bot.upload_wait_s, bot.upload_done_s = page, 3000, 3, 3
+    bot.report_url = "http://concur.test/report"
+    bot.screenshot = lambda name: None
+    return bot
+
+
+def toll_rec(tmp_path):
+    stmt, s1, s2 = photos(tmp_path)
+    return ca.Receipt(original=stmt, ocr_file=stmt, bundle=[s1, s2], total=61500, dates=["2026-10-22"],
+                      last_use="2026-10-22", category="톨게이트")
+
+
+def test_one_at_a_time_when_chooser_takes_one(browser, tmp_path):
+    pytest.importorskip("cv2")
+    pg = open_report(browser, multiple=False)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert [s for s in pg.evaluate("steps") if s.startswith("upload")] == [
+        "upload IMG_5648.jpg", "upload IMG_5651.jpg", "upload IMG_5652.jpg"]             # 한 장씩 차례로
+    assert "영수증 더 첨부(IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"]
+
+
+def test_empty_report_uses_manual_card(browser, tmp_path):
+    pytest.importorskip("cv2")
+    pg = open_report(browser, empty=True)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    assert pg.evaluate("steps")[:2] == ["manual", "type Parking & Toll"]           # 'No Expenses'의 왼쪽 카드
+    assert pg.evaluate("saved")["amount"].replace(",", "") == "61500" and rows[0]["오류"] == ""
 
 
 def test_manual_expense_needs_expense_type(page, tmp_path):
