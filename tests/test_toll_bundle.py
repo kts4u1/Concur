@@ -67,7 +67,9 @@ def test_bundle_statement_with_sheets():
     assert stmt.use and stmt.total == 61500 and stmt.category == "톨게이트"
     assert [p.name for p in stmt.bundle] == ["IMG_5651.HEIC", "IMG_5652.HEIC"]          # 사용내역 순서대로
     assert stmt.period == ("2026-10-01", "2026-10-31")
-    assert stmt.bundle_note == "사용내역 13건 61,500원, 영수증 인쇄물 2장 함께 첨부 (영수증 13건 61,500원 맞음)"
+    assert stmt.last_use == "2026-10-22" and stmt.main_date == "2026-10-22"            # 마지막 이용일(조회 기간 끝 10-31이 아님)
+    assert stmt.bundle_note == ("사용내역 13건 61,500원, 마지막 이용 2026-10-22, 영수증 인쇄물 2장 함께 첨부 "
+                                "(영수증 13건 61,500원 맞음)")
     assert not sheet1.use and not sheet2.use and "IMG_5648.HEIC" in sheet1.skip_reason
     assert cafe.use and cafe.bundle == [] and cafe.total == 4500                           # 다른 영수증은 그대로
     assert ca.receipt_issues(stmt, rs) == []
@@ -100,20 +102,16 @@ def test_sheets_alone_are_left_as_before():
     assert ca.group_toll_bundles(rs, OCT) == 0 and all(r.use and not r.bundled_into for r in rs)
 
 
-def test_bundle_pdf(tmp_path):
-    pytest.importorskip("PIL")
+def test_upload_files_in_order(tmp_path):
+    pytest.importorskip("cv2")
     from PIL import Image
     files = []
-    for i, size in enumerate([(3024, 4032), (3024, 4032), (4032, 3024)]):
+    for i, size in enumerate([(300, 400), (300, 400), (400, 300)]):
         f = tmp_path / f"IMG_{i}.jpg"
         Image.new("RGB", size, (240, 240, 240)).save(f, quality=90)
         files.append(f)
     rec = ca.Receipt(original=files[0], ocr_file=files[0], bundle=files[1:])
-    out = ca.upload_file_for(rec, ca.default_settings(), tmp_path / "w")
-    data = out.read_bytes()
-    assert out.suffix == ".pdf" and data.startswith(b"%PDF")
-    assert len(re.findall(rb"/Type\s*/Page\b(?!s)", data)) == 3                   # 사진 3장 = 3쪽
-    assert out.stat().st_size <= 5 * 1024 * 1024 and out.name == "IMG_0_묶음3장.pdf"
+    assert ca.upload_files_for(rec, ca.default_settings(), tmp_path / "w") == files      # PDF로 묶지 않고 차례대로
 
 
 TEXTS = {"IMG_5648.JPG": STATEMENT, "IMG_5651.JPG": SHEET1, "IMG_5652.JPG": SHEET2}
@@ -154,6 +152,7 @@ def test_receipt_list_shows_bundle(tmp_path, monkeypatch):
     rows = {r["파일"]: r for r in ca.read_csv_dicts(ca.list_csv_path(results, OCT))}
     assert rows["IMG_5648.JPG"]["함께 첨부"].startswith("IMG_5651.JPG, IMG_5652.JPG | 사용내역 13건 61,500원")
     assert rows["IMG_5648.JPG"]["금액"] == "61500" and ca.review_status(rows["IMG_5648.JPG"]) == "✓"
+    assert rows["IMG_5648.JPG"]["날짜"] == "2026-10-22"
     assert "함께 첨부" in rows["IMG_5651.JPG"]["확인 필요"]
     assert any("톨게이트: IMG_5648.JPG 사용내역 13건" in l for l in lines)
 

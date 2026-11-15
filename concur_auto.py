@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 톨게이트 묶음"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 톨게이트 새 경비"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -351,6 +351,9 @@ def default_settings():
             "Alerts": "Alerts|알림",
             "닫기": "Close|닫기",
             "경비로 돌아가기": "Expense|경비",
+            "경비 추가": "Add Expense|경비 추가",
+            "직접 경비 만들기": "Manually Create Expense|수동으로 경비 만들기|직접 경비 만들기|새 경비 만들기",
+            "업로드 중": "Uploading|업로드 중|Processing",
             "필수 정보 빠짐": "Would you like to make corrections now|missing required information|필수 정보|지금 수정하시겠습니까",
             "예": "Yes|예",
             "아니요": "No|아니요|아니오",
@@ -1896,6 +1899,7 @@ class Receipt:
     bundle_issue: str = ""                          # 묶음 확인할 것(합계가 다를 때)
     period: tuple = ()                              # 사용내역 기간(시작, 끝) — 이 안의 Concur 경비와 맞춤
     bundled_into: str = ""                          # 이 사진이 함께 붙는 사용내역 사진 이름
+    last_use: str = ""                              # 하이패스 마지막 이용일(ISO) — 새 경비의 Transaction Date
 
     @property
     def main_date(self) -> str:
@@ -2346,6 +2350,21 @@ def hipass_sheet_info(text: str):
     return {"amounts": amounts, "footer": (int(f.group(1)), int(f.group(2).replace(",", ""))) if f else None}
 
 
+USAGE_DATETIME = re.compile(
+    r"(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?\s*(?:\d{1,2}\s*[:시])")   # 날짜 바로 뒤에 시각
+
+
+def usage_dates(text: str) -> list:
+    """사용내역 줄('2026/10/22 19:06:26')·영수증('2026년10월22일 19시06분')처럼 시각이 붙은 날짜 = 이용일들(ISO).
+    '조회 기간 2026년 10월 31일'처럼 시각이 없는 날짜는 뺍니다."""
+    out = []
+    for m in USAGE_DATETIME.finditer(text or ""):
+        iso = normalize_date(*m.groups())
+        if iso and iso not in out:
+            out.append(iso)
+    return out
+
+
 def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
     """이 달 하이패스 사용내역마다 같은 달 하이패스 영수증 인쇄물을 묶습니다.
     사용내역 = 경비 하나(금액 = 총액, 기간 안의 Concur 경비와 맞춤), 인쇄물 = 함께 첨부(따로 맞추지 않음). → 묶은 사용내역 수"""
@@ -2380,6 +2399,11 @@ def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
         mine = sorted(d for d in s.ocr_dates + [d for r, _ in members for d in r.ocr_dates] if d.startswith(prefix))
         if mine:
             s.period = (mine[0], mine[-1])
+        uses = sorted(d for d in usage_dates(s.ocr_text) + [d for r, _ in members for d in usage_dates(r.ocr_text)]
+                      if d.startswith(prefix))
+        s.last_use = uses[-1] if uses else ""
+        if s.last_use:                                   # 대표 날짜 = 마지막 이용일(새 경비의 Transaction Date)
+            s.dates = [s.last_use] + [d for d in s.dates if d != s.last_use]
         s.bundle = [r.original for r, _ in members]
         if not s.category:
             text = compact(s.ocr_text + "".join(r.ocr_text for r, _ in members))
@@ -2387,7 +2411,8 @@ def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
         for r, _ in members:
             r.use, r.skip_reason = False, f"하이패스 사용내역({s.original.name})에 함께 첨부"
         read = [a for _, i in members for a in i["amounts"]]
-        head = f"사용내역 {info['count'] or '?'}건 {total:,}원" + (f", 영수증 인쇄물 {len(members)}장 함께 첨부" if members else "")
+        head = (f"사용내역 {info['count'] or '?'}건 {total:,}원" + (f", 마지막 이용 {s.last_use}" if s.last_use else "")
+                + (f", 영수증 인쇄물 {len(members)}장 함께 첨부" if members else ""))
         s.bundle_issue = ""
         if not members:
             note = "함께 붙일 하이패스 영수증 인쇄물을 못 찾음"
@@ -2871,40 +2896,22 @@ def texts_for(rec: Receipt, cfg: dict) -> dict:
     return out
 
 
-def prepare_bundle_pdf(files: list, cfg: dict, work_dir: Path) -> Path:
-    """사진 여러 장을 차례대로 PDF 한 파일로(사용내역 → 영수증 인쇄물). Concur 크기 제한 안으로 줄입니다."""
-    from PIL import Image, ImageOps
-    if any(Path(f).suffix.lower() in HEIC_EXTENSIONS for f in files) and not _register_heif():
-        raise RuntimeError("HEIC 사진을 읽으려면 pillow-heif 가 필요합니다:  pip install -r requirements.txt")
-    limit = float(cfg.get("업로드_최대_MB", 5)) * 1024 * 1024
-    pages = []
-    for f in files:
-        with Image.open(f) as im:
-            pages.append(ImageOps.exif_transpose(im).convert("RGB"))
-    work_dir.mkdir(parents=True, exist_ok=True)
-    out = work_dir / f"{Path(files[0]).stem}_묶음{len(files)}장.pdf"
-    for long_side, quality in ((2400, 85), (2000, 80), (1700, 75), (1400, 70), (1100, 65), (900, 60)):
-        scaled = []
-        for im in pages:
-            k = min(1.0, long_side / max(im.size))
-            scaled.append(im if k == 1.0 else im.resize((round(im.width * k), round(im.height * k)), Image.LANCZOS))
-        scaled[0].save(out, "PDF", save_all=True, append_images=scaled[1:], resolution=200, quality=quality)
-        if out.stat().st_size <= limit * 0.95:
-            return out
-    raise RuntimeError(f"묶음 PDF를 업로드 크기 제한 안으로 줄이지 못했습니다: {out.name}")
-
-
-def upload_file_for(rec: Receipt, cfg: dict, work_dir: Path) -> Path:
-    """Concur에 올릴 파일: 함께 첨부할 사진이 있으면 PDF 하나로 묶고, 아니면 사진 한 장"""
-    if rec.bundle:
-        return prepare_bundle_pdf([rec.original] + list(rec.bundle), cfg, work_dir)
-    return prepare_upload_file(rec, cfg, work_dir)
+def upload_files_for(rec: Receipt, cfg: dict, work_dir: Path) -> list:
+    """Concur에 올릴 파일들: 사용내역 → 함께 첨부할 영수증 인쇄물 차례(사진마다 HEIC는 JPEG, 5MB 넘으면 줄임).
+    사용자 요청(2026-11-15): PDF로 묶지 말고 사진을 차례차례 올림."""
+    first = prepare_upload_file(rec, cfg, work_dir)
+    return [first] + [prepare_upload_path(Path(p), cfg, work_dir) for p in rec.bundle]
 
 
 def prepare_upload_file(rec: Receipt, cfg: dict, work_dir: Path) -> Path:
     """원본(기본) 또는 보정본을 고르고, 5MB를 넘거나 HEIC면 JPEG 사본을 만듭니다."""
-    cv2, _ = _cv2()
     src = rec.ocr_file if str(cfg.get("업로드_이미지", "원본")).strip() == "보정본" else rec.original
+    return prepare_upload_path(src, cfg, work_dir)
+
+
+def prepare_upload_path(src: Path, cfg: dict, work_dir: Path) -> Path:
+    """사진 한 장을 Concur에 올릴 수 있게: 5MB를 넘거나 HEIC면 JPEG 사본을 만듭니다."""
+    cv2, _ = _cv2()
     limit = float(cfg.get("업로드_최대_MB", 5)) * 1024 * 1024
     must_convert = src.suffix.lower() in HEIC_EXTENSIONS     # Concur가 HEIC를 못 받을 수 있음
     if not must_convert and src.stat().st_size <= limit:
@@ -3762,6 +3769,7 @@ class ConcurBot:
         self.type_text(self.field("리포트 Comment"), comment)
         page.get_by_role("button", name=self._re("리포트 생성")).last.click()
         page.wait_for_url(re.compile(r"/nui/expense/reports/"))
+        self.report_url = page.url
         time.sleep(3)
 
     # ---------- 지난달 경비 추가 ----------
@@ -3792,6 +3800,7 @@ class ConcurBot:
     def open_report(self, item):
         item.click()
         self.page.wait_for_url(re.compile(r"/nui/expense/reports/"))
+        self.report_url = self.page.url
         time.sleep(2)
 
     def report_is_empty(self) -> bool:
@@ -3886,6 +3895,8 @@ class ConcurBot:
                 break
             time.sleep(0.5)
         entries.first.wait_for(state="visible")
+        if not getattr(self, "report_url", ""):
+            self.report_url = page.url
         try:
             self.entries = parse_entry_rows(page.evaluate(JS_READ_ROWS, self.sel("경비 목록")))
         except Exception:
@@ -4298,9 +4309,64 @@ class ConcurBot:
             page.locator("button, [role=button], a").filter(has_text=self._re("첨부된 영수증", exact=False)),
         ])
 
-    def attach_receipt(self, upload: Path, done: list, checks: list):
-        """영수증 칸이 뜰 때까지 기다렸다가(최대 upload_wait_s초) [영수증 업로드]로 올립니다.
+    def attach_receipt(self, upload, done: list, checks: list):
+        """영수증 칸이 뜰 때까지 기다렸다가(최대 upload_wait_s초) [영수증 업로드]로 올립니다. 파일이 여러 장이면
+        첫 장을 올린 뒤 나머지를 차례로 더 올립니다(톨게이트: 사용내역 → 영수증 인쇄물).
         예전에는 버튼을 1.5초 안에 못 찾으면 '이미 첨부됨'으로 보고 건너뛰어, 영수증 칸이 늦게 뜨면 첨부가 빠졌습니다."""
+        files = [Path(f) for f in upload] if isinstance(upload, (list, tuple)) else [Path(upload)]
+        if self._attach_one(files[0], done, checks) and len(files) > 1:
+            self._attach_more(files[1:], done, checks)
+
+    def _attach_more(self, files: list, done: list, checks: list):
+        """두 번째 장부터: [영수증 업로드] 버튼이 다시 보이면 그것으로, 아니면 영수증 칸의 파일 입력에 바로 넣습니다."""
+        page = self.page
+        sent, missed = [], []
+        for f in files:
+            ok = False
+            deadline = time.time() + self.upload_wait_s
+            while not ok and time.time() < deadline:
+                control = self._upload_control()
+                if control is not None:
+                    try:
+                        with page.expect_file_chooser(timeout=10000) as chooser:
+                            control.click()
+                        chooser.value.set_files(str(f))
+                        ok = True
+                        break
+                    except Exception:
+                        pass
+                inputs = page.locator("input[type=file]")
+                if inputs.count():
+                    try:
+                        inputs.last.set_input_files(str(f))
+                        ok = True
+                        break
+                    except Exception:
+                        pass
+                time.sleep(0.5)
+            if not ok:
+                missed.append(f.name)
+                continue
+            self._wait_uploaded()
+            sent.append(f.name)
+        if sent:
+            done.append(f"영수증 더 첨부({', '.join(sent)})")
+        if missed:
+            checks.append(f"영수증 {len(missed)}장 직접 올리기({', '.join(missed)})")
+            self.log(f"   영수증을 더 올릴 곳을 찾지 못했습니다: {', '.join(missed)}. Concur에서 직접 올려 주세요.")
+            self.screenshot("upload_more")
+
+    def _wait_uploaded(self):
+        """'업로드 중' 글자가 사라질 때까지(최대 upload_done_s초) 기다립니다."""
+        busy = self.page.get_by_text(self._re("업로드 중", exact=False))
+        time.sleep(1.0)
+        end = time.time() + self.upload_done_s
+        while time.time() < end and self._first_shown([busy]) is not None:
+            time.sleep(0.5)
+        time.sleep(0.5)
+
+    def _attach_one(self, upload: Path, done: list, checks: list) -> bool:
+        """사진 한 장 올리기(첫 장). 올렸으면 True"""
         page = self.page
         control = attached = None
         deadline = time.time() + self.upload_wait_s
@@ -4312,7 +4378,7 @@ class ConcurBot:
             time.sleep(0.5)
         if control is None and attached is not None:
             done.append("이미 첨부됨(건너뜀)")
-            return
+            return False
         files = page.locator("input[type=file]")
         if control is not None:
             try:
@@ -4329,7 +4395,7 @@ class ConcurBot:
             checks.append("영수증 첨부 버튼을 못 찾음(첨부됐는지 확인)")
             self.log("   영수증 첨부 버튼을 찾지 못했습니다. 화면을 저장합니다.")
             self.screenshot("upload_button")
-            return
+            return False
         # 올라가면 [영수증 업로드] 버튼이 사라짐
         finished = False
         end = time.time() + self.upload_done_s
@@ -4343,6 +4409,103 @@ class ConcurBot:
             self.log("   업로드가 끝났는지 확인하지 못했습니다. Concur 화면에서 영수증이 붙었는지 확인하세요.")
         time.sleep(1)
         done.append(f"영수증 첨부({upload.name})")
+        return True
+
+    # ---------- 직접 만드는 경비(톨게이트: 카드 거래가 아님) ----------
+    def back_to_report(self):
+        """리포트 화면(경비 목록)으로 돌아갑니다."""
+        page = self.page
+        url = getattr(self, "report_url", "")
+        if url:
+            page.goto(url)
+        else:
+            page.get_by_role("link", name=re.compile(re.escape(getattr(self, "report_name", "") or ""), re.I)).first.click()
+        add = page.get_by_role("button", name=self._re("경비 추가", exact=False))
+        add.first.wait_for(state="visible", timeout=self.timeout_ms)
+
+    def open_manual_expense(self, expense_type: str):
+        """[Add Expense] → [Manually Create Expense] → (목록에서) Expense Type → 새 경비 화면"""
+        page = self.page
+        self._click_button("경비 추가")
+        item = self._first_shown([page.get_by_role("menuitem", name=self._re("직접 경비 만들기", exact=False)),
+                                  page.get_by_role("option", name=self._re("직접 경비 만들기", exact=False)),
+                                  page.locator("button, [role=button], a, li, [role=menuitem], [role=tab]")
+                                      .filter(has_text=self._re("직접 경비 만들기", exact=False))])
+        if item is not None:
+            item.click()
+            time.sleep(0.8)
+        search = self._first_shown([page.get_by_placeholder(re.compile(r"Search|검색", re.I))])
+        if search is not None:
+            try:
+                search.fill(expense_type)
+                time.sleep(0.8)
+            except Exception:
+                pass
+        pick = page.get_by_text(self._exact(expense_type))            # 'M card parking & toll'과 헷갈리지 않게 글자 그대로
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            el = self._first_shown([pick])
+            if el is not None:
+                el.click()
+                break
+            time.sleep(0.3)
+        else:
+            raise RuntimeError(f"새 경비 목록에서 '{expense_type}'를 찾지 못했습니다.")
+        self.field("경비 금액", timeout_s=self.timeout_ms / 1000)
+
+    def create_manual_expenses(self, recs: list, work_dir: Path, start_no: int = 1) -> list:
+        """카드 경비와 맞지 않은 톨게이트 묶음마다 새 경비를 만듭니다(사용자 설명 2026-11-15):
+        [Add Expense] → [Manually Create Expense] → Parking & Toll(항목의 Expense Type) → Transaction Date = 마지막 이용일,
+        Amount = 사용내역 총액 → 나머지 칸(자동 입력 항목) → 사용내역·영수증 사진을 차례로 올림 → [Save Expense]"""
+        page = self.page
+        results = []
+        for k, rec in enumerate(recs):
+            day = rec.main_date
+            row = {"순번": start_no + k, "Concur 날짜": "", "Concur 금액": f"{rec.total:,}" if rec.total else "",
+                   "가게 이름": "", "영수증": rec.original.name, "분류": rec.category, "병원": rec.hospital_en,
+                   "병원 근거": rec.hospital_src, "도시": city_name(rec.city) or f"기본({city_name(self.cfg['기본_도시'])})",
+                   "처리": "", "확인 필요": "", "오류": ""}
+            checks = []
+            try:
+                expense_type = (self.cfg.get("Undefined일_때_선택할_유형") or {}).get(rec.category) if rec.category else ""
+                if not expense_type:
+                    raise RuntimeError(f"'{rec.category or '분류 없음'}' 항목의 Expense Type이 없어 새 경비를 못 만듭니다"
+                                       "(자동 입력 편집에서 Expense Type을 정하세요).")
+                if not rec.total or not day:
+                    raise RuntimeError("사용내역의 총액이나 날짜를 몰라 새 경비를 못 만듭니다(영수증 확인 창에서 적어 주세요).")
+                us = f"{date.fromisoformat(day):%m/%d/%Y}"
+                row["Concur 날짜"] = us
+                self.log(f"   새 경비 만들기: {expense_type} {us} {rec.total:,}원 ({rec.original.name} 외 {len(rec.bundle)}장)")
+                self.back_to_report()
+                self.open_manual_expense(expense_type)
+                self.type_text(self.field("경비 날짜"), us)
+                self.type_text(self.field("경비 금액"), str(rec.total))
+                if not rec.last_use and "날짜" not in rec.edited:
+                    checks.append("Transaction Date 확인(마지막 이용일을 못 읽음)")
+                uploads = upload_files_for(rec, self.cfg, work_dir)
+                done = [f"새 경비({expense_type})", f"Transaction Date={us}", f"Amount={rec.total:,}"]
+                done += self.fill_expense(rec, uploads, checks)
+                rec.used_for = f"새 경비 {us} {rec.total:,}"
+                page.get_by_role("button", name=self._re("경비 저장")).first.click()
+                add = page.get_by_role("button", name=self._re("경비 추가", exact=False))
+                box = self.missing_info_dialog(4.0, lambda: self._first_shown([add]) is not None)
+                if box is not None:
+                    checks.append("필수 정보 확인(저장해도 빠졌다고 함)")
+                    self.answer_dialog(box, "아니요")
+                try:
+                    add.first.wait_for(state="visible", timeout=self.timeout_ms)
+                except Exception:
+                    checks.append("새 경비가 저장됐는지 확인")
+                row["처리"] = ", ".join(done)
+                self.log(f"   새 경비 저장: {row['처리']}")
+            except Exception as e:
+                row["오류"] = str(e).splitlines()[0][:200]
+                checks.append("오류")
+                self.log(f"   새 경비 오류: {row['오류']}")
+                self.screenshot("manual_expense")
+            row["확인 필요"] = ", ".join(checks)
+            results.append(row)
+        return results
 
     # ---------- 전체 경비 반복 ----------
     def process_expenses(self, receipts: list, work_dir: Path, stop_flag=None) -> list:
@@ -4397,9 +4560,9 @@ class ConcurBot:
                         checks.append("분류 없음(영수증만 첨부)")
                     if duplicate_count(rec, receipts) > 1:
                         checks.append("같은 날짜·금액 영수증 여러 장")
-                    upload = upload_file_for(rec, self.cfg, work_dir)
+                    upload = upload_files_for(rec, self.cfg, work_dir) if rec.bundle else prepare_upload_file(rec, self.cfg, work_dir)
                     if rec.bundle:
-                        self.log(f"   하이패스 사용내역과 영수증 인쇄물 {len(rec.bundle)}장을 PDF 하나로 묶어 올립니다.")
+                        self.log(f"   하이패스 사용내역과 영수증 인쇄물 {len(rec.bundle)}장을 차례로 올립니다.")
                 done = self.fill_expense(rec, upload, checks)
                 row["처리"] = ", ".join(done) or "변경 없음"
                 self.log(f"   ({i}/{total}) {date_text} {amount_text}원 → "
@@ -4585,6 +4748,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         bot.hospitals = hospitals
         bot.start()
         keep_open = bool(cfg.get("작업_후_Edge_열어두기", True))
+        again, found = False, None
         if mode == "edit":
             bot.wait_login(need_home=False)
             if not ui.confirm("리포트 열기", "열린 Edge 창에서 입력할 리포트를 열어 경비 목록이 보이게 한 뒤 [확인]을 누르세요."):
@@ -4592,27 +4756,39 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         else:
             bot.wait_login()
             name = tm.report_name(cfg["리포트_이름_형식"])
+            bot.report_name = name
             found = bot.find_report(tm)
-            again = False
             if found is not None:
                 again = ui.yes_no_cancel("이미 만든 리포트", (
                     f"Concur에 '{name}' 리포트가 이미 있습니다.\n\n"
                     "[예] 그 리포트에 이어서 넣기\n[아니오] 새 리포트 만들기\n[취소] 중단"))
                 if again is None:
                     raise Cancelled()
-            if again:
-                bot.open_report(found)
-                if bot.report_is_empty():
-                    bot.add_available_expenses(tm)
+        manual = [r for r in receipts if r.use and r.bundle]     # 카드 경비와 맞지 않으면 직접 만들 경비(톨게이트)
+        results = []
+        try:
+            if mode != "edit":
+                if again:
+                    bot.open_report(found)
+                    if bot.report_is_empty():
+                        bot.add_available_expenses(tm)
+                    else:
+                        log("이미 들어 있는 경비에 이어서 입력합니다. 새로 들어온 카드 경비는 Concur에서 이 리포트에 넣은 뒤 다시 ②를 누르세요.")
                 else:
-                    log("이미 들어 있는 경비에 이어서 입력합니다. 새로 들어온 카드 경비는 Concur에서 이 리포트에 넣은 뒤 다시 ②를 누르세요.")
-            else:
-                if found is not None:
-                    bot.go_home()
-                bot.create_report(tm)
-                bot.add_available_expenses(tm)
-        bot.open_first_expense()
-        results = bot.process_expenses(receipts, work_dir, stop_flag)
+                    if found is not None:
+                        bot.go_home()
+                    bot.create_report(tm)
+                    bot.add_available_expenses(tm)
+            bot.open_first_expense()
+            results = bot.process_expenses(receipts, work_dir, stop_flag)
+        except NoExpenses as e:
+            if not manual:
+                raise
+            log(f"카드 경비는 없습니다({e}). 직접 만들 경비만 만듭니다.")
+        manual = [r for r in manual if not r.used_for]
+        if manual:
+            log(f"카드 경비와 맞지 않은 톨게이트 {len(manual)}건은 새 경비로 만듭니다.")
+            results += bot.create_manual_expenses(manual, work_dir, len(results) + 1)
 
         results_path = results_dir / f"경비처리_{tm.prefix}.csv"
         save_results_csv(results, results_path)
