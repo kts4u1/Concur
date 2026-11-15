@@ -1,0 +1,179 @@
+# -*- coding: utf-8 -*-
+"""숙박 묶음(2026-11-15 사용자 설명): 숙박 경비에는 숙박 영수증 → 인보이스 → 숙박을 승인받은 메일 사진을 차례로 올림
+(없는 것은 빼고). 인보이스는 영어일 수도 있고, 승인 메일은 메일에 적힌 숙박 날짜로 그날 숙박 영수증에 붙임.
+톨게이트 사용내역의 작은 '총액'을 못 읽으면(표의 한 줄 금액 8,000원으로 읽음) 크게 다시 읽고, 그래도 못 읽으면 '확인 필요'.
+(글자는 모두 지어낸 값)"""
+
+import os
+from datetime import datetime
+from pathlib import Path
+
+import concur_auto as ca
+
+OCT = ca.TargetMonth(2026, 10)
+T = datetime(2026, 11, 15, 10, 0)
+
+STAY_SLIP = "가나모텔 카드 영수증\n사업자번호 123-45-67891\n카드 결제 감사합니다"          # 날짜·금액을 못 읽은 숙박 영수증
+INVOICE = """가나 1호점
+인보이스
+상호 가나 1호점 견적일자 2026년 10월 20일
+주소 대전광역시 유성구 가나로 1
+업태 숙박업 종목 호텔업
+순번 입실 일자 퇴실 일자 객실 타입 수량 단가 결제 금액
+1 2026년 10월 20일 2026년 10월 21일 스탠다드 1 ₩75,000 ₩75,000
+총계 ₩75,000"""
+INVOICE_EN = """GRAND HOTEL JEONJU
+INVOICE
+Guest Name: Staff Room No: 1203
+Arrival: 06-Oct-26 Departure: 07-Oct-26
+Room Charge KRW 90,000
+Total KRW 90,000"""
+MAIL = """Re: 가나다병원 장비 설치 관련 숙박 승인요청
+Manager
+받는 사람 Engineer 참조 Staff
+2026-09-30 (수) 오후 3:15
+Dear all, Approved Thank you!
+보낸 사람: Engineer <engineer@example.com>
+보낸 날짜: 수요일, 9 월 30, 2026 15:06
+받는 사람: Manager <manager@example.com>
+제목: 가나다병원 장비 설치 관련 숙박 승인요청
+안녕하십니까. 가나다병원 장비 설치 일정으로 10 월 6 일 7 일 8 일 홍길동님과 제가 전주에서 숙박 이후 설치 일정을
+이어 나가려고 합니다. 이에 숙박 일정의 승인을 요청 드립니다. 2명"""
+
+
+def make(name, text, taken=T):
+    return ca.analyze_receipt(Path(name), Path(name), text, ca.default_settings(), [], taken)
+
+
+def placed(*recs):
+    for r in recs:
+        ca.place_in_month(r, OCT)
+    return list(recs)
+
+
+def test_recognize_invoice_and_mail():
+    assert ca.is_stay_invoice(INVOICE) and ca.is_stay_invoice(INVOICE_EN)
+    assert not ca.is_stay_invoice(STAY_SLIP) and not ca.is_stay_invoice("스타벅스 2026.10.07 합계 4,500")
+    assert ca.stay_approval_dates(MAIL) == ["2026-10-06", "2026-10-07", "2026-10-08"]     # 보낸 날짜 9-30은 뺌
+    assert ca.stay_approval_dates("From: Engineer\nSubject: Hotel approval\nApproved. Stay Oct 6-8.\nSent: Sep 30, 2026") == [
+        "2026-10-06", "2026-10-07", "2026-10-08"]
+    assert ca.stay_approval_dates(STAY_SLIP + " 승인번호 1234") is None and ca.stay_approval_dates(INVOICE) is None
+    assert make("IMG_1.JPG", INVOICE_EN).ocr_dates == ["2026-10-06", "2026-10-07"]           # 영어 날짜(06-Oct-26)
+
+
+def test_invoice_fills_unread_stay_receipt():
+    slip, inv = placed(make("IMG_5646.HEIC", STAY_SLIP), make("IMG_5647.HEIC", INVOICE, datetime(2026, 11, 15, 10, 1)))
+    assert not slip.use and slip.category == "숙박"                                         # 날짜·금액을 못 읽어 빠졌던 영수증
+    assert ca.group_stay_bundles([slip, inv], OCT, ca.default_settings()) == 1
+    assert slip.use and slip.main_date == "2026-10-20" and slip.total == 75000              # 인보이스에서 읽은 날짜·금액
+    assert slip.city.startswith("Daejeon") and slip.stay_in == "2026-10-20"
+    assert [p.name for p in slip.bundle] == ["IMG_5647.HEIC"] and slip.bundle_note == "인보이스 IMG_5647.HEIC 함께 첨부"
+    assert not inv.use and inv.skip_reason == "숙박 영수증(IMG_5646.HEIC)에 함께 첨부"
+    start, end, note = ca.stay_dates(slip, "2026-10-21", 6)
+    assert (start.isoformat(), end.isoformat(), note) == ("2026-10-20", "2026-10-21", "")    # Date Range = 인보이스 입실일부터
+    assert ca.find_receipt([slip, inv], "2026-10-21", 75000) is slip                        # 카드 거래일이 다음 날이어도
+
+
+def test_mail_attached_to_each_night():
+    night6 = make("IMG_0006.JPG", "가나호텔 2026-10-06 21:10 합계 80,000")
+    night7 = make("IMG_0007.JPG", "가나호텔 2026-10-08 01:30 합계 80,000")             # 야근 뒤 새벽 영수증 = 7일 숙박
+    other = make("IMG_0020.JPG", "다라모텔 2026-10-20 22:00 합계 70,000")
+    inv = make("IMG_0008.JPG", INVOICE_EN.replace("90,000", "80,000"))
+    mail = make("IMG_0009.PNG", MAIL, datetime(2026, 9, 30, 15, 20))
+    rs = placed(night6, night7, other, inv, mail)
+    assert ca.group_stay_bundles(rs, OCT, ca.default_settings()) == 2
+    assert [p.name for p in night6.bundle] == ["IMG_0008.JPG", "IMG_0009.PNG"]               # 영수증 → 인보이스 → 승인 메일
+    assert night6.bundle_note == "인보이스 IMG_0008.JPG, 승인 메일 IMG_0009.PNG 함께 첨부"
+    assert [p.name for p in night7.bundle] == ["IMG_0009.PNG"] and other.bundle == []
+    assert not mail.use and mail.skip_reason == "숙박 승인 메일 → 숙박 영수증(IMG_0006.JPG, IMG_0007.JPG)에 함께 첨부"
+
+
+def test_invoice_alone_is_the_stay_receipt():
+    inv, mail = placed(make("IMG_0008.JPG", INVOICE_EN), make("IMG_0009.PNG", MAIL))
+    ca.group_stay_bundles([inv, mail], OCT, ca.default_settings())
+    assert inv.use and inv.category == "숙박" and inv.total == 90000 and inv.stay_in == "2026-10-06"
+    assert [p.name for p in inv.bundle] == ["IMG_0009.PNG"]
+
+
+def test_other_receipts_untouched():
+    cafe, slip = placed(make("IMG_1.JPG", "스타벅스 2026.10.07 합계 4,500"), make("IMG_2.JPG", "가나호텔 2026-10-07 22:00 합계 80,000"))
+    assert ca.group_stay_bundles([cafe, slip], OCT, ca.default_settings()) == 0
+    assert cafe.use and slip.use and not cafe.bundle and not slip.bundle
+
+
+# ---------- 영수증 목록: 그 전 달에 찍은 승인 메일도 ----------
+class FakeOcr:
+    texts = {}
+
+    def __init__(self, work_dir):
+        pass
+
+    def read(self, path):
+        return self.texts[Path(path).name]
+
+    def read_zoomed(self, path):
+        return self.texts.get(Path(path).name + "#크게", "")
+
+
+def photos(tmp_path, texts):
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in texts:
+        if "#" not in name:
+            (src / name).write_bytes(b"\xff\xd8\xff\xd9" + name.encode())
+    return src
+
+
+def build(tmp_path, monkeypatch, texts, tm=OCT):
+    FakeOcr.texts = texts
+    monkeypatch.setattr(ca, "WindowsOcr", FakeOcr)
+    cfg = ca.default_settings()
+    cfg.update({"영수증_원본_폴더": str(photos(tmp_path, texts)), "영수증_보정_사용": False})
+    results = tmp_path / "결과"
+    results.mkdir()
+    lines = []
+    recs = ca.build_receipts(cfg, tm, [], results, tmp_path / "w", lines.append)
+    return {r.original.name: r for r in recs}, results, lines
+
+
+def test_receipt_list_with_early_approval_mail(tmp_path, monkeypatch):
+    texts = {"2026-10-06_211000.jpg": "가나호텔 2026-10-06 21:10 합계 80,000",
+             "2026-09-30_152000.png": MAIL,                                        # 10월 전에 받은 승인 메일
+             "2026-09-28_120000.jpg": "가족 사진"}                                  # 10월 전 다른 사진은 목록에 없음
+    got, results, lines = build(tmp_path, monkeypatch, texts)
+    assert set(got) == {"2026-10-06_211000.jpg", "2026-09-30_152000.png"}
+    assert [p.name for p in got["2026-10-06_211000.jpg"].bundle] == ["2026-09-30_152000.png"]
+    rows = {r["파일"]: r for r in ca.read_csv_dicts(ca.list_csv_path(results, OCT))}
+    assert rows["2026-10-06_211000.jpg"]["함께 첨부"] == "2026-09-30_152000.png | 승인 메일 2026-09-30_152000.png 함께 첨부"
+    assert "함께 첨부" in rows["2026-09-30_152000.png"]["확인 필요"]
+    assert any("숙박 승인 메일만 찾을 그 전 20일 사진 2장" in l for l in lines)
+
+
+# ---------- 톨게이트 사용내역 총액 ----------
+from test_toll_bundle import SHEET1, SHEET2, STATEMENT       # noqa: E402
+
+SMALL = STATEMENT.replace("(총 13건 / 총액 61,500원)\n", "")       # 작은 글자 '총액'을 못 읽음 → 가장 큰 금액이 표의 한 줄
+
+
+def test_statement_total_unread_is_flagged():
+    stmt = make("IMG_5648.HEIC", SMALL)
+    placed(stmt)
+    ca.group_toll_bundles([stmt], OCT, {"톨게이트": ca.TOLL_DEFAULT_WORDS}, ["톨게이트"])
+    assert stmt.total == 4700 and stmt.bundle_issue == ca.TOLL_TOTAL_UNREAD
+    assert ca.TOLL_TOTAL_UNREAD in ca.receipt_issues(stmt, [stmt])
+    stmt.edited.append("금액")                                                     # 영수증 확인 창에서 금액을 적으면
+    assert ca.TOLL_TOTAL_UNREAD not in ca.receipt_issues(stmt, [stmt])
+
+
+def test_statement_total_from_all_receipts():
+    stmt, s1, s2 = placed(make("IMG_5648.HEIC", SMALL.replace("기간별 사용내역", "기간별 사용내역 총 13건")),
+                          make("IMG_5651.HEIC", SHEET1), make("IMG_5652.HEIC", SHEET2.replace("총 13 건/61500 원", "")))
+    ca.group_toll_bundles([stmt, s1, s2], OCT, {"톨게이트": ca.TOLL_DEFAULT_WORDS}, ["톨게이트"])
+    assert stmt.total == 61500 and stmt.bundle_issue == ""                          # 영수증 13장 금액을 모두 읽어 더함
+
+
+def test_statement_total_read_with_zoom(tmp_path, monkeypatch):
+    texts = {"IMG_5648.JPG": SMALL, "IMG_5648.JPG#크게": STATEMENT}                # 크게 다시 읽으면 '총액'이 읽힘
+    got, _, lines = build(tmp_path, monkeypatch, texts)
+    assert got["IMG_5648.JPG"].total == 61500 and got["IMG_5648.JPG"].bundle_issue == ""
+    assert any("크게 다시 읽은 사진 1장, 그중 더 잘 읽힌 것 1장" in l for l in lines)

@@ -31,7 +31,7 @@ def test_this_month_report_dates():
 def test_processing_this_month(tmp_path, monkeypatch):
     src = tmp_path / "src"
     src.mkdir()
-    texts = {"2026-10-31_200000.jpg": "2026.10.31 합계 8,000",       # 11월 전에 찍음 → 읽지 않음
+    texts = {"2026-10-31_200000.jpg": "2026.10.31 합계 8,000",       # 11월 전에 찍음 → 숙박 승인 메일이 아니라 목록에 없음
              "2026-11-03_090000.jpg": "2026.11.03 주차 합계 5,000",
              "2026-11-05_090000.jpg": "2026.10.30 합계 3,000",        # 10월 영수증을 11월에 찍음
              "2026-11-10_090000.jpg": "합계 4,500 카드"}               # 날짜 못 읽음 → 촬영 날짜(11월) 사용
@@ -58,7 +58,7 @@ def test_processing_this_month(tmp_path, monkeypatch):
         recs = ca.build_receipts(cfg, NOV, ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
     finally:
         log.close()
-    assert "2026-10-31_200000.jpg" not in read
+    assert set(read) == set(texts)                                 # 그 전 20일 사진은 숙박 승인 메일인지만 봄
     assert [(r.original.name, r.use, r.main_date) for r in recs] == [
         ("2026-11-03_090000.jpg", True, "2026-11-03"),
         ("2026-11-05_090000.jpg", False, "2026-10-30"),
