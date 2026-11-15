@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 영수증 여러 장 한 번에"     # 고칠 때마다 바꿉니다. 실행 기록 첫 줄과 창 제목에 나옵니다.
+APP_VERSION = "2026-11-15 승인일시·마일리지"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -172,13 +172,15 @@ PARKING_WORDS = ["주차", "입차", "출차", "주자"]              # '주자'
 PARKING_MORE_WORDS = ["입출차", "파킹", "발렛", "parking", "valet"]
 # 예전 자동입력표에 판마다 한 번씩만 더할 글자(사용자가 나중에 지운 글자는 다시 넣지 않음)
 TOLL_DEFAULT_WORDS = ["톨게이트", "통행료", "하이패스", "한국도로공사", "도로공사", "hi-pass", "사용내역"]
-DEFAULT_WORDS_VERSION = 5
+MILEAGE_DEFAULT_WORDS = ["차량유지비", "유지비보조금", "Car Record", "Driven Distance", "Total Km", "마일리지", "mileage"]
+DEFAULT_WORDS_VERSION = 6
 DEFAULT_WORDS_BY_VERSION = {
     1: {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS},
     2: {"카페": CAFE_WORDS + CAFE_MORE_WORDS, "주차": PARKING_WORDS + PARKING_MORE_WORDS},
     3: {},                                                 # 판 3: 문구 철자 고치기(SPELLING_FIXES)
     4: {},                                                 # 판 4: {hospital} → hospital, 식대의 '버터' 빼기
     5: {"톨게이트": TOLL_DEFAULT_WORDS},                    # 판 5: 사용자가 만든 '톨게이트' 항목에 하이패스 글자
+    6: {"마일리지": MILEAGE_DEFAULT_WORDS},                 # 판 6: 사용자가 만든 '마일리지' 항목에 신청서 글자
 }
 SPELLING_FIXES = [(re.compile(r"\bAccomodation", re.I), "Accommodation")]
 REMOVED_WORDS = {"식대": ["버터"]}                         # 사용자가 빼 달라고 한 기본 글자(판 4)
@@ -1889,6 +1891,7 @@ class Receipt:
     taken: object = None                            # 촬영 시각(datetime)
     is_receipt: bool = True                         # 영수증으로 보이는지(자동 판단)
     ocr_dates: list = field(default_factory=list)   # 영수증 글자에서 읽은 날짜
+    pay_dates: list = field(default_factory=list)   # 그중 승인일시·거래일시처럼 돈을 낸 날짜(달을 정할 때 먼저 봄)
     skip_reason: str = ""                           # 이 달 목록에서 자동으로 뺀 이유
     hospital_src: str = ""                          # 병원을 어디서 찾았는지
     biz_no: str = ""                                # 사업자등록번호(가게 기억에 씀)
@@ -1899,14 +1902,16 @@ class Receipt:
     bundle_issue: str = ""                          # 묶음 확인할 것(합계가 다를 때)
     period: tuple = ()                              # 사용내역 기간(시작, 끝) — 이 안의 Concur 경비와 맞춤
     bundled_into: str = ""                          # 이 사진이 함께 붙는 사용내역 사진 이름
-    last_use: str = ""                              # 하이패스 마지막 이용일(ISO) — 새 경비의 Transaction Date
+    last_use: str = ""                              # 새 경비의 Transaction Date(ISO): 하이패스 마지막 이용일, 마일리지는 그 달 말일
+    new_kind: str = ""                              # 카드 경비가 없으면 Concur에 새로 만들 경비(톨게이트·마일리지)
 
     @property
     def main_date(self) -> str:
         return self.dates[0] if self.dates else ""
 
 
-DATE_IN_TEXT = re.compile(r"(?<!\d)(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})(?!\d)")
+# 날짜 바로 뒤에 시각이 붙어 읽혀도(2026-11-0210:51) 날짜로 봄
+DATE_IN_TEXT = re.compile(r"(?<!\d)(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})(?:(?!\d)|(?=\d{1,2}:\d{2}))")
 DATE_IN_NAME = re.compile(r"(20\d{2})-(\d{2})-(\d{2})")
 AMOUNT_WITH_SEP = re.compile(r"(?<![\d.,])\d{1,3}(?:[,.]\d{3})+(?![\d,]|\.\d)")
 AMOUNT_WON = re.compile(r"(?<![\d,.])(\d{3,7})\s*원")
@@ -1942,6 +1947,23 @@ def parse_amount_cell(text: str):
 
 
 DATE_NO_YEAR = re.compile(r"(?<!\d)(\d{1,2})\s*월\s*(\d{1,2})\s*일")      # 10월01일 (연도가 안 찍혔거나 못 읽음)
+# 승인일시·거래일시·결제일 바로 뒤의 날짜 = 돈을 낸 날(카드 거래일). 정기권의 사용시작·사용종료보다 먼저 봅니다.
+PAY_DATE = re.compile(r"(?:승인|숭인|결제|거래|판매|매출)\s*(?:일시|일자|날짜|시간|일)\D{0,6}?"
+                      r"(?:(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})"
+                      r"|(2\d)\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})"
+                      r"|(20\d{2})(\d{2})(\d{2}))(?:(?!\d)|(?=\d{1,2}:\d{2}))")
+
+
+def find_pay_dates(ocr_text: str) -> list:
+    """'[승인일시] 2026-11-02 10:51'처럼 돈을 낸 날짜들(ISO)"""
+    out = []
+    for m in PAY_DATE.finditer(ocr_text or ""):
+        g = m.groups()
+        y, mo, d = (g[0:3] if g[0] else (("20" + g[3],) + g[4:6]) if g[3] else g[6:9])
+        iso = normalize_date(y, mo, d)
+        if iso and iso not in out:
+            out.append(iso)
+    return out
 
 
 def find_ocr_dates(ocr_text: str, ref=None) -> list:
@@ -2062,7 +2084,7 @@ def compact(text: str) -> str:
 def detect_category(text_compact: str, keywords: dict, priority=None) -> str:
     text = (text_compact or "").lower()                   # 영어 글자는 대소문자 상관없이(HOTEL·Hotel·hotel)
     for cat in (priority or ["식대", "카페", "주차"]):
-        if any(k and k.lower() in text for k in keywords.get(cat, [])):
+        if any(k and compact(k).lower() in text for k in keywords.get(cat, [])):   # 'Car Record'처럼 띄어 적어도
             return cat
     return ""
 
@@ -2116,7 +2138,8 @@ METRO_CITIES = ("서울", "부산", "대구", "인천", "광주", "대전", "울
 
 def detect_city(text_compact: str, cities: dict, hospital_key: str = "", low_priority=("서울",)) -> str:
     """영수증 주소에서 도시를 찾습니다. 못 찾으면 빈칸(→ 기본 도시).
-    'OO시/OO광역시/OO군' → '전북 익산…'처럼 도 이름 뒤의 도시 → '광주 북구…'처럼 광역시 뒤의 구 → 병원 이름 앞의 도시.
+    주차장 이름 앞의 도시(주차장명: 광주OO점) → 'OO시/OO광역시/OO군' → '전북 익산…'처럼 도 이름 뒤의 도시
+    → '광주 북구…'처럼 광역시 뒤의 구 → 병원 이름 앞의 도시.
     서울처럼 본사 주소로 자주 찍히는 도시(low_priority)는 다른 도시가 없을 때만 씁니다."""
     text = text_compact or ""
     found = []                                                        # (낮은 우선순위인지, 위치, 도시)
@@ -2141,6 +2164,10 @@ def detect_city(text_compact: str, cities: dict, hospital_key: str = "", low_pri
             if prov.startswith(ko) or (ko == "광주" and prov.startswith("경기")):
                 continue
             add(ko, m.start(2))
+        # 주차장 이름(광주OO주차타워점)의 도시가 운영 회사 본사 주소보다 정확함('주자장'은 OCR이 잘못 읽은 것)
+        m = re.search(r"(?:주[차자]장명|지점명|점포명)[:：]?(" + "|".join(re.escape(n) for n in names) + r")", text)
+        if m:
+            found.append((False, -1, cities[m.group(1)]))
     if found:
         return min(found)[2]
     key = compact(hospital_key)
@@ -2217,7 +2244,9 @@ def fill_same_day_cities(receipts: list) -> int:
 def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, hospitals: list,
                     taken=None) -> Receipt:
     rec = Receipt(original=original, ocr_file=ocr_file, ocr_text=ocr_text, taken=taken)
-    rec.ocr_dates = find_ocr_dates(ocr_text, taken or file_name_date(original.name))
+    rec.pay_dates = find_pay_dates(ocr_text)
+    rec.ocr_dates = rec.pay_dates + [d for d in find_ocr_dates(ocr_text, taken or file_name_date(original.name))
+                                     if d not in rec.pay_dates]      # 돈을 낸 날짜를 맨 앞에
     rec.dates = list(rec.ocr_dates)
     rec.date_from_ocr = bool(rec.dates)
     fdate = taken.date().isoformat() if taken else file_name_date(original.name)
@@ -2404,7 +2433,7 @@ def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
         s.last_use = uses[-1] if uses else ""
         if s.last_use:                                   # 대표 날짜 = 마지막 이용일(새 경비의 Transaction Date)
             s.dates = [s.last_use] + [d for d in s.dates if d != s.last_use]
-        s.bundle = [r.original for r, _ in members]
+        s.bundle, s.new_kind = [r.original for r, _ in members], "톨게이트"
         if not s.category:
             text = compact(s.ocr_text + "".join(r.ocr_text for r, _ in members))
             s.category = detect_category(text, keywords or {}, priority) or next((r.category for r, _ in members if r.category), "")
@@ -2430,6 +2459,64 @@ def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
             note = f"영수증에서 읽은 것 {len(read)}건 {sum(read):,}원(일부만 읽음, 사진으로 확인)" if read else "영수증 금액은 못 읽음"
         s.bundle_note = f"{head} ({note})"
     return len(stmts)
+
+
+# ---------- 마일리지: 차량 유지비 보조금 신청서 + 계기판(주행거리) 사진 (2026-11-15 사용자 설명) ----------
+# 신청서(Car Record Entry, 한 달 운행 거리 → 금액)가 경비 하나이고, 그 달 1일·다음 달 1일 계기판 사진을 인쇄해 찍은
+# 사진을 같은 경비에 함께 올립니다. 카드 경비가 아니라서 Concur에 새 경비로 만듭니다.
+MILEAGE_FORM_WORDS = ("carrecord", "차량유지비", "유지비보조금", "drivendistance", "totalkmamount")
+
+
+def mileage_form_info(text: str):
+    """차량 유지비 보조금 신청서면 {'total': 금액(Total Km Amount), 'km': 운행 거리}, 아니면 None(못 읽은 값은 0)"""
+    t = compact(_fix_amount_text(text)).lower()
+    if not any(w in t for w in MILEAGE_FORM_WORDS):
+        return None
+    def last(pattern):                                    # 표 머리글(Total km Amount) 뒤의 날짜가 아니라 맨 아래 합계 줄
+        found = re.findall(pattern + r"(?![\d,]|-)", t)
+        return int(found[-1].replace(",", "")) if found else 0
+    return {"total": last(r"kmamount(?:\(won\))?[:：]?(\d[\d,]{2,})"),
+            "km": last(r"drivendistance(?:\(km\))?[:：]?(\d[\d,]*)")}
+
+
+def group_mileage_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
+    """이 달 마일리지 신청서마다 계기판 사진을 묶습니다. 계기판 사진 = 이 달 1일과 다음 달 1일 날짜가 함께 찍힌 사진
+    (2026.10.01 / 2026.11.01), 날짜를 못 읽었으면 'km' 글자가 있고 신청서와 사흘 안에 찍은 사진. → 묶은 신청서 수"""
+    prefix = tm.prefix + "-"
+    forms = [(r, i) for r, i in ((r, mileage_form_info(r.ocr_text)) for r in receipts)
+             if i and any(d.startswith(prefix) for d in (r.ocr_dates or r.dates[:1]))]
+    if not forms:
+        return 0
+    form_ids = {id(r) for r, _ in forms}
+    first = f"{tm.prefix}-01"
+    nxt = f"{tm.year + 1}-01-01" if tm.month == 12 else f"{tm.year}-{tm.month + 1:02d}-01"
+    gap = lambda a, b: abs((a.taken - b.taken).total_seconds()) if a.taken and b.taken else float("inf")
+    for r in receipts:
+        if id(r) in form_ids or r.bundled_into or r.new_kind or r.pay_dates:
+            continue
+        strong = first in r.ocr_dates and nxt in r.ocr_dates
+        weak = "km" in compact(r.ocr_text).lower() and not r.category and any(gap(r, f) <= 3 * 86400 for f, _ in forms)
+        if strong or weak:
+            r.bundled_into = min(forms, key=lambda x: gap(r, x[0]))[0].original.name
+    end = f"{tm.prefix}-{calendar.monthrange(tm.year, tm.month)[1]:02d}"
+    for f, info in forms:
+        members = sorted((r for r in receipts if r.bundled_into == f.original.name and id(r) not in form_ids),
+                         key=lambda r: (r.taken or datetime.max, r.original.name.lower()))
+        total = info["total"] or f.total
+        if total:
+            f.total, f.is_receipt = total, True
+            f.amounts = [total] + [a for a in f.amounts if a != total]
+        f.last_use = end                                  # Transaction Date = 그 달 말일
+        f.dates = [end] + [d for d in f.dates if d != end]
+        f.bundle, f.new_kind = [r.original for r in members], "마일리지"
+        if not f.category:
+            f.category = detect_category(compact(f.ocr_text), keywords or {}, priority)
+        for r in members:
+            r.use, r.skip_reason = False, f"마일리지 신청서({f.original.name})에 함께 첨부"
+        f.bundle_issue = "" if members else "함께 올릴 계기판(주행거리) 사진을 못 찾음"
+        f.bundle_note = ("마일리지 신청서" + (f" {info['km']:,}km" if info["km"] else "") + f" {total:,}원, "
+                         + (f"계기판 사진 {len(members)}장 함께 첨부" if members else "계기판 사진을 못 찾음"))
+    return len(forms)
 
 
 def receipt_issues(rec: Receipt, receipts: list) -> list:
@@ -2475,7 +2562,7 @@ def place_in_month(rec: Receipt, tm: TargetMonth):
     if not rec.is_receipt and not date_edited:      # 날짜를 직접 적었으면 영수증으로 봄
         rec.skip_reason = NOT_RECEIPT_NOTE
     else:
-        receipt_dates = rec.dates if date_edited else rec.ocr_dates
+        receipt_dates = rec.dates if date_edited else (rec.pay_dates or rec.ocr_dates)   # 승인일시가 있으면 그 날짜로
         if receipt_dates:
             mine = [d for d in receipt_dates if d.startswith(prefix)]
             if mine:
@@ -2790,9 +2877,11 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         log(f"   기억해 둔 가게의 영수증 {remembered}장은 그때 고른 분류·병원·도시로 맞췄습니다.")
 
     for group in (list(auto.values()), receipts):
-        if group_toll_bundles(group, tm, cfg.get("키워드"), cfg.get("분류_우선순위")) and group is receipts:
-            for s in (r for r in receipts if r.bundle_note):
-                log(f"   톨게이트: {s.original.name} {s.bundle_note}")
+        toll = group_toll_bundles(group, tm, cfg.get("키워드"), cfg.get("분류_우선순위"))
+        mileage = group_mileage_bundles(group, tm, cfg.get("키워드"), cfg.get("분류_우선순위"))
+        if (toll or mileage) and group is receipts:
+            for s in (r for r in receipts if r.new_kind):
+                log(f"   {s.new_kind}: {s.original.name} {s.bundle_note}")
         fill_same_day_hospitals(group)
         fill_same_day_cities(group)
     list_path = list_csv_path(results_dir, tm)
@@ -4488,9 +4577,10 @@ class ConcurBot:
         self.field("경비 금액", timeout_s=self.timeout_ms / 1000)
 
     def create_manual_expenses(self, recs: list, work_dir: Path, start_no: int = 1) -> list:
-        """카드 경비와 맞지 않은 톨게이트 묶음마다 새 경비를 만듭니다(사용자 설명 2026-11-15):
-        [Add Expense] → [Manually Create Expense] → Parking & Toll(항목의 Expense Type) → Transaction Date = 마지막 이용일,
-        Amount = 사용내역 총액 → 나머지 칸(자동 입력 항목) → 사용내역·영수증 사진을 차례로 올림 → [Save Expense]"""
+        """카드 경비와 맞지 않은 톨게이트·마일리지 묶음마다 새 경비를 만듭니다(사용자 설명 2026-11-15):
+        [Add Expense] → [Manually Create Expense] → 항목의 Expense Type(Parking & Toll 등) → Transaction Date
+        (톨게이트 = 마지막 이용일, 마일리지 = 그 달 말일), Amount(사용내역 총액·신청서 금액) → 나머지 칸(자동 입력 항목)
+        → 사진을 차례로 올림(사용내역·영수증 인쇄물 / 신청서·계기판 사진) → [Save Expense]"""
         page = self.page
         results = []
         for k, rec in enumerate(recs):
@@ -4506,7 +4596,8 @@ class ConcurBot:
                     raise RuntimeError(f"'{rec.category or '분류 없음'}' 항목의 Expense Type이 없어 새 경비를 못 만듭니다"
                                        "(자동 입력 편집에서 Expense Type을 정하세요).")
                 if not rec.total or not day:
-                    raise RuntimeError("사용내역의 총액이나 날짜를 몰라 새 경비를 못 만듭니다(영수증 확인 창에서 적어 주세요).")
+                    raise RuntimeError(f"{rec.new_kind or '새 경비'}의 금액이나 날짜를 몰라 새 경비를 못 만듭니다"
+                                       "(영수증 확인 창에서 적어 주세요).")
                 us = f"{date.fromisoformat(day):%m/%d/%Y}"
                 row["Concur 날짜"] = us
                 self.log(f"   새 경비 만들기: {expense_type} {us} {rec.total:,}원 ({rec.original.name} 외 {len(rec.bundle)}장)")
@@ -4798,7 +4889,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
                     "[예] 그 리포트에 이어서 넣기\n[아니오] 새 리포트 만들기\n[취소] 중단"))
                 if again is None:
                     raise Cancelled()
-        manual = [r for r in receipts if r.use and r.bundle]     # 카드 경비와 맞지 않으면 직접 만들 경비(톨게이트)
+        manual = [r for r in receipts if r.use and r.new_kind]   # 카드 경비와 맞지 않으면 직접 만들 경비(톨게이트·마일리지)
         results = []
         try:
             if mode != "edit":
@@ -4821,7 +4912,8 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
             log(f"카드 경비는 없습니다({e}). 직접 만들 경비만 만듭니다.")
         manual = [r for r in manual if not r.used_for]
         if manual:
-            log(f"카드 경비와 맞지 않은 톨게이트 {len(manual)}건은 새 경비로 만듭니다.")
+            kinds = "·".join(dict.fromkeys(r.new_kind for r in manual))
+            log(f"카드 경비와 맞지 않은 {kinds} {len(manual)}건은 새 경비로 만듭니다.")
             results += bot.create_manual_expenses(manual, work_dir, len(results) + 1)
 
         results_path = results_dir / f"경비처리_{tm.prefix}.csv"
