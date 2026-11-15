@@ -37,11 +37,33 @@ REPORT = """<!doctype html><meta charset="utf-8">
   <p>Receipt Status *</p><span name="receiptType" onclick="openList('receipt', this)">None Selected</span>
   <label for="vendor">Enter Vendor Name</label><input id="vendor" name="vendorName" oninput="note('vendor')">
   <label for="comment">Comment</label><textarea id="comment" oninput="note('comment')"></textarea>
-  <div id="pane"><button id="up" onclick="document.getElementById('f').click()">Upload New Receipt</button></div>
-  <input type="file" id="f" style="display:none" onchange="uploaded(this)" MULTIPLE></div>
+  <div id="pane"><p id="drop">Upload or drag-and-drop your receipts here.</p>
+    <button id="up" onclick="document.getElementById('f').click()">Upload New Receipt</button>
+    <button id="choose" onclick="openAvail()">Choose From Available Receipts</button>
+    <button id="addr" style="display:none" onclick="openAvail()">Add</button></div>
+  <input type="file" id="f" style="display:none" onchange="toLibrary(this)" MULTIPLE>
+  <div id="avail" style="display:none"><h3>Attach Receipt</h3><span>Available Receipts</span> <span>Receipts in Report</span>
+    <button aria-label="Close Available Receipts" onclick="closeAvail()">X</button>
+    <button id="up2" onclick="document.getElementById('f2').click()">Upload New Receipt</button>
+    <input type="file" id="f2" style="display:none" onchange="toLibrary(this)" MULTIPLE>
+    <div id="cards"></div></div>
+  <div id="dlg" role="dialog" style="display:none"><h3>Receipt Image</h3><span id="dname"></span>
+    <button onclick="show('dlg', 0)">Delete</button><button onclick="attachDlg()">Attach</button></div></div>
 <div id="pop" style="display:none"><div id="items"></div></div>
 <script>
 window.steps = []; window.uploads = []; window.saved = null; window.expenses = []; let editing = null;
+window.library = LIBRARY; let current = null;
+const PIX = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+function toLibrary(inp) { const names = Array.from(inp.files).map(f => f.name); library.push(...names);
+  steps.push('library ' + names.join(',')); inp.value = ''; drawCards(); }
+function drawCards() { document.getElementById('cards').innerHTML = library.map(n => '<div class="card"><div>' + n +
+  '</div><img src="' + PIX + '" width="60" height="40" onclick="openDlg(this.previousSibling.textContent)"></div>').join(''); }
+function openAvail() { show('avail', 1); show('pane', 0); drawCards(); }
+function closeAvail() { show('avail', 0); show('pane', 1); }
+function openDlg(n) { current = n; document.getElementById('dname').textContent = n; show('dlg', 1); }
+function resetPane() { uploads = []; ['drop', 'up', 'choose'].forEach(id => show(id, 1)); show('addr', 0); }
+function attachDlg() { uploads.push(current); steps.push('attach ' + current); show('dlg', 0); closeAvail();
+  ['drop', 'up', 'choose'].forEach(id => show(id, 0)); show('addr', 1); }
 const TYPES = ['M card parking & toll', 'M card taxi', 'Parking & Toll', 'Public Transport', 'Taxi'];
 const lists = {city: ['Gwangju (ex Kwangju), KOREA, REPUBLIC OF', 'Seoul, KOREA, REPUBLIC OF'], lcrt: ['NA'],
                receipt: ['No Receipt', 'Receipt']};
@@ -53,21 +75,18 @@ function drawTypes(list) { document.getElementById('types').innerHTML = list.map
 function openDialog() { steps.push('manual'); show('menu', 0); show('dialog', 1); drawTypes(TYPES); }
 function filter(q) { drawTypes(TYPES.filter(t => t.toLowerCase().includes(q.toLowerCase()))); }
 function pickType(el) { steps.push('type ' + el.textContent); show('dialog', 0); show('report', 0); show('form', 1);
-  uploads = []; editing = null; document.getElementById('up').style.display = 'inline-block';
+  editing = null; resetPane();
   document.getElementById('type').textContent = el.textContent; }
 function openList(w, el) { which = w; target = el; show('pop', 1); document.getElementById('items').innerHTML =
   lists[w].map(t => '<div class="sapcnqr-listbox-item__wrapper" onclick="pick(this)">' + t + '</div>').join(''); }
 function pick(el) { target.textContent = el.textContent; note(which); show('pop', 0); }
-function uploaded(inp) { const names = Array.from(inp.files).map(f => f.name); uploads.push(...names);
-  steps.push('upload ' + names.join(',')); document.getElementById('up').style.display = 'none'; inp.value = ''; }
 if (EMPTY) { document.getElementById('empty').style.display = 'block'; document.getElementById('addbtn').style.display = 'none'; }
 function drawRows() { document.getElementById('list').innerHTML = expenses.map((e, i) =>
   '<div role="row"><span class="sapcnqr-dropzone"><input type="checkbox" class="sapcnqr-checkbox__input" data-i="' + i +
   '"></span><span>' + e.date + '</span><span>' + e.type + '</span><span>KRW ' +
   Number(String(e.amount).replace(/,/g, '')).toLocaleString('en-US') + '</span></div>').join(''); }
 function editSel() { const cb = document.querySelector('#list input:checked'); if (!cb) return;
-  editing = +cb.dataset.i; steps.push('edit'); show('report', 0); show('form', 1);
-  document.getElementById('up').style.display = 'inline-block'; }
+  editing = +cb.dataset.i; steps.push('edit'); show('report', 0); show('form', 1); resetPane(); }
 function save() { steps.push('save');
   if (editing !== null) { saved = expenses[editing]; saved.uploads = saved.uploads.concat(uploads); }
   else { saved = {type: document.getElementById('type').textContent, date: document.getElementById('transactionDate-date-input-field-input').value,
@@ -87,9 +106,10 @@ function save() { steps.push('save');
 TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for service", "For service", "Parking & Toll", "", "", "", "", ""]
 
 
-def report_html(multiple=True, empty=False):
+def report_html(multiple=True, empty=False, library=()):
     return (REPORT.replace(" MULTIPLE>", " multiple>" if multiple else ">")
-            .replace("if (EMPTY)", "if (true)" if empty else "if (false)"))
+            .replace("if (EMPTY)", "if (true)" if empty else "if (false)")
+            .replace("LIBRARY", "[" + ",".join(f"'{n}'" for n in library) + "]"))
 
 
 @pytest.fixture
@@ -147,8 +167,10 @@ def test_manual_toll_expense(page, tmp_path):
     assert saved["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]    # PDF가 아니라 사진을 차례대로
     steps = page.evaluate("steps")
     assert steps[:2] == ["manual", "type Parking & Toll"] and steps[-1] == "save"
-    one = "upload IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"                          # 파일 고르기 창에서 한 번에 여러 장
+    one = "library IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"                         # 보관함에 한 번에 여러 장 올림
     assert steps.index("date") < steps.index("amount") < steps.index("save") < steps.index("edit") < steps.index(one)
+    assert [x for x in steps if x.startswith("attach")] == [                       # 보관함에서 차례로 골라 Attach
+        "attach IMG_5648.jpg", "attach IMG_5651.jpg", "attach IMG_5652.jpg"]
     assert steps[-1] == "save" and steps.count("save") == 2                        # 저장 → 다시 열어 사진 → 다시 저장
     assert saved["vendor"] == ""                                                   # Vendor Name은 숙박만
     assert rows[0]["순번"] == 5 and rows[0]["Concur 날짜"] == "10/22/2026" and rows[0]["확인 필요"] == ""
@@ -179,9 +201,34 @@ def test_one_at_a_time_when_chooser_takes_one(browser, tmp_path):
     pg = open_report(browser, multiple=False)
     rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
-    assert [s for s in pg.evaluate("steps") if s.startswith("upload")] == [
-        "upload IMG_5648.jpg", "upload IMG_5651.jpg", "upload IMG_5652.jpg"]             # 한 장씩 차례로
-    assert "영수증 더 첨부(IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"]
+    assert [s for s in pg.evaluate("steps") if s.startswith("library")] == [
+        "library IMG_5648.jpg", "library IMG_5651.jpg", "library IMG_5652.jpg"]          # 한 장씩 차례로 올림
+    assert "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"]
+
+
+def test_already_uploaded_receipts_are_picked_not_uploaded_again(browser, tmp_path):
+    """예전 실행에서 보관함(Available Receipts)에 올라간 사진은 다시 올리지 않고 골라서 붙임"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, library=("IMG_5648.jpg", "IMG_5651.jpg"))
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert [s for s in steps if s.startswith("library")] == ["library IMG_5652.jpg"]       # 없는 것만 올림
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert rows[0]["확인 필요"] == ""
+
+
+def test_single_upload_that_only_reaches_library_is_picked(browser, tmp_path):
+    """카드 경비처럼 한 장을 [Upload New Receipt]로 올렸는데 보관함에만 들어가면 골라서 붙임"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser)
+    bot = make_bot(pg, tmp_path)
+    bot.back_to_report()
+    bot.open_manual_expense("Parking & Toll")
+    f = photos(tmp_path)[0]
+    done, checks = [], []
+    bot.attach_receipt(f, done, checks)
+    assert pg.evaluate("uploads") == ["IMG_5648.jpg"] and checks == []
+    assert done == ["영수증 첨부(IMG_5648.jpg)"]
 
 
 def test_empty_report_uses_manual_card(browser, tmp_path):
@@ -302,7 +349,8 @@ def test_manual_accommodation_with_vendor(browser, tmp_path):
                      vendor="가나 1호점")
     rows = bot.create_manual_expenses([rec], tmp_path / "w")
     saved = pg.evaluate("saved")
-    assert saved["type"] == "Accommodation" and saved["date"] == "10/20/2026" and saved["vendor"] == "가나 1호점"
+    assert saved["type"] == "Accommodation" and saved["date"] == "10/20/2026" and saved["vendor"] == "Gana No.1"   # 영어로
+    assert "Vendor Name 확인(Gana No.1: 한글 이름을 로마자로 바꿈)" in rows[0]["확인 필요"]
     assert saved["uploads"] == ["IMG_5646.jpg", "IMG_5647.jpg"] and rows[0]["오류"] == ""      # 영수증 → 인보이스
 
 

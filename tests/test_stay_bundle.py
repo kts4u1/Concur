@@ -232,3 +232,19 @@ def test_unreadable_stay_photo_goes_with_receipt():
     assert [p.name for p in slip.bundle] == ["IMG_5647.HEIC"] and slip.bundle_note == "숙박 사진 IMG_5647.HEIC 함께 첨부"
     assert not blur.use and blur.main_date == "2026-10-20" and "IMG_5646.HEIC" in blur.skip_reason
     assert not far.bundled_into
+
+
+def test_vendor_name_in_english():
+    """Vendor Name은 영어로, 인보이스 맨 위 큰 제목(호텔 이름)을 먼저 씀 — 작은 '상 호' 칸은 잘못 읽히기 쉬움(실제 화면)"""
+    garbled = "가나 쉼터 1호점\n인보이스\n상 호 죠q까최하녹 규섬 간력일자 2026년 10% 20일\n업태 숙박업 입실 퇴실"
+    assert ca.invoice_title(garbled) == "가나 쉼터 1호점"
+    assert ca.find_vendor_name("상 호 죠q까최하녹 규섬 간력일자 2026년 10% 20일") == ""              # 잘못 읽은 글자는 안 씀
+    assert ca.find_vendor_name("상 호 가나 쉼터 1호점 견적일자 2026년 10월 20일") == "가나 쉼터 1호점"
+    assert ca.vendor_english("가나 쉼터 1호점") == "Gana Swimteo No.1"
+    assert ca.vendor_english("놀유니버스") == "NOL Universe" and ca.vendor_english("다라모텔") == "Dara Motel"
+    assert ca.vendor_english("GRAND HOTEL JEONJU") == "GRAND HOTEL JEONJU"
+    slip = make("IMG_5646.HEIC", NOL_SLIP)
+    inv = make("IMG_5647.HEIC", garbled, datetime(2026, 11, 15, 10, 1))
+    placed(slip, inv)
+    ca.group_stay_bundles([slip, inv], OCT, ca.default_settings())
+    assert slip.vendor == "가나 쉼터 1호점"

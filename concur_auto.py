@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 묻지 않고 새 경비·함께 첨부 ✓"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-15 보관함에서 영수증 고르기·Vendor 영어"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -356,6 +356,12 @@ def default_settings():
             "Itemizations": "Itemizations|항목별 내역|항목화",
             "Save Itemization": "Save Itemization|항목별 내역 저장|항목화 저장",
             "Room Rate": "Room Rate|객실 요금|객실료",
+            "사용 가능한 영수증에서 선택": "Choose From Available Receipts|사용 가능한 영수증에서 선택|사용 가능한 영수증 선택",
+            "사용 가능한 영수증": "Available Receipts|사용 가능한 영수증",
+            "사용 가능한 영수증 닫기": "Close Available Receipts|사용 가능한 영수증 닫기",
+            "영수증 붙이기": "Attach|첨부",
+            "영수증 끌어 놓기": "Upload or drag-and-drop your receipts here|영수증을 업로드하거나 여기에 끌어",
+            "영수증 더하기": "Add|추가",
             "Alerts": "Alerts|알림",
             "닫기": "Close|닫기",
             "경비로 돌아가기": "Expense|경비",
@@ -2303,8 +2309,66 @@ def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, ho
     return rec
 
 
+VENDOR_BRANDS = {"놀유니버스": "NOL Universe", "야놀자": "Yanolja", "여기어때": "Yeogi Eottae", "에어비앤비": "Airbnb",
+                 "아고다": "Agoda", "부킹닷컴": "Booking.com", "호텔스닷컴": "Hotels.com", "익스피디아": "Expedia",
+                 "트립닷컴": "Trip.com", "데일리호텔": "Daily Hotel", "호텔": "Hotel", "모텔": "Motel",
+                 "리조트": "Resort", "게스트하우스": "Guesthouse", "펜션": "Pension"}
+
+
+def vendor_english(name: str) -> str:
+    """Concur Vendor Name은 영어로(사용자 요청 2026-11-15): '가나 쉼터 1호점' → 'Gana Swimteo No.1',
+    '놀유니버스' → 'NOL Universe'. 한글이 없으면 그대로."""
+    name = re.sub(r"\s+", " ", name or "").strip()
+    if not re.search(r"[가-힣]", name):
+        return name
+    words = []
+    for w in name.split(" "):
+        m = re.fullmatch(r"(\d+)호점", w)
+        if m:
+            words.append(f"No.{m.group(1)}")
+            continue
+        if w in VENDOR_BRANDS:
+            words.append(VENDOR_BRANDS[w])
+            continue
+        for ko, en in VENDOR_BRANDS.items():               # 'OO호텔' → 'Oo Hotel'
+            if len(w) > len(ko) and w.endswith(ko):
+                w = romanize_korean(w[:-len(ko)]).capitalize() + " " + en
+                break
+        else:
+            w = re.sub(r"(?<=[가-힣]{2})점$", "", w)            # '광주점' → 광주(지점 표시는 뺌)
+            w = romanize_korean(w)
+            w = w[:1].upper() + w[1:]
+        words.append(w)
+    return " ".join(x for x in words if x)
+
+
 VENDOR_LABEL = re.compile(r"(?:가맹점\s*명|상\s*호\s*명?|업\s*소\s*명|매\s*장\s*명|가맹점(?=\s*[:：]))\s*[:：]?\s*([^\n:：]{2,40})")
-VENDOR_STOP = re.compile(r"\s*(?:사업자|등록\s*번호|대표|주\s*소|전화|TEL|견적|번호|가맹점\s*번호|\d{3}-\d{2}-\d{5}).*$", re.I)
+VENDOR_STOP = re.compile(r"\s*(?:사업자|등록\s*번호|대표|주\s*소|전화|TEL|견적|번호|가맹점\s*번호|\d{3}-\d{2}-\d{5}"
+                         r"|[가-힣]{0,2}일자|일시|날짜|20\d{2}).*$", re.I)
+
+
+def _plausible_name(name: str) -> bool:
+    """OCR이 잘못 읽은 글자('죠q까최하녹')는 가게 이름으로 쓰지 않음: 한글 사이에 영문 한두 글자, %·숫자 섞임 등"""
+    if len(re.sub(r"\W", "", name)) < 2 or re.search(r"[%$#@=~]", name):
+        return False
+    if re.search(r"[가-힣]", name) and re.search(r"(?<![A-Za-z])[A-Za-z]{1,2}(?![A-Za-z])", name):
+        return False
+    return True
+
+
+def invoice_title(ocr_text: str) -> str:
+    """인보이스 맨 위 큰 글자(호텔 이름): '인보이스/INVOICE' 줄 바로 위 줄"""
+    lines = [l.strip() for l in (ocr_text or "").splitlines()]
+    for i, line in enumerate(lines):
+        if re.search(r"인보이스|invoice|folio", line, re.I):
+            rest = re.sub(r"(?i)인보이스|invoice|folio|guest|tax", "", line).strip(" :|-*")
+            if len(rest) >= 3 and _plausible_name(rest):
+                return rest
+            for prev in reversed(lines[max(0, i - 3):i]):
+                if prev and 2 <= len(prev) <= 40 and _plausible_name(prev) and not re.fullmatch(r"[\d\W]+", prev):
+                    return prev
+            break
+    return ""
 
 
 def find_vendor_name(ocr_text: str) -> str:
@@ -2312,7 +2376,7 @@ def find_vendor_name(ocr_text: str) -> str:
     for m in VENDOR_LABEL.finditer(ocr_text or ""):
         name = VENDOR_STOP.sub("", m.group(1))
         name = re.sub(r"\(주\)|㈜|주식회사|^\s*주_|\(유\)|\(재\)", "", name).strip(" .,_-*|[]")
-        if len(re.sub(r"\W", "", name)) >= 2:
+        if _plausible_name(name):
             return name
     return ""
 
@@ -2682,7 +2746,7 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
         if not best.total and inv.total:
             best.total, best.amounts, changed = inv.total, [inv.total] + best.amounts, True
         best.category = best.category or stay_cat or inv.category
-        best.vendor = inv.vendor or best.vendor               # 예약 회사(놀유니버스)보다 인보이스의 호텔 이름
+        best.vendor = invoice_title(inv.ocr_text) or inv.vendor or best.vendor   # 예약 회사보다 인보이스의 호텔 이름(큰 제목)
         if inv.city and (not best.city or best.city in low_cities):  # 인터넷 예약 전표의 서울 주소보다 호텔 인보이스 주소
             best.city = inv.city
         if not best.is_receipt:
@@ -3356,6 +3420,35 @@ JS_MARK_ROW = r"""
     }
   }
   return false;
+}
+"""
+
+
+JS_MARK_RECEIPT_CARD = r"""
+(name) => {
+  // Available Receipts(올린 영수증 보관함)에서 파일 이름이 같은 카드의 사진에 표시합니다.
+  // 카드 안에 Attach(첨부) 단추가 따로 있으면 그것에도 표시합니다(사진 창이 안 뜰 때 씀).
+  document.querySelectorAll('[data-concur-auto-card],[data-concur-auto-cardattach]').forEach(e => {
+    e.removeAttribute('data-concur-auto-card'); e.removeAttribute('data-concur-auto-cardattach'); });
+  const want = name.trim().toLowerCase();
+  const labels = Array.from(document.querySelectorAll('body *')).filter(e =>
+    e.children.length === 0 && (e.textContent || '').trim().toLowerCase() === want);
+  for (const lab of labels) {
+    let box = lab;
+    for (let k = 0; k < 7 && box; k++, box = box.parentElement) {
+      const img = box.querySelector('img, canvas, [role=img]');
+      if (img) {
+        img.setAttribute('data-concur-auto-card', '1');
+        const btn = Array.from(box.querySelectorAll('button, [role=button]')).find(b =>
+          /attach|첨부/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.innerText || '')));
+        if (btn) btn.setAttribute('data-concur-auto-cardattach', '1');
+        return 'img';
+      }
+    }
+    lab.setAttribute('data-concur-auto-card', '1');
+    return 'name';
+  }
+  return '';
 }
 """
 
@@ -4469,16 +4562,10 @@ class ConcurBot:
             return False
         try:
             # 1. Add Itemization: Room Rate에 금액
-            if self._wait_text("Room Rate", 8):
+            if self._wait_text("Room Rate", 20):          # Add Itemization 화면이 늦게 뜰 수 있음
                 if amount is None:
                     raise RuntimeError("경비 금액을 몰라 Room Rate를 넣지 못했습니다.")
-                box = self._first_shown([page.get_by_label(re.compile(
-                    "|".join(re.escape(a) for a in self._alts("Room Rate")), re.I))])
-                if box is None:
-                    if not page.evaluate(JS_COLUMN_INPUT, self._alts("Room Rate")):
-                        raise RuntimeError("Room Rate 칸을 찾지 못했습니다.")
-                    box = page.locator("[data-concur-auto]").first
-                self.type_text(box, str(amount))
+                self.fill_room_rate(amount)
                 self._click_button("Save Itemization")
                 deadline = time.time() + 15
                 while self._wait_text("Room Rate", 0.5) and time.time() < deadline:
@@ -4514,6 +4601,37 @@ class ConcurBot:
             checks.append("Itemizations 직접 넣기")
             self._leave_itemization()
             return False
+
+    def fill_room_rate(self, amount: int):
+        """Add Itemization 표의 Room Rate 칸(날짜 줄)에 금액을 넣습니다. 표 머리글 아래 칸 → 칸 이름 순서로 찾고,
+        들어갔는지 확인합니다(2026-11-15 실제 화면에서 칸이 비어 저장이 안 됐음)."""
+        page = self.page
+        text = str(amount)
+        tried = []
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            boxes = []
+            try:
+                if page.evaluate(JS_COLUMN_INPUT, self._alts("Room Rate")):
+                    boxes.append(("표 머리글 아래", page.locator("[data-concur-auto]").first))
+            except Exception:
+                pass
+            label = self._first_shown([page.get_by_label(re.compile(
+                "|".join(re.escape(a) for a in self._alts("Room Rate")), re.I))])
+            if label is not None:
+                boxes.append(("칸 이름", label))
+            for how, box in boxes:
+                try:
+                    self.type_text(box, text)
+                    page.keyboard.press("Tab")
+                    time.sleep(0.3)
+                    if re.sub(r"\D", "", box.input_value() or "") == text:
+                        self.log(f"   Room Rate 칸({how})에 {amount:,} 넣음")
+                        return
+                except Exception as e:
+                    tried.append(f"{how}: {str(e).splitlines()[0][:60]}")
+            time.sleep(0.5)
+        raise RuntimeError("Room Rate 칸에 금액을 넣지 못했습니다" + (f" ({'; '.join(tried[-2:])})" if tried else ""))
 
     def _leave_itemization(self):
         """Itemization 화면에서 멈췄으면 왼쪽 위 '< Expense'로 경비 화면에 돌아갑니다."""
@@ -4671,14 +4789,145 @@ class ConcurBot:
             page.locator("button, [role=button], a").filter(has_text=self._re("첨부된 영수증", exact=False)),
         ])
 
-    def attach_receipt(self, upload, done: list, checks: list):
-        """영수증 칸이 뜰 때까지 기다렸다가(최대 upload_wait_s초) [영수증 업로드]로 올립니다. 파일이 여러 장이면
-        첫 장을 올린 뒤 나머지를 차례로 더 올립니다(톨게이트: 사용내역 → 영수증 인쇄물).
-        예전에는 버튼을 1.5초 안에 못 찾으면 '이미 첨부됨'으로 보고 건너뛰어, 영수증 칸이 늦게 뜨면 첨부가 빠졌습니다."""
+    def attach_receipt(self, upload, done: list, checks: list, pick: bool = False):
+        """영수증 사진을 경비에 붙입니다.
+        - 한 장(카드 경비): [Upload New Receipt]로 바로 올림(2026-11-15 첫 실제 실행에서 이렇게 붙음).
+        - 여러 장이거나 직접 만든 경비(pick): 사진이 Available Receipts(보관함)에만 들어가고 경비에는 안 붙어서
+          (2026-11-15 실제 화면), 사용자 설명대로 [Choose From Available Receipts] → 사진 → [Attach],
+          다음 사진은 [Add] → 사진 → [Attach]. 보관함에 없는 사진만 먼저 올립니다(예전에 올린 것은 다시 안 올림)."""
         files = [Path(f) for f in upload] if isinstance(upload, (list, tuple)) else [Path(upload)]
-        sent = self._attach_one(files, done, checks)
-        if 0 < sent < len(files):
-            self._attach_more(files[sent:], done, checks)
+        if len(files) == 1 and not pick:
+            before = len(checks)
+            sent = self._attach_one(files, done, checks)
+            empty = self._first_shown([self.page.get_by_text(self._re("영수증 끌어 놓기", exact=False))]) is not None
+            if sent and empty and "영수증이 올라갔는지 확인" in checks[before:]:   # 보관함으로만 감 → 골라서 붙임
+                checks.remove("영수증이 올라갔는지 확인")
+                done.pop()
+                self.attach_from_available(files, done, checks)
+            return
+        self.attach_from_available(files, done, checks)
+
+    def _available_open(self) -> bool:
+        return self._first_shown([self.page.get_by_text(self._re("사용 가능한 영수증"))]) is not None
+
+    def _open_available(self, again: bool = False) -> bool:
+        """[Choose From Available Receipts](두 번째 사진부터는 [Add])를 눌러 보관함을 엽니다."""
+        page = self.page
+        if self._available_open():
+            return True
+        locs = [page.get_by_role("button", name=self._re("사용 가능한 영수증에서 선택", exact=False)),
+                page.locator("button, [role=button], a").filter(has_text=self._re("사용 가능한 영수증에서 선택", exact=False))]
+        if again:
+            locs = [page.get_by_role("button", name=self._re("영수증 더하기"))] + locs
+        deadline = time.time() + self.upload_wait_s
+        while time.time() < deadline:
+            el = self._first_shown(locs)
+            if el is not None:
+                try:
+                    el.click()
+                except Exception:
+                    pass
+                end = time.time() + 10
+                while time.time() < end:
+                    if self._available_open():
+                        time.sleep(0.5)
+                        return True
+                    time.sleep(0.3)
+            time.sleep(0.5)
+        return False
+
+    def _card_shown(self, name: str) -> bool:
+        try:
+            return bool(self.page.evaluate(JS_MARK_RECEIPT_CARD, name))
+        except Exception:
+            return False
+
+    def _upload_to_available(self, files: list) -> list:
+        """보관함 안의 [Upload New Receipt]로 사진을 올리고 카드가 보일 때까지 기다립니다. → 못 올린 파일 이름"""
+        page = self.page
+        missing = list(files)
+        control = self._upload_control()
+        try:
+            if control is not None:
+                with page.expect_file_chooser(timeout=15000) as chooser:
+                    control.click()
+                fc = chooser.value
+                fc.set_files([str(f) for f in files] if fc.is_multiple() else str(files[0]))
+                sent = files if fc.is_multiple() else files[:1]
+            else:
+                inp = page.locator("input[type=file]").last
+                inp.set_input_files([str(f) for f in files])
+                sent = files
+        except Exception as e:
+            self.log(f"   보관함에 사진을 올리지 못했습니다: {str(e).splitlines()[0][:80]}")
+            return [f.name for f in files]
+        end = time.time() + self.upload_done_s
+        while time.time() < end and any(not self._card_shown(f.name) for f in sent):
+            time.sleep(0.5)
+        missing = [f for f in files if not self._card_shown(f.name)]
+        if missing and len(sent) < len(files):           # 한 장씩만 받는 창이면 나머지도 차례로
+            return self._upload_to_available(missing) if missing != files else [f.name for f in missing]
+        return [f.name for f in missing]
+
+    def _attach_card(self, name: str) -> bool:
+        """보관함에서 이름이 같은 사진 → 'Receipt Image' 창의 [Attach]"""
+        page = self.page
+        kind = page.evaluate(JS_MARK_RECEIPT_CARD, name)
+        if not kind:
+            return False
+        page.locator("[data-concur-auto-card]").first.click()
+        dialog_attach = (page.locator("[role=dialog], [role=alertdialog], [aria-modal=true]")
+                         .filter(has_text=re.compile(re.escape(name), re.I))
+                         .get_by_role("button", name=self._re("영수증 붙이기")))
+        end = time.time() + 8
+        while time.time() < end:
+            btn = self._first_shown([dialog_attach])
+            if btn is None and time.time() > end - 5:     # 사진 창이 없으면 카드의 Attach 단추
+                btn = self._first_shown([page.locator("[data-concur-auto-cardattach]")])
+            if btn is not None:
+                btn.click()
+                gone = time.time() + 15
+                while time.time() < gone and self._first_shown([dialog_attach]) is not None:
+                    time.sleep(0.3)
+                time.sleep(1.0)
+                return True
+            time.sleep(0.3)
+        return False
+
+    def attach_from_available(self, files: list, done: list, checks: list):
+        page = self.page
+        attached, missed = [], []
+        if not self._open_available():
+            checks.append(f"영수증 직접 붙이기(Choose From Available Receipts를 못 찾음: {', '.join(f.name for f in files)})")
+            self.log("   [Choose From Available Receipts]를 찾지 못했습니다. 화면을 저장합니다.")
+            self.screenshot("available_receipts")
+            return
+        need = [f for f in files if not self._card_shown(f.name)]
+        if need:
+            failed = set(self._upload_to_available(need))
+            missed += [n for n in (f.name for f in need) if n in failed]
+        for k, f in enumerate(files):
+            if f.name in missed:
+                continue
+            if k and not self._open_available(again=True):
+                missed.append(f.name)
+                continue
+            if self._attach_card(f.name):
+                attached.append(f.name)
+            else:
+                missed.append(f.name)
+        close = self._first_shown([page.get_by_role("button", name=self._re("사용 가능한 영수증 닫기", exact=False))])
+        if close is not None:
+            try:
+                close.click()
+            except Exception:
+                pass
+        if attached:
+            done.append(f"영수증 첨부({', '.join(attached)})")
+        if missed:
+            checks.append(f"영수증 {len(missed)}장 직접 붙이기({', '.join(missed)})")
+            self.log(f"   보관함에서 붙이지 못한 영수증: {', '.join(missed)}. Concur에서 직접 붙여 주세요.")
+            self.screenshot("attach_receipt")
 
     def _attach_more(self, files: list, done: list, checks: list):
         """두 번째 장부터: [영수증 업로드] 버튼이 다시 보이면 그것으로, 아니면 영수증 칸의 파일 입력에 바로 넣습니다."""
@@ -4890,7 +5139,7 @@ class ConcurBot:
                 rec.used_for = f"새 경비 {us} {rec.total:,}"
                 uploads = upload_files_for(rec, self.cfg, work_dir)
                 if self.open_expense_row(us, rec.total):
-                    self.attach_receipt(uploads, done, checks)
+                    self.attach_receipt(uploads, done, checks, pick=True)
                     self.save_expense(checks)
                 else:
                     checks.append(f"영수증 직접 올리기(저장한 새 경비를 다시 열지 못함: {', '.join(p.name for p in uploads)})")
@@ -4975,13 +5224,16 @@ class ConcurBot:
                 return
         except Exception:
             pass
-        if not rec.vendor:
+        name = vendor_english(rec.vendor)                    # Vendor Name은 영어로(사용자 요청)
+        if not name:
             checks.append("Vendor Name 직접 넣기")
             return
         try:
-            self.type_text(box, rec.vendor)
+            self.type_text(box, name)
             page.keyboard.press("Escape")                     # 가게 이름 추천 목록이 뜨면 닫음
-            done.append(f"Vendor Name={rec.vendor}")
+            done.append(f"Vendor Name={name}")
+            if re.search(r"[가-힣]", rec.vendor):
+                checks.append(f"Vendor Name 확인({name}: 한글 이름을 로마자로 바꿈)")
         except Exception:
             checks.append("Vendor Name 직접 넣기")
 
