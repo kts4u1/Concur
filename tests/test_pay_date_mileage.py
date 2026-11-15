@@ -109,6 +109,7 @@ def test_bundle_form_with_odometer_photo():
     assert form.bundle_note == "마일리지 신청서 1,250km 541,250원, 계기판 사진 1장 함께 첨부"
     assert ca.receipt_issues(form, rs) == []
     assert not odo.use and odo.skip_reason == "마일리지 신청서(IMG_5650.HEIC)에 함께 첨부"
+    assert odo.category == "마일리지"                                                   # 계기판 사진도 분류는 마일리지
     assert not nov_cafe.bundled_into and cafe.use and not cafe.bundle                  # 11월 1일 영수증은 계기판 사진이 아님
     assert ca.find_receipt(rs, "2026-10-31", 541250) is form                         # 다시 돌릴 때 만든 경비와 맞춤
 

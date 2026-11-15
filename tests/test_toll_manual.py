@@ -16,10 +16,13 @@ REPORT = """<!doctype html><meta charset="utf-8">
   <div id="empty" style="display:none"><h2>No Expenses</h2>
     <div class="card" onclick="openDialog()"><b>Manually Create Expense</b><p>Enter expense details</p></div>
     <div class="card"><b>Available Expenses (0)</b><p>Select from your list of expenses</p></div></div>
-  <button id="addbtn" onclick="document.getElementById('menu').style.display='block'">Add Expense</button>
+  <div class="sapcnqr-toolbar__toolbar">
+    <button id="addbtn" onclick="document.getElementById('menu').style.display='block'">Add Expense</button>
+    <button onclick="editSel()">Edit</button></div>
   <div id="menu" role="menu" style="display:none">
     <div role="menuitem" onclick="openDialog()">Manually Create Expense</div>
-    <div role="menuitem">Select from Available Expenses (0)</div></div></div>
+    <div role="menuitem">Select from Available Expenses (0)</div></div>
+  <div class="entries-list" id="list"></div></div>
 <div id="dialog" role="dialog" style="display:none"><h2>Add Expense to Report</h2>
   <input placeholder="Search" oninput="filter(this.value)">
   <div id="types"></div></div>
@@ -32,12 +35,13 @@ REPORT = """<!doctype html><meta charset="utf-8">
   <label for="transactionAmount">Amount</label><input id="transactionAmount" oninput="note('amount')">
   <p>LCRT *</p><div id="custom32"><span class="sapcnqr-select-field__input" onclick="openList('lcrt', this)"></span></div>
   <p>Receipt Status *</p><span name="receiptType" onclick="openList('receipt', this)">None Selected</span>
+  <label for="vendor">Enter Vendor Name</label><input id="vendor" name="vendorName" oninput="note('vendor')">
   <label for="comment">Comment</label><textarea id="comment" oninput="note('comment')"></textarea>
   <div id="pane"><button id="up" onclick="document.getElementById('f').click()">Upload New Receipt</button></div>
   <input type="file" id="f" style="display:none" onchange="uploaded(this)" MULTIPLE></div>
 <div id="pop" style="display:none"><div id="items"></div></div>
 <script>
-window.steps = []; window.uploads = []; window.saved = null;
+window.steps = []; window.uploads = []; window.saved = null; window.expenses = []; let editing = null;
 const TYPES = ['M card parking & toll', 'M card taxi', 'Parking & Toll', 'Public Transport', 'Taxi'];
 const lists = {city: ['Gwangju (ex Kwangju), KOREA, REPUBLIC OF', 'Seoul, KOREA, REPUBLIC OF'], lcrt: ['NA'],
                receipt: ['No Receipt', 'Receipt']};
@@ -49,6 +53,7 @@ function drawTypes(list) { document.getElementById('types').innerHTML = list.map
 function openDialog() { steps.push('manual'); show('menu', 0); show('dialog', 1); drawTypes(TYPES); }
 function filter(q) { drawTypes(TYPES.filter(t => t.toLowerCase().includes(q.toLowerCase()))); }
 function pickType(el) { steps.push('type ' + el.textContent); show('dialog', 0); show('report', 0); show('form', 1);
+  uploads = []; editing = null; document.getElementById('up').style.display = 'inline-block';
   document.getElementById('type').textContent = el.textContent; }
 function openList(w, el) { which = w; target = el; show('pop', 1); document.getElementById('items').innerHTML =
   lists[w].map(t => '<div class="sapcnqr-listbox-item__wrapper" onclick="pick(this)">' + t + '</div>').join(''); }
@@ -56,14 +61,25 @@ function pick(el) { target.textContent = el.textContent; note(which); show('pop'
 function uploaded(inp) { const names = Array.from(inp.files).map(f => f.name); uploads.push(...names);
   steps.push('upload ' + names.join(',')); document.getElementById('up').style.display = 'none'; inp.value = ''; }
 if (EMPTY) { document.getElementById('empty').style.display = 'block'; document.getElementById('addbtn').style.display = 'none'; }
+function drawRows() { document.getElementById('list').innerHTML = expenses.map((e, i) =>
+  '<div role="row"><span class="sapcnqr-dropzone"><input type="checkbox" class="sapcnqr-checkbox__input" data-i="' + i +
+  '"></span><span>' + e.date + '</span><span>' + e.type + '</span><span>KRW ' +
+  Number(String(e.amount).replace(/,/g, '')).toLocaleString('en-US') + '</span></div>').join(''); }
+function editSel() { const cb = document.querySelector('#list input:checked'); if (!cb) return;
+  editing = +cb.dataset.i; steps.push('edit'); show('report', 0); show('form', 1);
+  document.getElementById('up').style.display = 'inline-block'; }
 function save() { steps.push('save');
-  saved = {type: document.getElementById('type').textContent, date: document.getElementById('transactionDate-date-input-field-input').value,
+  if (editing !== null) { saved = expenses[editing]; saved.uploads = saved.uploads.concat(uploads); }
+  else { saved = {type: document.getElementById('type').textContent, date: document.getElementById('transactionDate-date-input-field-input').value,
            amount: document.getElementById('transactionAmount').value, comment: document.getElementById('comment').value,
            purpose: document.getElementById('businessPurpose').value, city: document.getElementById('location').textContent,
            lcrt: document.querySelector('#custom32 span').textContent,
-           receipt: document.querySelector('[name=receiptType]').textContent, uploads: uploads.slice()};
-  show('form', 0); show('report', 1); document.getElementById('count').textContent = 'Expenses (1)';
-  show('empty', 0); show('addbtn', 1); }
+           receipt: document.querySelector('[name=receiptType]').textContent,
+           vendor: (document.getElementById('vendor') || {}).value, uploads: uploads.slice()};
+         expenses.push(saved); }
+  uploads = []; editing = null;
+  show('form', 0); show('report', 1); document.getElementById('count').textContent = 'Expenses (' + expenses.length + ')';
+  show('empty', 0); show('addbtn', 1); drawRows(); }
 </script>
 <style>span[name], #location, .sapcnqr-select-field__input { display:inline-block; min-width:220px; min-height:18px; border:1px solid #999 }
 .t { padding: 4px }</style>"""
@@ -132,7 +148,9 @@ def test_manual_toll_expense(page, tmp_path):
     steps = page.evaluate("steps")
     assert steps[:2] == ["manual", "type Parking & Toll"] and steps[-1] == "save"
     one = "upload IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"                          # 파일 고르기 창에서 한 번에 여러 장
-    assert steps.index("date") < steps.index("amount") < steps.index(one)
+    assert steps.index("date") < steps.index("amount") < steps.index("save") < steps.index("edit") < steps.index(one)
+    assert steps[-1] == "save" and steps.count("save") == 2                        # 저장 → 다시 열어 사진 → 다시 저장
+    assert saved["vendor"] == ""                                                   # Vendor Name은 숙박만
     assert rows[0]["순번"] == 5 and rows[0]["Concur 날짜"] == "10/22/2026" and rows[0]["확인 필요"] == ""
     assert "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"] and rec.used_for
     assert page.inner_text("#count") == "Expenses (1)"
@@ -264,3 +282,60 @@ def test_full_run_creates_toll_expense_without_card_expenses(tmp_path, monkeypat
     ca.run_job("full", "2026-10", ui, base)
     assert FakeBot.made == [("IMG_5648.JPG", ["IMG_5651.JPG", "IMG_5652.JPG"], 61500, "2026-10-22", 1)]
     assert ui.infos[-1][0] == "완료" and "경비 1건" in ui.infos[-1][1]
+
+
+
+# ---------- 카드 경비가 없는 숙박 영수증도 새 경비로(사용자 요청 2026-11-15) ----------
+def test_manual_accommodation_with_vendor(browser, tmp_path):
+    pytest.importorskip("cv2")
+    from PIL import Image
+    html = report_html().replace("'Taxi'];", "'Taxi', 'Accommodation'];")
+    pg = browser.new_page()
+    pg.set_default_timeout(3000)
+    pg.route("**/report", lambda route: route.fulfill(body=html, content_type="text/html; charset=utf-8"))
+    slip, inv = tmp_path / "IMG_5646.jpg", tmp_path / "IMG_5647.jpg"
+    for f in (slip, inv):
+        Image.new("RGB", (300, 400), (240, 240, 240)).save(f, quality=90)
+    bot = make_bot(pg, tmp_path)
+    bot.cfg["Undefined일_때_선택할_유형"]["숙박"] = "Accommodation"
+    rec = ca.Receipt(original=slip, ocr_file=slip, bundle=[inv], total=75000, dates=["2026-10-20"], category="숙박",
+                     vendor="가나 1호점")
+    rows = bot.create_manual_expenses([rec], tmp_path / "w")
+    saved = pg.evaluate("saved")
+    assert saved["type"] == "Accommodation" and saved["date"] == "10/20/2026" and saved["vendor"] == "가나 1호점"
+    assert saved["uploads"] == ["IMG_5646.jpg", "IMG_5647.jpg"] and rows[0]["오류"] == ""      # 영수증 → 인보이스
+
+
+def test_full_run_asks_to_create_unmatched_receipts(tmp_path, monkeypatch):
+    from test_stay_bundle import NOL_SLIP
+    src = tmp_path / "src"
+    src.mkdir()
+    p = src / "IMG_5646.JPG"
+    p.write_bytes(b"\xff\xd8\xff\xd9")
+    t = datetime(2026, 11, 15, 10, 0).timestamp()
+    os.utime(p, (t, t))
+    base = tmp_path / "app"
+    base.mkdir()
+    cfg = ca.default_settings()
+    cfg.update({"영수증_원본_폴더": str(src), "결과_자동_열기": False, "영수증_보정_사용": False})
+    ca.save_settings(base / ca.SETTINGS_FILE_NAME, cfg)
+
+    class Ocr(FakeOcr):
+        def read(self, path):
+            return NOL_SLIP
+
+    monkeypatch.setattr(ca, "WindowsOcr", Ocr)
+    monkeypatch.setattr(ca, "ConcurBot", FakeBot)
+    FakeBot.made = []
+    asked = []
+
+    class AskUI(UI):
+        def confirm(self, title, msg):
+            asked.append((title, msg))
+            return True
+
+    ui = AskUI()
+    ca.run_job("full", "2026-10", ui, base)
+    assert FakeBot.made == [("IMG_5646.JPG", [], 75000, "2026-10-20", 1)]
+    title, msg = next(a for a in asked if a[0] == "카드 경비가 없는 영수증")
+    assert "2026-10-20 75,000원 숙박 (IMG_5646.JPG)" in msg

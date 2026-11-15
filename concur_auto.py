@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 인쇄물 첨부만·찍은 날 뒤 날짜 빼기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-15 새 경비는 저장 뒤 사진 올리기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -110,6 +110,7 @@ DEFAULT_ELEMENTS = {
     "영수증 업로드 버튼": "#upload-receipt-button",
     "드롭다운 항목": ".sapcnqr-listbox-item__wrapper",
     "숙박 기간": "input[placeholder='MM/DD/YYYY - MM/DD/YYYY'], input[id*='dateRange'], input[id*='DateRange']",
+    "가게 이름 입력": "input[name*='vendor' i], input[id*='vendor' i], input[placeholder*='Vendor' i]",
 }
 # 위치(id)로 못 찾을 때 화면 글자(라벨)로 찾는 입력칸
 DEFAULT_ELEMENT_LABELS = {
@@ -123,6 +124,7 @@ DEFAULT_ELEMENT_LABELS = {
     "Comment": "Comment|코멘트|의견",
     "Business Purpose": "Business Purpose|비즈니스 목적|업무 목적",
     "숙박 기간": "Date Range|숙박 기간|날짜 범위",
+    "가게 이름 입력": "Enter Vendor Name|Vendor Name|가맹점 이름|공급업체 이름",
 }
 
 # 사용자 Concur의 Expense Type(사용자가 화면을 캡처해 보내 준 것, 글자 그대로). Concur에서 고를 때는 이름이 완전히 같은
@@ -1916,6 +1918,7 @@ class Receipt:
     last_use: str = ""                              # 새 경비의 Transaction Date(ISO): 하이패스 마지막 이용일, 마일리지는 그 달 말일
     new_kind: str = ""                              # 카드 경비가 없으면 Concur에 새로 만들 경비(톨게이트·마일리지)
     stay_in: str = ""                               # 인보이스의 입실일(ISO) — 숙박 Date Range는 이날부터 1박
+    vendor: str = ""                                # 가게 이름(상호·가맹점명) — 직접 만드는 숙박 경비의 Vendor Name
 
     @property
     def main_date(self) -> str:
@@ -2296,8 +2299,22 @@ def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, ho
                                         cfg.get("영수증_판별_단어"))
     rec.use = rec.is_receipt
     rec.biz_no = find_business_number(ocr_text)
+    rec.vendor = find_vendor_name(ocr_text)
     return rec
 
+
+VENDOR_LABEL = re.compile(r"(?:가맹점\s*명|상\s*호\s*명?|업\s*소\s*명|매\s*장\s*명|가맹점(?=\s*[:：]))\s*[:：]?\s*([^\n:：]{2,40})")
+VENDOR_STOP = re.compile(r"\s*(?:사업자|등록\s*번호|대표|주\s*소|전화|TEL|견적|번호|가맹점\s*번호|\d{3}-\d{2}-\d{5}).*$", re.I)
+
+
+def find_vendor_name(ocr_text: str) -> str:
+    """영수증의 가게 이름(상호·가맹점명): '가맹점명 주_놀유니버스' → 놀유니버스, '상 호: (주)가나파킹' → 가나파킹"""
+    for m in VENDOR_LABEL.finditer(ocr_text or ""):
+        name = VENDOR_STOP.sub("", m.group(1))
+        name = re.sub(r"\(주\)|㈜|주식회사|^\s*주_|\(유\)|\(재\)", "", name).strip(" .,_-*|[]")
+        if len(re.sub(r"\W", "", name)) >= 2:
+            return name
+    return ""
 
 # ---------- 가게 기억: 영수증의 사업자등록번호로 같은 가게를 알아봄 ----------
 BIZ_NO_LABELED = re.compile(r"사업자(?:등록)?\s*(?:번호|No\.?)?\s*[:：]?\s*(\d{3})\s*-?\s*(\d{2})\s*-?\s*(\d{5})(?!\d)")
@@ -2472,6 +2489,7 @@ def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
             s.category = detect_category(text, keywords or {}, priority) or next((r.category for r, _ in members if r.category), "")
         for r, _ in members:                             # 인쇄물은 첨부만(작은 글자라 금액이 틀리게 읽혀 금액은 비움)
             r.use, r.skip_reason, r.total = False, f"하이패스 사용내역({s.original.name})에 함께 첨부", 0
+            r.category = r.category or s.category
         s.bundle_issue = ""
         s.bundle_note = (f"사용내역 {info['count'] or '?'}건 {total:,}원" + (f", 마지막 이용 {s.last_use}" if s.last_use else "")
                          + (f", 영수증 인쇄물 {len(members)}장 함께 첨부" if members else ", 함께 붙일 영수증 인쇄물을 못 찾음"))
@@ -2530,8 +2548,9 @@ def group_mileage_bundles(receipts: list, tm, keywords=None, priority=None) -> i
         f.bundle, f.new_kind = [r.original for r in members], "마일리지"
         if not f.category:
             f.category = detect_category(compact(f.ocr_text), keywords or {}, priority)
-        for r in members:
+        for r in members:                                 # 계기판 사진도 분류는 마일리지로 보여 줌
             r.use, r.skip_reason = False, f"마일리지 신청서({f.original.name})에 함께 첨부"
+            r.category = r.category or f.category
         f.bundle_issue = "" if members else "함께 올릴 계기판(주행거리) 사진을 못 찾음"
         f.bundle_note = ("마일리지 신청서" + (f" {info['km']:,}km" if info["km"] else "") + f" {total:,}원, "
                          + (f"계기판 사진 {len(members)}장 함께 첨부" if members else "계기판 사진을 못 찾음"))
@@ -2626,6 +2645,7 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
     def attach_to(doc, host):                              # 날짜를 못 읽은 사진은 붙은 숙박 영수증 날짜로 보여 줌
         doc.use, doc.bundled_into = False, host.original.name
         doc.skip_reason = f"숙박 영수증({host.original.name})에 함께 첨부"
+        doc.category = doc.category if doc.category in cats else (host.category or doc.category)
         if not doc.ocr_dates and host.main_date:
             doc.dates = [host.main_date] + [d for d in doc.dates if d != host.main_date]
 
@@ -2662,6 +2682,7 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
         if not best.total and inv.total:
             best.total, best.amounts, changed = inv.total, [inv.total] + best.amounts, True
         best.category = best.category or stay_cat or inv.category
+        best.vendor = inv.vendor or best.vendor               # 예약 회사(놀유니버스)보다 인보이스의 호텔 이름
         if inv.city and (not best.city or best.city in low_cities):  # 인터넷 예약 전표의 서울 주소보다 호텔 인보이스 주소
             best.city = inv.city
         if not best.is_receipt:
@@ -2700,6 +2721,7 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
                                       + [f"승인 메일 {m.original.name}" for m in attached]) + " 함께 첨부"
             count += 1
     for m, names in owners.values():
+        m.category = m.category if m.category in cats else (stay_cat or m.category)
         m.use, m.bundled_into = False, names[0]
         m.skip_reason = f"숙박 승인 메일 → 숙박 영수증({', '.join(names)})에 함께 첨부"
     return count
@@ -3282,6 +3304,33 @@ def apply_vendor_hospital(rec, vendor: str, hospitals: list) -> bool:
         return False
     rec.hospital_en, rec.hospital_src = en, HOSP_FROM_VENDOR
     return True
+
+
+JS_MARK_ROW = r"""
+({sel, date, amount}) => {
+  // 리포트 경비 목록에서 날짜(MM/DD/YYYY)와 금액이 같은 줄의 체크박스에 표시합니다(저장한 새 경비를 다시 열 때).
+  document.querySelectorAll('[data-concur-auto-row]').forEach(e => e.removeAttribute('data-concur-auto-row'));
+  let root = document;
+  try { root = document.querySelector(sel || '.entries-list') || document; } catch (e) {}
+  for (const cb of root.querySelectorAll('input[type="checkbox"]')) {
+    let row = cb.closest('[role="row"], tr, .sapcnqr-data-grid-list__row');
+    if (!row) {
+      let c = cb.parentElement;
+      for (let i = 0; i < 12 && c; i++, c = c.parentElement) {
+        if (c.querySelectorAll('input[type="checkbox"]').length > 1) break;
+        row = c;
+      }
+    }
+    if (!row) continue;
+    const text = (row.innerText || row.textContent || '').replace(/\s+/g, ' ');
+    if (text.includes(date) && text.replace(/,/g, '').includes(amount)) {
+      cb.setAttribute('data-concur-auto-row', '1');
+      return true;
+    }
+  }
+  return false;
+}
+"""
 
 
 JS_PICK_DAY = r"""
@@ -4774,50 +4823,51 @@ class ConcurBot:
         self.field("경비 금액", timeout_s=self.timeout_ms / 1000)
 
     def create_manual_expenses(self, recs: list, work_dir: Path, start_no: int = 1) -> list:
-        """카드 경비와 맞지 않은 톨게이트·마일리지 묶음마다 새 경비를 만듭니다(사용자 설명 2026-11-15):
-        [Add Expense] → [Manually Create Expense] → 항목의 Expense Type(Parking & Toll 등) → Transaction Date
-        (톨게이트 = 마지막 이용일, 마일리지 = 그 달 말일), Amount(사용내역 총액·신청서 금액) → 나머지 칸(자동 입력 항목)
-        → 사진을 차례로 올림(사용내역·영수증 인쇄물 / 신청서·계기판 사진) → [Save Expense]"""
-        page = self.page
+        """카드 경비와 맞지 않은 영수증(톨게이트·마일리지, 사용자가 넣기로 한 숙박 등)마다 새 경비를 만듭니다(사용자 설명 2026-11-15):
+        [Add Expense] → [Manually Create Expense] → 항목의 Expense Type → Transaction Date(톨게이트 = 마지막 이용일,
+        마일리지 = 그 달 말일, 그 밖 = 영수증 날짜), Amount → 나머지 칸 → [Save Expense].
+        사진은 저장하기 전의 새 경비 화면에서 올리면 붙지 않아서(2026-11-15 실제 실행), 저장한 뒤 목록에서 그 경비를 다시 열어
+        카드 경비처럼 올리고 다시 저장합니다."""
         results = []
+        stay_cats = stay_categories(self.cfg)
         for k, rec in enumerate(recs):
             day = rec.main_date
             row = {"순번": start_no + k, "Concur 날짜": "", "Concur 금액": f"{rec.total:,}" if rec.total else "",
-                   "가게 이름": "", "영수증": rec.original.name, "분류": rec.category, "병원": rec.hospital_en,
+                   "가게 이름": rec.vendor, "영수증": rec.original.name, "분류": rec.category, "병원": rec.hospital_en,
                    "병원 근거": rec.hospital_src, "도시": city_name(rec.city) or f"기본({city_name(self.cfg['기본_도시'])})",
                    "처리": "", "확인 필요": "", "오류": ""}
-            checks = []
+            checks, done = [], []
             try:
                 expense_type = (self.cfg.get("Undefined일_때_선택할_유형") or {}).get(rec.category) if rec.category else ""
                 if not expense_type:
                     raise RuntimeError(f"'{rec.category or '분류 없음'}' 항목의 Expense Type이 없어 새 경비를 못 만듭니다"
                                        "(자동 입력 편집에서 Expense Type을 정하세요).")
                 if not rec.total or not day:
-                    raise RuntimeError(f"{rec.new_kind or '새 경비'}의 금액이나 날짜를 몰라 새 경비를 못 만듭니다"
+                    raise RuntimeError(f"{rec.new_kind or '영수증'}의 금액이나 날짜를 몰라 새 경비를 못 만듭니다"
                                        "(영수증 확인 창에서 적어 주세요).")
                 us = f"{date.fromisoformat(day):%m/%d/%Y}"
+                stay = rec.category in stay_cats
                 row["Concur 날짜"] = us
                 self.log(f"   새 경비 만들기: {expense_type} {us} {rec.total:,}원 ({rec.original.name} 외 {len(rec.bundle)}장)")
                 self.back_to_report()
                 self.open_manual_expense(expense_type)
                 self.type_text(self.field("경비 날짜"), us)
                 self.type_text(self.field("경비 금액"), str(rec.total))
-                if not rec.last_use and "날짜" not in rec.edited:
+                if rec.new_kind == "톨게이트" and not rec.last_use and "날짜" not in rec.edited:
                     checks.append("Transaction Date 확인(마지막 이용일을 못 읽음)")
-                uploads = upload_files_for(rec, self.cfg, work_dir)
-                done = [f"새 경비({expense_type})", f"Transaction Date={us}", f"Amount={rec.total:,}"]
-                done += self.fill_expense(rec, uploads, checks)
+                done += [f"새 경비({expense_type})", f"Transaction Date={us}", f"Amount={rec.total:,}"]
+                done += self.fill_expense(rec, None, checks)          # 칸만 채움(사진은 저장한 뒤)
+                if stay:
+                    self.fill_vendor(rec, done, checks)
+                self.save_expense(checks, rec.total if stay else None)
                 rec.used_for = f"새 경비 {us} {rec.total:,}"
-                page.get_by_role("button", name=self._re("경비 저장")).first.click()
-                box = self.missing_info_dialog(4.0, lambda: self._report_entry() is not None)
-                if box is not None:
-                    checks.append("필수 정보 확인(저장해도 빠졌다고 함)")
-                    self.answer_dialog(box, "아니요")
-                deadline = time.time() + self.timeout_ms / 1000
-                while self._report_entry() is None and time.time() < deadline:
-                    time.sleep(0.3)
-                if self._report_entry() is None:
-                    checks.append("새 경비가 저장됐는지 확인")
+                uploads = upload_files_for(rec, self.cfg, work_dir)
+                if self.open_expense_row(us, rec.total):
+                    self.attach_receipt(uploads, done, checks)
+                    self.save_expense(checks)
+                else:
+                    checks.append(f"영수증 직접 올리기(저장한 새 경비를 다시 열지 못함: {', '.join(p.name for p in uploads)})")
+                    self.screenshot("manual_reopen")
                 row["처리"] = ", ".join(done)
                 self.log(f"   새 경비 저장: {row['처리']}")
             except Exception as e:
@@ -4828,6 +4878,85 @@ class ConcurBot:
             row["확인 필요"] = ", ".join(checks)
             results.append(row)
         return results
+
+    def save_expense(self, checks: list, stay_amount=None):
+        """[Save Expense]를 누르고 리포트 화면으로 돌아올 때까지 기다립니다. '필수 정보가 빠졌다'는 창이 뜨면
+        숙박(stay_amount)은 [Yes] → Itemizations 넣기 → 다시 저장, 그 밖은 [No]('확인 필요')."""
+        page = self.page
+        back = lambda: self._report_entry() is not None
+
+        def press():
+            page.get_by_role("button", name=self._re("경비 저장")).first.click()
+
+        press()
+        box = self.missing_info_dialog(4.0, back)
+        if box is not None and stay_amount:
+            self.answer_dialog(box, "예")
+            itemized = self.fill_itemization(stay_amount, checks)
+            self.close_alerts()
+            press()
+            box = self.missing_info_dialog(4.0, back)
+            if box is not None and itemized:
+                checks.append("필수 정보 확인(저장해도 빠졌다고 함)")
+        elif box is not None:
+            checks.append("필수 정보 확인(저장해도 빠졌다고 함)")
+        if box is not None:
+            self.answer_dialog(box, "아니요")
+        deadline = time.time() + self.timeout_ms / 1000
+        while not back() and time.time() < deadline:
+            time.sleep(0.3)
+        if not back():
+            checks.append("경비가 저장됐는지 확인")
+
+    def open_expense_row(self, date_us: str, amount: int) -> bool:
+        """리포트 경비 목록에서 날짜·금액이 같은 경비를 체크하고 [Edit]로 엽니다(open_first_expense와 같은 방법)."""
+        page = self.page
+        if self._report_entry() is None:                 # 저장 뒤 리포트 화면이 아니면 돌아감
+            try:
+                self.back_to_report()
+            except Exception:
+                pass
+        marked = False
+        deadline = time.time() + self.timeout_ms / 1000
+        while not marked and time.time() < deadline:
+            try:
+                marked = bool(page.evaluate(JS_MARK_ROW, {"sel": self.sel("경비 목록"), "date": date_us, "amount": str(amount)}))
+            except Exception:
+                marked = False
+            if not marked:
+                time.sleep(0.5)
+        if not marked:
+            return False
+        self.click_checkbox(page.locator("[data-concur-auto-row]").first)
+        toolbar_edit = page.locator(self.sel("도구 모음")).get_by_role("button", name=self._re("편집"))
+        if self._visible(toolbar_edit.first, 5000):
+            toolbar_edit.first.click()
+        else:
+            page.get_by_role("button", name=self._re("편집")).first.click()
+        self.field("경비 금액")
+        return True
+
+    def fill_vendor(self, rec, done: list, checks: list):
+        """숙박 새 경비의 Enter Vendor Name(필수) 칸: 비어 있으면 영수증·인보이스의 가게 이름을 넣습니다."""
+        page = self.page
+        box = self._first_shown([page.locator(self.sel("가게 이름 입력")),
+                                 page.get_by_label(self._re("가게 이름 입력", exact=False))])
+        if box is None:
+            return
+        try:
+            if box.input_value().strip():
+                return
+        except Exception:
+            pass
+        if not rec.vendor:
+            checks.append("Vendor Name 직접 넣기")
+            return
+        try:
+            self.type_text(box, rec.vendor)
+            page.keyboard.press("Escape")                     # 가게 이름 추천 목록이 뜨면 닫음
+            done.append(f"Vendor Name={rec.vendor}")
+        except Exception:
+            checks.append("Vendor Name 직접 넣기")
 
     # ---------- 전체 경비 반복 ----------
     def process_expenses(self, receipts: list, work_dir: Path, stop_flag=None) -> list:
@@ -5087,7 +5216,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
                 if again is None:
                     raise Cancelled()
         manual = [r for r in receipts if r.use and r.new_kind]   # 카드 경비와 맞지 않으면 직접 만들 경비(톨게이트·마일리지)
-        results = []
+        results, no_cards = [], None
         try:
             if mode != "edit":
                 if again:
@@ -5104,12 +5233,23 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
             bot.open_first_expense()
             results = bot.process_expenses(receipts, work_dir, stop_flag)
         except NoExpenses as e:
-            if not manual:
+            if not manual and not any(r.use for r in receipts):
                 raise
+            no_cards = e
             log(f"카드 경비는 없습니다({e}). 직접 만들 경비만 만듭니다.")
         manual = [r for r in manual if not r.used_for]
+        others = [r for r in receipts if r.use and not r.new_kind and not r.used_for]   # 카드 경비가 없는 영수증(숙박 등)
+        if others:
+            lines = "\n".join(f"· {r.main_date} {r.total:,}원 {r.category or '분류 없음'} ({r.original.name})" for r in others[:8])
+            more = f"\n· 그 밖 {len(others) - 8}장" if len(others) > 8 else ""
+            if ui.confirm("카드 경비가 없는 영수증", (
+                    f"Concur에 맞는 카드 경비가 없는 영수증이 {len(others)}장 있습니다.\n{lines}{more}\n\n"
+                    "새 경비(Manually Create Expense)로 만들어 넣을까요?\n(카드 거래가 나중에 Concur에 들어오면 겹칠 수 있습니다.)")):
+                manual += others
+        if not manual and no_cards is not None:
+            raise no_cards
         if manual:
-            kinds = "·".join(dict.fromkeys(r.new_kind for r in manual))
+            kinds = "·".join(dict.fromkeys(r.new_kind or r.category or "영수증" for r in manual))
             log(f"카드 경비와 맞지 않은 {kinds} {len(manual)}건은 새 경비로 만듭니다.")
             results += bot.create_manual_expenses(manual, work_dir, len(results) + 1)
 

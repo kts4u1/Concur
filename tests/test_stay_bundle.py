@@ -67,6 +67,7 @@ def test_invoice_fills_unread_stay_receipt():
     assert ca.group_stay_bundles([slip, inv], OCT, ca.default_settings()) == 1
     assert slip.use and slip.main_date == "2026-10-20" and slip.total == 75000              # 인보이스에서 읽은 날짜·금액
     assert slip.city.startswith("Daejeon") and slip.stay_in == "2026-10-20"
+    assert slip.vendor == "가나 1호점" and inv.category == "숙박"                          # Vendor Name은 인보이스의 호텔 이름
     assert [p.name for p in slip.bundle] == ["IMG_5647.HEIC"] and slip.bundle_note == "인보이스 IMG_5647.HEIC 함께 첨부"
     assert not inv.use and inv.skip_reason == "숙박 영수증(IMG_5646.HEIC)에 함께 첨부"
     start, end, note = ca.stay_dates(slip, "2026-10-21", 6)
@@ -201,6 +202,7 @@ def test_booking_company_slip_is_stay():
     assert ca.group_stay_bundles([slip, inv], OCT, ca.default_settings()) == 1
     assert [p.name for p in slip.bundle] == ["IMG_5647.HEIC"] and not inv.use
     assert inv.main_date == "2026-10-20"                                                    # 날짜를 못 읽은 인보이스는 영수증 날짜로(11-15 아님)
+    assert slip.vendor == "놀유니버스"                                                       # 인보이스에서 상호를 못 읽으면 전표의 가맹점명
     assert slip.city.startswith("Daejeon")                                                  # 예약 회사 주소(서울)가 아니라 호텔
     start, end, _ = ca.stay_dates(slip, "2026-10-20", 6)
     assert (start.isoformat(), end.isoformat()) == ("2026-10-20", "2026-10-21")             # 거래 시각 16:39 → 그날부터 1박
