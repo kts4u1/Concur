@@ -4897,6 +4897,10 @@ class ConcurBot:
     def attach_from_available(self, files: list, done: list, checks: list):
         page = self.page
         attached, missed = [], []
+        empty = self._first_shown([page.get_by_text(self._re("영수증 끌어 놓기", exact=False))]) is not None
+        if not empty and self._first_shown([page.get_by_role("button", name=self._re("영수증 더하기"))]) is not None:
+            done.append("이미 첨부됨(건너뜀)")                # ②를 다시 돌려도 같은 사진을 또 붙이지 않음
+            return
         if not self._open_available():
             checks.append(f"영수증 직접 붙이기(Choose From Available Receipts를 못 찾음: {', '.join(f.name for f in files)})")
             self.log("   [Choose From Available Receipts]를 찾지 못했습니다. 화면을 저장합니다.")

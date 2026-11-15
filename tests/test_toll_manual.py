@@ -229,6 +229,8 @@ def test_single_upload_that_only_reaches_library_is_picked(browser, tmp_path):
     bot.attach_receipt(f, done, checks)
     assert pg.evaluate("uploads") == ["IMG_5648.jpg"] and checks == []
     assert done == ["영수증 첨부(IMG_5648.jpg)"]
+    bot.attach_receipt(photos(tmp_path), done, checks)                             # 다시 돌려도 또 붙이지 않음
+    assert pg.evaluate("uploads") == ["IMG_5648.jpg"] and done[-1] == "이미 첨부됨(건너뜀)"
 
 
 def test_empty_report_uses_manual_card(browser, tmp_path):
