@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 숙박 인보이스·승인 메일"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-15 인터넷 예약 숙박"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -163,6 +163,9 @@ MEAL_MORE_WORDS = ["중식", "일식", "양식", "분식", "백반", "국밥", "
 ACCOM_USER_WORDS = ["모텔", "호텔"]
 ACCOM_MORE_WORDS = ["숙박", "여관", "여인숙", "리조트", "펜션", "게스트하우스", "레지던스", "콘도", "객실", "입실", "퇴실",
                     "체크인", "체크아웃", "야놀자", "여기어때", "에어비앤비", "hotel", "motel", "resort"]
+# 인터넷으로 예약·결제한 숙박: 카드전표의 가맹점이 호텔이 아니라 예약 회사(주_놀유니버스 = 야놀자 운영 회사)
+ACCOM_PLATFORM_WORDS = ["놀유니버스", "noluniverse", "yanolja", "goodchoice", "airbnb", "아고다", "agoda", "부킹닷컴",
+                        "booking.com", "호텔스닷컴", "hotels.com", "익스피디아", "expedia", "트립닷컴", "trip.com", "데일리호텔"]
 CAFE_WORDS = ["메리카", "리카노", "테이크", "카페"]           # 앞 3개는 OCR이 '아메리카노·테이크아웃'을 끊어 읽은 것
 CAFE_MORE_WORDS = ["커피", "라떼", "카푸치노", "에스프레소", "프라푸치노", "스무디", "디저트", "베이커리",
                    "스타벅스", "이디야", "투썸", "메가커피", "메가엠지씨", "컴포즈", "빽다방", "할리스", "파스쿠찌",
@@ -173,7 +176,7 @@ PARKING_MORE_WORDS = ["입출차", "파킹", "발렛", "parking", "valet"]
 # 예전 자동입력표에 판마다 한 번씩만 더할 글자(사용자가 나중에 지운 글자는 다시 넣지 않음)
 TOLL_DEFAULT_WORDS = ["톨게이트", "통행료", "하이패스", "한국도로공사", "도로공사", "hi-pass", "사용내역"]
 MILEAGE_DEFAULT_WORDS = ["차량유지비", "유지비보조금", "Car Record", "Driven Distance", "Total Km", "마일리지", "mileage"]
-DEFAULT_WORDS_VERSION = 6
+DEFAULT_WORDS_VERSION = 7
 DEFAULT_WORDS_BY_VERSION = {
     1: {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS},
     2: {"카페": CAFE_WORDS + CAFE_MORE_WORDS, "주차": PARKING_WORDS + PARKING_MORE_WORDS},
@@ -181,6 +184,7 @@ DEFAULT_WORDS_BY_VERSION = {
     4: {},                                                 # 판 4: {hospital} → hospital, 식대의 '버터' 빼기
     5: {"톨게이트": TOLL_DEFAULT_WORDS},                    # 판 5: 사용자가 만든 '톨게이트' 항목에 하이패스 글자
     6: {"마일리지": MILEAGE_DEFAULT_WORDS},                 # 판 6: 사용자가 만든 '마일리지' 항목에 신청서 글자
+    7: {"숙박": ACCOM_PLATFORM_WORDS},                      # 판 7: 인터넷 예약 회사(놀유니버스·아고다 등)
 }
 SPELLING_FIXES = [(re.compile(r"\bAccomodation", re.I), "Accommodation")]
 REMOVED_WORDS = {"식대": ["버터"]}                         # 사용자가 빼 달라고 한 기본 글자(판 4)
@@ -301,7 +305,7 @@ def default_settings():
             "주차": PARKING_WORDS + PARKING_MORE_WORDS,
             "카페": CAFE_WORDS + CAFE_MORE_WORDS,
             "식대": MEAL_USER_WORDS + MEAL_MORE_WORDS,
-            "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS,
+            "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS + ACCOM_PLATFORM_WORDS,
         },
         "분류_우선순위": ["식대", "숙박", "카페", "주차"],
         "_영수증_판별_설명": "폴더에 일반 사진이 섞여 있어도 됩니다. 금액이 보이고 아래 글자·OCR 날짜·분류 키워드 중 하나가 있으면 영수증으로 봅니다. 아니면 영수증 목록 맨 아래에 '사용 X'로 넣습니다.",
@@ -1196,7 +1200,7 @@ def upgrade_category_table(table_path: Path, settings_path: Path, log=None) -> i
         defaults = {r[C_NAME]: r for r in category_rows_from_cfg(default_settings())}
         at = next((i + 1 for i, r in enumerate(rows) if r[C_NAME] == "식대"), len(rows))
         rows.insert(at, _category_row(defaults["숙박"][:C_NOTE] + [""]))
-        added += len(ACCOM_USER_WORDS + ACCOM_MORE_WORDS)
+        added += len(ACCOM_USER_WORDS + ACCOM_MORE_WORDS + ACCOM_PLATFORM_WORDS)
     if added or fixed or removed:
         save_category_rows(table_path, rows)
     if log and added:
@@ -2561,8 +2565,9 @@ MAIL_DAYS_EN = re.compile(r"\b" + EN_MONTH + r"\s*((?:\d{1,2}(?!\d)(?:st|nd|rd|t
 
 
 def is_stay_invoice(text: str) -> bool:
+    """인보이스(인보이스/Invoice/Folio + 숙박 글자). 제목을 못 읽었어도 입실·퇴실 칸이 함께 있으면 인보이스로 봄"""
     t = compact(text).lower()
-    return any(w in t for w in INVOICE_WORDS) and any(w in t for w in STAY_HINTS)
+    return (any(w in t for w in INVOICE_WORDS) and any(w in t for w in STAY_HINTS)) or ("입실" in t and "퇴실" in t)
 
 
 def _day_list(body: str) -> list:
@@ -2628,6 +2633,8 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
     if not docs:
         return 0
     gap = lambda a, b: abs((a.taken - b.taken).total_seconds()) if a.taken and b.taken else float("inf")
+    cities = cfg.get("도시_목록") or DEFAULT_CITIES
+    low_cities = {cities[n] for n in cfg.get("도시_낮은_우선순위", ["서울"]) if n in cities}
 
     def score(r, inv):
         same_biz = bool(r.biz_no and r.biz_no == inv.biz_no)
@@ -2659,7 +2666,8 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
         if not best.total and inv.total:
             best.total, best.amounts, changed = inv.total, [inv.total] + best.amounts, True
         best.category = best.category or stay_cat or inv.category
-        best.city = best.city or inv.city
+        if inv.city and (not best.city or best.city in low_cities):  # 인터넷 예약 전표의 서울 주소보다 호텔 인보이스 주소
+            best.city = inv.city
         if not best.is_receipt:
             best.is_receipt = changed = True
         if changed:

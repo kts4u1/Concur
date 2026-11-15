@@ -110,10 +110,11 @@ def test_spelling_fixed_once_for_version_2_users(tmp_path):
     ca.save_category_rows(table, [["숙박", "모텔, 호텔", "Accomodation fee for service in hospital",
                                    "For service in hospital", "Accommodation", ""]])
     lines = []
-    assert ca.upgrade_category_table(table, settings, lines.append) == 0                 # 더한 글자는 없음
+    assert ca.upgrade_category_table(table, settings, lines.append) == len(ca.ACCOM_PLATFORM_WORDS)   # 판 7 글자만
     row = ca.load_category_rows(table, ca.default_settings())[0]
     assert row[ca.C_COMMENT] == "Accommodation fee for service in hospital"
-    assert row[ca.C_KEYWORDS] == "모텔, 호텔" and len(lines) == 1 and "1곳" in lines[0]
+    assert row[ca.C_KEYWORDS] == ", ".join(["모텔", "호텔"] + ca.ACCOM_PLATFORM_WORDS)
+    assert len(lines) == 2 and "1곳" in lines[1]
 
 
 def test_version_3_users_hospital_mark_and_butter(tmp_path):
@@ -130,7 +131,8 @@ def test_version_3_users_hospital_mark_and_butter(tmp_path):
             ["숙박", "모텔", "Accommodation fee for service in hospital", "For service in hospital", "Accommodation", ""]]
     ca.save_category_rows(table, rows)
     lines = []
-    assert ca.upgrade_category_table(table, settings, lines.append) == len(ca.TOLL_DEFAULT_WORDS) - 1   # 판 5: 톨게이트 글자
+    assert ca.upgrade_category_table(table, settings, lines.append) == (
+        len(ca.TOLL_DEFAULT_WORDS) - 1 + len(ca.ACCOM_PLATFORM_WORDS))                       # 판 5 톨게이트, 판 7 숙박 예약 회사
     by = {r[ca.C_NAME]: r for r in ca.load_category_rows(table, ca.default_settings())}
     assert by["식대"][ca.C_KEYWORDS] == "찌개, 한식, 식권"
     assert by["식대"][ca.C_COMMENT] == "Overtime meal fee for service in hospital"

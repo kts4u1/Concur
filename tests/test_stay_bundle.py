@@ -177,3 +177,40 @@ def test_statement_total_read_with_zoom(tmp_path, monkeypatch):
     got, _, lines = build(tmp_path, monkeypatch, texts)
     assert got["IMG_5648.JPG"].total == 61500 and got["IMG_5648.JPG"].bundle_issue == ""
     assert any("크게 다시 읽은 사진 1장, 그중 더 잘 읽힌 것 1장" in l for l in lines)
+
+
+# ---------- 인터넷으로 예약한 숙박의 카드전표(가맹점 = 예약 회사) ----------
+NOL_SLIP = """카드승인전표 인터넷 재발급용
+카드번호 ****-123456-*1234 거래일시 2026.10.20 16:39:32
+승인번호 00000001
+가맹점명 주_놀유니버스 사업자등록번호 123-45-67891
+가맹점주소 서울 구로구 디지털로 1
+금액(AMOUNT) 68,181
+부가세(VAT) 6,819
+합계(TOTAL) 75,000"""
+INVOICE_UNREAD = "가나 1호점\n주소 대전광역시 유성구 가나로 1\n업태 숙박업\n입실 일자 퇴실 일자 객실 타입"   # 제목·날짜·금액을 못 읽음
+
+
+def test_booking_company_slip_is_stay():
+    slip = make("IMG_5646.HEIC", NOL_SLIP)
+    assert slip.category == "숙박" and slip.main_date == "2026-10-20" and slip.total == 75000
+    assert ca.category_from_vendor("NOL UNIVERSE CO., LTD", ca.default_settings()) == "숙박"   # Concur 가맹점 이름으로도
+    inv = make("IMG_5647.HEIC", INVOICE_UNREAD, datetime(2026, 11, 15, 10, 1))
+    assert ca.is_stay_invoice(INVOICE_UNREAD)                                               # 입실·퇴실 칸이 있음
+    placed(slip, inv)
+    assert ca.group_stay_bundles([slip, inv], OCT, ca.default_settings()) == 1
+    assert [p.name for p in slip.bundle] == ["IMG_5647.HEIC"] and not inv.use
+    assert slip.city.startswith("Daejeon")                                                  # 예약 회사 주소(서울)가 아니라 호텔
+    start, end, _ = ca.stay_dates(slip, "2026-10-20", 6)
+    assert (start.isoformat(), end.isoformat()) == ("2026-10-20", "2026-10-21")             # 거래 시각 16:39 → 그날부터 1박
+
+
+def test_stay_item_gets_booking_words(tmp_path):
+    settings, table = tmp_path / ca.SETTINGS_FILE_NAME, tmp_path / ca.CATEGORY_FILE_NAME
+    cfg = ca.default_settings()
+    cfg["_기본_찾을_글자_판"] = 6
+    ca.save_settings(settings, cfg)
+    ca.save_category_rows(table, [["숙박", "모텔, 호텔, 야놀자", "Accommodation fee", "For service", "Accommodation", ""]])
+    ca.upgrade_category_table(table, settings)
+    words = ca.load_category_rows(table, ca.default_settings())[0][ca.C_KEYWORDS]
+    assert words.startswith("모텔, 호텔, 야놀자, 놀유니버스") and "agoda" in words
