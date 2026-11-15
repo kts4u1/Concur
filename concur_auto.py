@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 Attach 단추·Itemization 항목 누르기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-15 보관함 목록 내리기·두 번째부터 Add"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -360,6 +360,7 @@ def default_settings():
             "사용 가능한 영수증": "Available Receipts|사용 가능한 영수증",
             "사용 가능한 영수증 닫기": "Close Available Receipts|사용 가능한 영수증 닫기",
             "영수증 붙이기": "Attach|첨부",
+            "영수증 창 단추": "Attach|Add|첨부|추가",
             "LCRT 칸 이름": "LCRT|Legal compliance registration tool",
             "영수증 끌어 놓기": "Upload or drag-and-drop your receipts here|영수증을 업로드하거나 여기에 끌어",
             "영수증 더하기": "Add|추가",
@@ -3456,8 +3457,44 @@ JS_MARK_RECEIPT_CARD = r"""
 """
 
 
+JS_SCROLL_RECEIPTS = r"""
+(mode) => {
+  // 보관함(Available Receipts) 카드 목록을 맨 위로('top') 올리거나 조금 내립니다('down'). 아래 카드는 내려야 나타남.
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  const named = Array.from(document.querySelectorAll('body *')).filter(e => e.children.length === 0 && vis(e)
+    && /\.(jpe?g|png|pdf|tiff?)$/i.test((e.textContent || '').trim()));
+  const boxes = new Set();
+  for (const n of named) {
+    for (let b = n.parentElement; b && b !== document.body; b = b.parentElement) {
+      const st = getComputedStyle(b);
+      if (b.scrollHeight > b.clientHeight + 20 && /(auto|scroll)/.test(st.overflowY)) { boxes.add(b); break; }
+    }
+  }
+  const box = Array.from(boxes).sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length)[0];
+  if (!box) return false;
+  if (mode === 'top') { box.scrollTop = 0; box.dispatchEvent(new Event('scroll')); return true; }
+  const before = box.scrollTop;
+  box.scrollTop = before + Math.max(200, box.clientHeight * 0.8);
+  box.dispatchEvent(new Event('scroll'));
+  return box.scrollTop > before;
+}
+"""
+
+
+JS_ATTACHED_STATE = r"""
+() => {
+  // 영수증 칸에 이미 붙은 영수증: 보이는 파일 이름들과, 여러 장이 합쳐진 PDF 보기(iframe·embed)가 있는지
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  const names = Array.from(document.querySelectorAll('body *')).filter(e => e.children.length === 0 && vis(e))
+    .map(e => (e.textContent || '').trim()).filter(t => /\.(jpe?g|png|pdf|tiff?)$/i.test(t));
+  const pdf = Array.from(document.querySelectorAll('iframe, embed, object')).some(vis);
+  return {names, pdf};
+}
+"""
+
+
 JS_MARK_ATTACH = r"""
-({name, words}) => {
+({name, words, single}) => {
   // 'Receipt Image' 창의 [Attach]: 글자가 Attach인 보이는 단추 중 같은 파일 이름이 가까이 있는 것(없으면 하나뿐인 것)
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
   document.querySelectorAll('[data-concur-auto-attach]').forEach(e => e.removeAttribute('data-concur-auto-attach'));
@@ -3474,7 +3511,8 @@ JS_MARK_ATTACH = r"""
       }
     }
   }
-  if (cands.length === 1) { (cands[0].closest('button, [role=button], a') || cands[0]).setAttribute('data-concur-auto-attach', '1'); return true; }
+  const one = cands.filter(c => new RegExp('^\\s*(?:' + single.join('|') + ')\\s*$', 'i').test(c.innerText || ''));
+  if (one.length === 1) { (one[0].closest('button, [role=button], a') || one[0]).setAttribute('data-concur-auto-attach', '1'); return true; }
   return false;
 }
 """
@@ -4653,11 +4691,24 @@ class ConcurBot:
             opened = False
             title = page.locator("[data-concur-auto-item]")
             if title.count():                             # 오류가 뜬 항목(Accommodation)을 눌러 들어감(사용자 설명)
-                try:
-                    title.first.click()
-                    opened = self._visible(save_item.first, 8000)
-                except Exception:
-                    opened = False
+                self.close_alerts()                       # Alerts 창이 목록을 가리면 눌리지 않음
+                tries = [lambda: title.first.click(timeout=3000),                       # 보통 클릭
+                         lambda: title.first.evaluate("e => e.click()"),                  # 화면 위를 가려도 누름
+                         lambda: title.first.evaluate(                                    # 줄 전체(링크·단추)를 누름
+                             "e => (e.closest('a, button, [role=button], [role=link], [role=row], [tabindex]')"
+                             " || e.parentElement).click()")]
+                for how, act in enumerate(tries):
+                    try:
+                        act()
+                    except Exception:
+                        continue
+                    end = time.time() + 5                   # [Save Itemization]이 보이면 수정 화면
+                    while time.time() < end and self._first_shown([save_item]) is None:
+                        time.sleep(0.3)
+                    if self._first_shown([save_item]) is not None:
+                        opened = True
+                        self.log(f"   Itemizations: 항목을 눌러 수정 화면을 열었습니다({how + 1}번째 방법).")
+                        break
             if not opened:                                # 안 되면 체크 → [Edit]
                 self.close_alerts()
                 page.evaluate(JS_ITEM_CHECKBOX, self._alts("Itemizations"))
@@ -4949,15 +5000,34 @@ class ConcurBot:
             return self._upload_to_available(missing) if missing != files else [f.name for f in missing]
         return [f.name for f in missing]
 
-    def _attach_card(self, name: str) -> bool:
-        """보관함에서 이름이 같은 사진 → 'Receipt Image' 창의 [Attach]"""
+    def _find_card(self, name: str) -> bool:
+        """보관함에서 이름이 같은 카드를 찾습니다. 아래 카드는 목록을 내려야 나타나므로 맨 위부터 조금씩 내리며 봅니다."""
         page = self.page
-        kind = page.evaluate(JS_MARK_RECEIPT_CARD, name)
-        if not kind:
+        if self._card_shown(name):
+            return True
+        try:
+            page.evaluate(JS_SCROLL_RECEIPTS, "top")
+            for _ in range(60):
+                time.sleep(0.4)
+                if self._card_shown(name):
+                    return True
+                if not page.evaluate(JS_SCROLL_RECEIPTS, "down"):
+                    break
+            time.sleep(0.4)
+        except Exception:
+            pass
+        return self._card_shown(name)
+
+    def _attach_card(self, name: str) -> bool:
+        """보관함에서 이름이 같은 사진 → 'Receipt Image' 창의 [Attach](두 번째 장부터는 [Add])"""
+        page = self.page
+        if not self._find_card(name):
+            self.log(f"   보관함에서 {name} 카드를 찾지 못했습니다.")
             return False
         page.locator("[data-concur-auto-card]").first.click()
         mark = page.locator("[data-concur-auto-attach]")
-        args = {"name": name, "words": [re.escape(a) for a in self._alts("영수증 붙이기")]}
+        args = {"name": name, "words": [re.escape(a) for a in self._alts("영수증 창 단추")],   # 첫 장 Attach, 다음 장 Add
+                "single": [re.escape(a) for a in self._alts("영수증 붙이기")]}
         end = time.time() + 10
         while time.time() < end:
             btn = None
@@ -4970,10 +5040,10 @@ class ConcurBot:
                 btn = self._first_shown([page.locator("[data-concur-auto-cardattach]")])
             if btn is not None:
                 btn.click()
-                gone = time.time() + 15
+                gone = time.time() + 15                   # 누른 단추(창)가 사라질 때까지
                 while time.time() < gone:
                     try:
-                        if not page.evaluate(JS_MARK_ATTACH, args):
+                        if not btn.is_visible():
                             break
                     except Exception:
                         break
@@ -4988,25 +5058,44 @@ class ConcurBot:
         attached, missed = [], []
         empty = self._first_shown([page.get_by_text(self._re("영수증 끌어 놓기", exact=False))]) is not None
         if not empty and self._first_shown([page.get_by_role("button", name=self._re("영수증 더하기"))]) is not None:
-            done.append("이미 첨부됨(건너뜀)")                # ②를 다시 돌려도 같은 사진을 또 붙이지 않음
-            return
-        if not self._open_available():
+            try:                                          # 이미 붙은 영수증이 있음(②를 다시 돌렸을 때)
+                state = page.evaluate(JS_ATTACHED_STATE)
+            except Exception:
+                state = {"names": [], "pdf": True}
+            if files[0].name in state.get("names", []) and not state.get("pdf") and len(files) > 1:
+                self.log(f"   {files[0].name}만 붙어 있어 나머지를 [Add]로 붙입니다.")   # 첫 장만 붙고 멈췄던 경비
+                done.append(f"이미 첨부됨({files[0].name})")
+                start = 1
+            else:
+                done.append("이미 첨부됨(건너뜀)")            # 같은 사진을 또 붙이지 않음
+                return
+        else:
+            start = 0
+        if start == 0 and not self._open_available():
             checks.append(f"영수증 직접 붙이기(Choose From Available Receipts를 못 찾음: {', '.join(f.name for f in files)})")
             self.log("   [Choose From Available Receipts]를 찾지 못했습니다. 화면을 저장합니다.")
             self.screenshot("available_receipts")
             return
-        need = [f for f in files if not self._card_shown(f.name)]
-        if need:
-            failed = set(self._upload_to_available(need))
-            missed += [n for n in (f.name for f in need) if n in failed]
+        if start == 0:
+            need = [f for f in files if not self._find_card(f.name)]
+            if need:
+                self.log(f"   보관함에 없는 사진을 올립니다: {', '.join(f.name for f in need)}")
+                failed = set(self._upload_to_available(need))
+                missed += [n for n in (f.name for f in need) if n in failed]
         for k, f in enumerate(files):
-            if f.name in missed:
+            if k < start or f.name in missed:
                 continue
             if k and not self._open_available(again=True):
+                self.log(f"   [Add]를 찾지 못해 {f.name}을(를) 붙이지 못했습니다.")
                 missed.append(f.name)
                 continue
+            if start and not self._find_card(f.name):     # 이어서 붙일 때 보관함에 없으면 올림
+                if self._upload_to_available([f]):
+                    missed.append(f.name)
+                    continue
             if self._attach_card(f.name):
                 attached.append(f.name)
+                self.log(f"   영수증 붙임: {f.name}")
             else:
                 missed.append(f.name)
         close = self._first_shown([page.get_by_role("button", name=self._re("사용 가능한 영수증 닫기", exact=False))])

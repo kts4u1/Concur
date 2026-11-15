@@ -40,32 +40,37 @@ REPORT = """<!doctype html><meta charset="utf-8">
   <div id="pane"><p id="drop">Upload or drag-and-drop your receipts here.</p>
     <button id="up" onclick="document.getElementById('f').click()">Upload New Receipt</button>
     <button id="choose" onclick="openAvail()">Choose From Available Receipts</button>
-    <button id="addr" style="display:none" onclick="openAvail()">Add</button></div>
+    <div id="viewer" style="display:none"><span id="vname"></span><iframe id="pdf" style="display:none" width="40" height="20"></iframe>
+      <button>Remove</button><button id="addr" onclick="openAvail()">Add</button><button>Open</button></div></div>
   <input type="file" id="f" style="display:none" onchange="toLibrary(this)" MULTIPLE>
   <div id="avail" style="display:none"><h3>Attach Receipt</h3><span>Available Receipts</span> <span>Receipts in Report</span>
     <button aria-label="Close Available Receipts" onclick="closeAvail()">X</button>
     <button id="up2" onclick="document.getElementById('f2').click()">Upload New Receipt</button>
     <input type="file" id="f2" style="display:none" onchange="toLibrary(this)" MULTIPLE>
-    <div id="cards"></div></div>
+    <div id="cards" style="height:150px; overflow-y:auto" onscroll="more(this)"></div></div>
   <div id="dlg" style="display:none"><h3>Receipt Image</h3><div><div><span id="dname"></span></div>
-    <div><div onclick="show('dlg', 0)">Delete</div><div class="btn" onclick="attachDlg()">Attach</div></div></div>
+    <div><div onclick="show('dlg', 0)">Delete</div><div class="btn" id="dbtn" onclick="attachDlg()">Attach</div></div></div>
     <button onclick="show('dlg', 0)">Close</button></div></div>
 <div id="pop" style="display:none"><div id="items"></div></div>
 <script>
 window.steps = []; window.uploads = []; window.saved = null; window.expenses = []; let editing = null;
-window.library = LIBRARY; let current = null;
+window.library = LIBRARY; let current = null, shownCards = 4;
 const PIX = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
 function toLibrary(inp) { const names = Array.from(inp.files).map(f => f.name); library.push(...names);
   steps.push('library ' + names.join(',')); inp.value = ''; drawCards(); }
-function drawCards() { document.getElementById('cards').innerHTML = library.map(n => '<div class="card"><div>' + n +
+function more(box) { if (box.scrollTop + box.clientHeight >= box.scrollHeight - 5 && shownCards < library.length) {
+  const top = box.scrollTop; shownCards += 2; drawCards(); box.scrollTop = top; } }
+function drawCards() { document.getElementById('cards').innerHTML = library.slice(0, shownCards).map(n => '<div class="card" style="height:60px"><div>' + n +
   '</div><img src="' + PIX + '" width="60" height="40" onclick="openDlg(this.previousSibling.textContent)">' +
   '<button aria-label="Attach receipt" onclick="steps.push(&quot;card icon&quot;)">i</button></div>').join(''); }
-function openAvail() { show('avail', 1); show('pane', 0); drawCards(); }
+function openAvail() { shownCards = 4; show('avail', 1); show('pane', 0); drawCards(); }
 function closeAvail() { show('avail', 0); show('pane', 1); }
-function openDlg(n) { current = n; document.getElementById('dname').textContent = n; show('dlg', 1); }
-function resetPane() { uploads = []; ['drop', 'up', 'choose'].forEach(id => show(id, 1)); show('addr', 0); }
-function attachDlg() { uploads.push(current); steps.push('attach ' + current); show('dlg', 0); closeAvail();
-  ['drop', 'up', 'choose'].forEach(id => show(id, 0)); show('addr', 1); }
+function openDlg(n) { current = n; document.getElementById('dname').textContent = n;
+  document.getElementById('dbtn').textContent = uploads.length ? 'Add' : 'Attach'; show('dlg', 1); }
+function resetPane() { uploads = []; ['drop', 'up', 'choose'].forEach(id => show(id, 1)); show('viewer', 0); }
+function attachDlg() { uploads.push(current); steps.push((uploads.length > 1 ? 'add ' : 'attach ') + current); show('dlg', 0);
+  closeAvail(); ['drop', 'up', 'choose'].forEach(id => show(id, 0)); show('viewer', 1);
+  document.getElementById('vname').textContent = uploads[0]; show('pdf', uploads.length > 1); }
 const TYPES = ['M card parking & toll', 'M card taxi', 'Parking & Toll', 'Public Transport', 'Taxi'];
 const lists = {city: ['Gwangju (ex Kwangju), KOREA, REPUBLIC OF', 'Seoul, KOREA, REPUBLIC OF'], lcrt: ['NA'],
                receipt: ['No Receipt', 'Receipt']};
@@ -171,8 +176,8 @@ def test_manual_toll_expense(page, tmp_path):
     assert steps[:2] == ["manual", "type Parking & Toll"] and steps[-1] == "save"
     one = "library IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"                         # 보관함에 한 번에 여러 장 올림
     assert steps.index("date") < steps.index("amount") < steps.index("save") < steps.index("edit") < steps.index(one)
-    assert [x for x in steps if x.startswith("attach")] == [                       # 보관함에서 차례로 골라 Attach
-        "attach IMG_5648.jpg", "attach IMG_5651.jpg", "attach IMG_5652.jpg"]
+    assert [x for x in steps if x.startswith(("attach", "add "))] == [            # 첫 장 Attach, 다음 장은 Add
+        "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
     assert "card icon" not in steps                                                # 'Receipt Image' 창의 [Attach]를 누름
     assert steps[-1] == "save" and steps.count("save") == 2                        # 저장 → 다시 열어 사진 → 다시 저장
     assert saved["vendor"] == ""                                                   # Vendor Name은 숙박만
@@ -232,8 +237,9 @@ def test_single_upload_that_only_reaches_library_is_picked(browser, tmp_path):
     bot.attach_receipt(f, done, checks)
     assert pg.evaluate("uploads") == ["IMG_5648.jpg"] and checks == []
     assert done == ["영수증 첨부(IMG_5648.jpg)"]
-    bot.attach_receipt(photos(tmp_path), done, checks)                             # 다시 돌려도 또 붙이지 않음
-    assert pg.evaluate("uploads") == ["IMG_5648.jpg"] and done[-1] == "이미 첨부됨(건너뜀)"
+    bot.attach_receipt(photos(tmp_path), done, checks)                             # 첫 장만 붙어 있으면 나머지를 올려 붙임
+    assert pg.evaluate("uploads") == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"] and checks == []
+    assert "이미 첨부됨(IMG_5648.jpg)" in done
 
 
 def test_empty_report_uses_manual_card(browser, tmp_path):
@@ -391,3 +397,33 @@ def test_full_run_creates_unmatched_receipts_without_asking(tmp_path, monkeypatc
     ca.run_job("full", "2026-10", ui, base)
     assert FakeBot.made == [("IMG_5646.JPG", [], 75000, "2026-10-20", 1)]       # 넣을 카드 경비가 없으면 묻지 않고 만듦
     assert not any(a[0] == "카드 경비가 없는 영수증" for a in asked)
+
+
+
+def test_cards_below_need_scrolling(browser, tmp_path):
+    """보관함 목록은 아래로 내려야 나머지 카드가 나타남(실제 화면) — 내리며 찾아 다시 올리지 않고 붙임"""
+    pytest.importorskip("cv2")
+    others = tuple(f"IMG_90{i:02d}_업로드용.jpg" for i in range(8))
+    pg = open_report(browser, library=others + ("IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"))
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert not [s for s in steps if s.startswith("library")]                       # 이미 있는 사진은 다시 안 올림
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert rows[0]["확인 필요"] == ""
+
+
+def test_resume_when_only_first_receipt_attached(browser, tmp_path):
+    """첫 장만 붙고 멈춘 경비는 ②를 다시 돌리면 나머지만 [Add]로 붙임(이미 여러 장 붙어 있으면 건너뜀)"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, library=("IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"))
+    bot = make_bot(pg, tmp_path)
+    bot.back_to_report()
+    bot.open_manual_expense("Parking & Toll")
+    pg.evaluate("current = 'IMG_5648.jpg'; attachDlg()")                             # 지난번에 첫 장만 붙음
+    files = photos(tmp_path)
+    done, checks = [], []
+    bot.attach_receipt(files, done, checks, pick=True)
+    assert pg.evaluate("uploads") == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"] and checks == []
+    assert done[0] == "이미 첨부됨(IMG_5648.jpg)"
+    bot.attach_receipt(files, done, checks, pick=True)                              # 다 붙은 뒤에는 건너뜀
+    assert pg.evaluate("uploads") == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"] and done[-1] == "이미 첨부됨(건너뜀)"
