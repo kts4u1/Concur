@@ -68,9 +68,9 @@ def test_bundle_statement_with_sheets():
     assert [p.name for p in stmt.bundle] == ["IMG_5651.HEIC", "IMG_5652.HEIC"]          # 사용내역 순서대로
     assert stmt.period == ("2026-10-01", "2026-10-31")
     assert stmt.last_use == "2026-10-22" and stmt.main_date == "2026-10-22"            # 마지막 이용일(조회 기간 끝 10-31이 아님)
-    assert stmt.bundle_note == ("사용내역 13건 61,500원, 마지막 이용 2026-10-22, 영수증 인쇄물 2장 함께 첨부 "
-                                "(영수증 13건 61,500원 맞음)")
+    assert stmt.bundle_note == "사용내역 13건 61,500원, 마지막 이용 2026-10-22, 영수증 인쇄물 2장 함께 첨부"
     assert not sheet1.use and not sheet2.use and "IMG_5648.HEIC" in sheet1.skip_reason
+    assert sheet1.total == 0 and sheet2.total == 0                                   # 인쇄물 금액은 틀리게 읽혀 비움
     assert cafe.use and cafe.bundle == [] and cafe.total == 4500                           # 다른 영수증은 그대로
     assert ca.receipt_issues(stmt, rs) == []
     # Concur 경비: 사용내역 기간 안의 날짜 + 총액이면 맞춤
@@ -78,21 +78,16 @@ def test_bundle_statement_with_sheets():
     assert ca.find_receipt(rs, "2026-11-02", 61500) is None
 
 
-def test_bundle_sum_check_without_footer():
+def test_sheet_amounts_not_compared():
+    """인쇄물 금액은 작은 글자라 틀리게 읽혀(118,100·70,300) 비교하지 않고 첨부만(사용자 요청 2026-11-15)"""
     t = datetime(2026, 11, 15, 10, 0)
-    stmt = make("S.jpg", STATEMENT, t)
-    sheet = make("A.jpg", SHEET1, t)
-    for r in (stmt, sheet):
-        ca.place_in_month(r, OCT)
-    ca.group_toll_bundles([stmt, sheet], OCT)
-    assert "일부만 읽음" in stmt.bundle_note and stmt.bundle_issue == ""                 # 9건만 읽음 → 묻지는 않음
-    wrong = make("B.jpg", SHEET2.replace("총 13 건/61500 원", "총 13 건/60500 원"), t)
+    wrong = make("B.jpg", SHEET2.replace("총 13 건/61500 원", "총 13 건/60500 원").replace("8,000 원(카드)", "118,100 원(카드)"), t)
     stmt = make("S.jpg", STATEMENT, t)
     for r in (stmt, wrong):
         ca.place_in_month(r, OCT)
-    ca.group_toll_bundles([stmt, wrong], OCT)
-    assert stmt.bundle_issue == "하이패스 영수증 합계(60,500원)가 사용내역 총액(61,500원)과 다름"
-    assert stmt.bundle_issue in ca.receipt_issues(stmt, [stmt, wrong])
+    ca.group_toll_bundles([stmt, wrong], OCT, {"톨게이트": ca.TOLL_DEFAULT_WORDS}, ["톨게이트"])
+    assert stmt.total == 61500 and stmt.bundle_issue == "" and ca.receipt_issues(stmt, [stmt, wrong]) == []
+    assert [p.name for p in stmt.bundle] == ["B.jpg"] and wrong.total == 0
 
 
 def test_sheets_alone_are_left_as_before():

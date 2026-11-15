@@ -165,11 +165,11 @@ def test_statement_total_unread_is_flagged():
     assert ca.TOLL_TOTAL_UNREAD not in ca.receipt_issues(stmt, [stmt])
 
 
-def test_statement_total_from_all_receipts():
-    stmt, s1, s2 = placed(make("IMG_5648.HEIC", SMALL.replace("기간별 사용내역", "기간별 사용내역 총 13건")),
-                          make("IMG_5651.HEIC", SHEET1), make("IMG_5652.HEIC", SHEET2.replace("총 13 건/61500 원", "")))
+def test_statement_total_from_sheet_footer():
+    stmt, s1, s2 = placed(make("IMG_5648.HEIC", SMALL), make("IMG_5651.HEIC", SHEET1), make("IMG_5652.HEIC", SHEET2))
     ca.group_toll_bundles([stmt, s1, s2], OCT, {"톨게이트": ca.TOLL_DEFAULT_WORDS}, ["톨게이트"])
-    assert stmt.total == 61500 and stmt.bundle_issue == ""                          # 영수증 13장 금액을 모두 읽어 더함
+    assert stmt.total == 61500 and stmt.bundle_issue == ""                          # 인쇄물 맨 아래 '총 13 건/61500 원'
+    assert s1.total == 0 and s2.total == 0
 
 
 def test_statement_total_read_with_zoom(tmp_path, monkeypatch):
@@ -200,6 +200,7 @@ def test_booking_company_slip_is_stay():
     placed(slip, inv)
     assert ca.group_stay_bundles([slip, inv], OCT, ca.default_settings()) == 1
     assert [p.name for p in slip.bundle] == ["IMG_5647.HEIC"] and not inv.use
+    assert inv.main_date == "2026-10-20"                                                    # 날짜를 못 읽은 인보이스는 영수증 날짜로(11-15 아님)
     assert slip.city.startswith("Daejeon")                                                  # 예약 회사 주소(서울)가 아니라 호텔
     start, end, _ = ca.stay_dates(slip, "2026-10-20", 6)
     assert (start.isoformat(), end.isoformat()) == ("2026-10-20", "2026-10-21")             # 거래 시각 16:39 → 그날부터 1박
@@ -214,3 +215,15 @@ def test_stay_item_gets_booking_words(tmp_path):
     ca.upgrade_category_table(table, settings)
     words = ca.load_category_rows(table, ca.default_settings())[0][ca.C_KEYWORDS]
     assert words.startswith("모텔, 호텔, 야놀자, 놀유니버스") and "agoda" in words
+
+
+def test_unreadable_stay_photo_goes_with_receipt():
+    """제목·날짜·금액을 하나도 못 읽은 숙박 사진(인보이스 등)은 한 시간 안에 찍은 숙박 영수증에 붙임"""
+    slip = make("IMG_5646.HEIC", NOL_SLIP)
+    blur = make("IMG_5647.HEIC", "가나 1호점\n업태 숙박업", datetime(2026, 11, 15, 10, 2))
+    far = make("IMG_5700.HEIC", "다라 호텔", datetime(2026, 11, 20, 10, 0))
+    placed(slip, blur, far)
+    assert ca.group_stay_bundles([slip, blur, far], OCT, ca.default_settings()) == 1
+    assert [p.name for p in slip.bundle] == ["IMG_5647.HEIC"] and slip.bundle_note == "숙박 사진 IMG_5647.HEIC 함께 첨부"
+    assert not blur.use and blur.main_date == "2026-10-20" and "IMG_5646.HEIC" in blur.skip_reason
+    assert not far.bundled_into

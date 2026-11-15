@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 인터넷 예약 숙박"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-15 인쇄물 첨부만·찍은 날 뒤 날짜 빼기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -1965,7 +1965,7 @@ DATE_EN_MDY = re.compile(r"\b" + EN_MONTH + r"\s*(\d{1,2})(?:st|nd|rd|th)?\s*,?\
 DATE_EN_DMY = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)?[\s\-/.]*" + EN_MONTH + r"[\s\-/.,]*(20\d{2}|\d{2}(?![:\d]))\b", re.I)
 EN_MONTHS3 = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 # 승인일시·거래일시·결제일 바로 뒤의 날짜 = 돈을 낸 날(카드 거래일). 정기권의 사용시작·사용종료보다 먼저 봅니다.
-PAY_DATE = re.compile(r"(?:승인|숭인|결제|거래|판매|매출)\s*(?:일시|일자|날짜|시간|일)\D{0,6}?"
+PAY_DATE = re.compile(r"(?:[승숭]\s*[인안]|결제|거래|판매|매출)\s*(?:일시|일자|날짜|시간|일)\D{0,6}?"
                       r"(?:(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})"
                       r"|(2\d)\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})"
                       r"|(20\d{2})(\d{2})(\d{2}))(?:(?!\d)|(?=\d{1,2}:\d{2}))")
@@ -2270,6 +2270,11 @@ def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, ho
     rec.pay_dates = find_pay_dates(ocr_text)
     rec.ocr_dates = rec.pay_dates + [d for d in find_ocr_dates(ocr_text, taken or file_name_date(original.name))
                                      if d not in rec.pay_dates]      # 돈을 낸 날짜를 맨 앞에
+    if taken:                    # 찍은 날보다 뒤 날짜(정기권 사용시작·사용종료, 유효기간)는 돈을 낸 날일 수 없음
+        limit = (_as_date(taken) + timedelta(days=1)).isoformat()
+        if any(d <= limit for d in rec.ocr_dates):         # 모두 뒤 날짜면 사진 시계가 틀렸을 수 있어 그대로 둠
+            rec.pay_dates = [d for d in rec.pay_dates if d <= limit]
+            rec.ocr_dates = [d for d in rec.ocr_dates if d <= limit]
     rec.dates = list(rec.ocr_dates)
     rec.date_from_ocr = bool(rec.dates)
     fdate = taken.date().isoformat() if taken else file_name_date(original.name)
@@ -2422,7 +2427,8 @@ def usage_dates(text: str) -> list:
 
 def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
     """이 달 하이패스 사용내역마다 같은 달 하이패스 영수증 인쇄물을 묶습니다.
-    사용내역 = 경비 하나(금액 = 총액, 기간 안의 Concur 경비와 맞춤), 인쇄물 = 함께 첨부(따로 맞추지 않음). → 묶은 사용내역 수"""
+    사용내역 = 경비 하나(금액 = 총액, 기간 안의 Concur 경비와 맞춤), 인쇄물 = 함께 첨부만(금액은 비교하지 않음 —
+    작은 글자라 틀리게 읽힘, 사용자 요청 2026-11-15). → 묶은 사용내역 수"""
     prefix = tm.prefix + "-"
     in_month = lambda r: any(d.startswith(prefix) for d in (r.ocr_dates or r.dates[:1]))
     stmts = [(r, i) for r, i in ((r, toll_statement_info(r.ocr_text)) for r in receipts) if i and in_month(r)]
@@ -2447,9 +2453,7 @@ def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
         members = sorted([(r, i) for r, i in sheets if r.bundled_into == s.original.name],
                          key=lambda x: (min(x[0].ocr_dates) if x[0].ocr_dates else "9999", x[0].original.name.lower()))
         footer = next((i["footer"] for _, i in members if i["footer"]), None)
-        read = [a for _, i in members for a in i["amounts"]]
-        all_read = sum(read) if read and info["count"] and len(read) == info["count"] else 0   # 영수증을 모두 읽었으면 그 합
-        known = info["total"] or (footer[1] if footer else 0) or all_read
+        known = info["total"] or (footer[1] if footer else 0)
         total = known or s.total
         if total:
             s.total, s.is_receipt = total, True
@@ -2466,26 +2470,11 @@ def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
         if not s.category:
             text = compact(s.ocr_text + "".join(r.ocr_text for r, _ in members))
             s.category = detect_category(text, keywords or {}, priority) or next((r.category for r, _ in members if r.category), "")
-        for r, _ in members:
-            r.use, r.skip_reason = False, f"하이패스 사용내역({s.original.name})에 함께 첨부"
-        head = (f"사용내역 {info['count'] or '?'}건 {total:,}원" + (f", 마지막 이용 {s.last_use}" if s.last_use else "")
-                + (f", 영수증 인쇄물 {len(members)}장 함께 첨부" if members else ""))
+        for r, _ in members:                             # 인쇄물은 첨부만(작은 글자라 금액이 틀리게 읽혀 금액은 비움)
+            r.use, r.skip_reason, r.total = False, f"하이패스 사용내역({s.original.name})에 함께 첨부", 0
         s.bundle_issue = ""
-        if not members:
-            note = "함께 붙일 하이패스 영수증 인쇄물을 못 찾음"
-        elif footer and footer[1] == total and (info["count"] in (None, footer[0])):
-            note = f"영수증 {footer[0]}건 {footer[1]:,}원 맞음"
-        elif footer:
-            note = f"영수증 {footer[0]}건 {footer[1]:,}원"
-            s.bundle_issue = f"하이패스 영수증 합계({footer[1]:,}원)가 사용내역 총액({total:,}원)과 다름"
-        elif read and sum(read) == total:
-            note = f"영수증 {len(read)}건 {sum(read):,}원 맞음"
-        elif read and info["count"] and len(read) == info["count"]:
-            note = f"영수증 {len(read)}건 {sum(read):,}원"
-            s.bundle_issue = f"하이패스 영수증 합계({sum(read):,}원)가 사용내역 총액({total:,}원)과 다름"
-        else:
-            note = f"영수증에서 읽은 것 {len(read)}건 {sum(read):,}원(일부만 읽음, 사진으로 확인)" if read else "영수증 금액은 못 읽음"
-        s.bundle_note = f"{head} ({note})"
+        s.bundle_note = (f"사용내역 {info['count'] or '?'}건 {total:,}원" + (f", 마지막 이용 {s.last_use}" if s.last_use else "")
+                         + (f", 영수증 인쇄물 {len(members)}장 함께 첨부" if members else ", 함께 붙일 영수증 인쇄물을 못 찾음"))
         if not known:                                    # 사용내역 표의 한 줄 금액(가장 큰 금액)일 수 있음
             s.bundle_issue = TOLL_TOTAL_UNREAD
     return len(stmts)
@@ -2630,9 +2619,16 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
     docs = {id(r) for r, _ in mails}
     invoices = [r for r in receipts if free(r) and id(r) not in docs and is_stay_invoice(r.ocr_text)]
     docs |= {id(r) for r in invoices}
-    if not docs:
-        return 0
+    if not docs and not any(free(r) and r.category in cats and not r.ocr_dates and not r.total for r in receipts):
+        return 0                                           # 인보이스·승인 메일·못 읽은 숙박 사진이 없음
     gap = lambda a, b: abs((a.taken - b.taken).total_seconds()) if a.taken and b.taken else float("inf")
+
+    def attach_to(doc, host):                              # 날짜를 못 읽은 사진은 붙은 숙박 영수증 날짜로 보여 줌
+        doc.use, doc.bundled_into = False, host.original.name
+        doc.skip_reason = f"숙박 영수증({host.original.name})에 함께 첨부"
+        if not doc.ocr_dates and host.main_date:
+            doc.dates = [host.main_date] + [d for d in doc.dates if d != host.main_date]
+
     cities = cfg.get("도시_목록") or DEFAULT_CITIES
     low_cities = {cities[n] for n in cfg.get("도시_낮은_우선순위", ["서울"]) if n in cities}
 
@@ -2672,11 +2668,20 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
             best.is_receipt = changed = True
         if changed:
             place_in_month(best, tm)
-        inv.use, inv.bundled_into = False, best.original.name
-        inv.skip_reason = f"숙박 영수증({best.original.name})에 함께 첨부"
+        attach_to(inv, best)
     for r in receipts:                                     # 인보이스가 없는 숙박 영수증
         if id(r) not in docs and id(r) not in stays and free(r) and r.category in cats:
             stays[id(r)] = (r, None)
+    extras = {}                                            # 날짜·금액을 하나도 못 읽은 숙박 사진 → 한 시간 안에 찍은 숙박 영수증에
+    for key, (r, inv) in list(stays.items()):
+        if inv is not None or r.use or r.ocr_dates or r.total:
+            continue
+        hosts = [h for h, _ in stays.values() if h.use and h is not r and gap(h, r) <= 3600]
+        if hosts:
+            host = min(hosts, key=lambda h: gap(h, r))
+            extras.setdefault(id(host), []).append(r)
+            attach_to(r, host)
+            del stays[key]
     cutoff = int(cfg.get("숙박_새벽_기준_시각", 6) or 6)
     count, owners = 0, {}
     for r, inv in stays.values():
@@ -2687,9 +2692,11 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
             attached = [m for m, days in mails if nights & set(days)]     # 메일 하나가 여러 날 숙박에 붙을 수 있음
         for m in attached:
             owners.setdefault(id(m), (m, []))[1].append(r.original.name)
-        if inv is not None or attached:
-            r.bundle = ([inv.original] if inv is not None else []) + [m.original for m in attached]
+        more = extras.get(id(r), [])
+        if inv is not None or more or attached:
+            r.bundle = ([inv.original] if inv is not None else []) + [x.original for x in more] + [m.original for m in attached]
             r.bundle_note = ", ".join(([f"인보이스 {inv.original.name}"] if inv is not None else [])
+                                      + [f"숙박 사진 {x.original.name}" for x in more]
                                       + [f"승인 메일 {m.original.name}" for m in attached]) + " 함께 첨부"
             count += 1
     for m, names in owners.values():
@@ -3024,7 +3031,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             best = info_score(first)
             missing = (not first.total or not first.date_from_ocr or toll_total_missing(first)) and orig.name not in early_names
             # 날짜나 금액을 못 읽은 영수증(또는 영수증 글자가 보이는 사진)은 줄이지 않고 크게 다시 읽음
-            if missing and (first_is_receipt or receipt_word_hits(text, cfg)):
+            if missing and (first_is_receipt or receipt_word_hits(text, cfg) or is_stay_invoice(text)):
                 counts["크게"] += 1
                 big = zoomed_text(orig, st)
                 if big.strip():

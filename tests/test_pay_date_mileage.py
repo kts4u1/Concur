@@ -238,3 +238,17 @@ def test_manual_mileage_expense(tmp_path):
     assert saved["amount"].replace(",", "") == "541250" and saved["comment"] == "Car mileage for service"
     assert saved["uploads"] == ["IMG_5650.jpg", "IMG_5649.jpg"]                      # 신청서 → 계기판 사진
     assert rows[0]["오류"] == "" and rows[0]["확인 필요"] == ""
+
+
+def test_future_dates_are_not_the_receipt_date():
+    """실제 사진(2026-11-15): 승인일시 글자를 잘못 읽어 사용종료일 12-31이 영수증 날짜로 나옴.
+    찍은 날(11월 4일)보다 뒤 날짜는 돈을 낸 날일 수 없어 뺍니다."""
+    garbled = PASS.replace("[승인일시]", "[스인일AI]")                                  # 글자를 잘못 읽음
+    taken = datetime(2026, 11, 4, 9, 0)
+    rec = make("IMG_0617.HEIC", garbled, taken)
+    assert rec.pay_dates == [] and rec.ocr_dates == ["2026-11-02"] and rec.main_date == "2026-11-02"
+    ca.place_in_month(rec, OCT)
+    assert rec.skip_reason == ca.OTHER_MONTH_NOTE.format(date="2026-11-02") and rec.main_date == "2026-11-02"
+    assert make("IMG_0617.HEIC", PASS.replace("[숭인일시]", "[숭안일시]"), taken).pay_dates == ["2026-11-02"]
+    only_future = make("IMG_0618.HEIC", "정기권 사용시작: 2026-12-01 사용종료: 2026-12-31 합계 99,000", taken)
+    assert only_future.ocr_dates == ["2026-12-01", "2026-12-31"]                     # 모두 뒤 날짜면 사진 시계를 의심해 그대로
