@@ -120,14 +120,15 @@ TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for s
 
 
 def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False,
-                slow_close=False, no_choose_new=False, save_busy=False):
+                slow_close=False, no_choose_new=False, save_busy=False, covered_save=False):
     """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
     bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
     icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')
     behind: 실제 Concur처럼 경비 화면을 열어도 리포트 화면이 뒤에 가려진 채 남고, 영수증 칸의 [Add]는 아이콘 글자가 붙음
     slow_close: 사진을 붙이면 보관함의 카드는 바로 사라지지만 보관함은 1.5초 뒤에 닫힘
     no_choose_new: 저장하기 전의 새 경비 화면에는 [Choose From Available Receipts]가 없음(저장한 뒤 다시 열어야 붙임)
-    save_busy: 사진을 붙인 뒤 4초 동안은 [Save Expense]를 눌러도 저장되지 않음(사진을 합치는 중)"""
+    save_busy: 사진을 붙인 뒤 4초 동안은 [Save Expense]를 눌러도 저장되지 않음(사진을 합치는 중)
+    covered_save: 위에 고정된 머리띠(회사 로고 줄)가 있고, 사진을 붙이면 화면이 내려가 [Save Expense]가 머리띠 밑에 가려짐"""
     js = lambda on: "true" if on else "false"
     html = REPORT
     if behind:
@@ -137,6 +138,11 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
                 + "<style>#form { position:fixed; inset:0; z-index:10; background:#fff; overflow:auto }"
                   " #dialog, #pop { position:fixed; top:0; left:0; z-index:30; background:#fff }</style>")
         assert html.count("show('report', 0)") == 0 and "mi" in html
+    if covered_save:
+        assert "uploads.push(current);" in html
+        html = ('<div id="appbar" style="position:fixed; top:0; left:0; right:0; height:60px; background:#fff; z-index:50">LOGO</div>'
+                + html.replace("uploads.push(current);", "uploads.push(current); setTimeout(() => window.scrollTo(0, 90), 50);")
+                + "<style>body { padding-top: 70px } #form { min-height: 2500px }</style>")
     if save_busy:
         old = "function save() { steps.push('save');"
         assert old in html and "uploads.push(current);" in html
@@ -347,6 +353,17 @@ def test_save_pressed_again_when_ignored_after_photos(browser, tmp_path):
     assert "save ignored" in steps and steps[-1] == "save"
     assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
     assert rows[0]["확인 필요"] == "" and pg.inner_text("#count") == "Expenses (1)"
+
+
+def test_save_button_under_fixed_top_bar(browser, tmp_path):
+    """2026-11-16 실제 화면: 사진을 붙이고 나면 화면이 내려가 [Save Expense]가 위쪽 회사 로고 머리띠 밑에 가려져 못 누름
+    → 단추가 보이게 올린 뒤 누름"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, covered_save=True)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    assert rows[0]["오류"] == "" and rows[0]["확인 필요"] == ""
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert pg.evaluate("steps")[-1] == "save" and pg.inner_text("#count") == "Expenses (1)"
 
 
 def test_receipt_stem():

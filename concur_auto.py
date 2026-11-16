@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 저장 기다렸다 다시 누르기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 가려진 저장 단추 올려서 누르기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -5219,7 +5219,11 @@ class ConcurBot:
                 for i in range(min(n, 8)):
                     el = loc.nth(i)
                     try:
-                        if el.is_visible() and self._on_top(el):
+                        if not el.is_visible():
+                            continue
+                        # 화면을 아래로 내려 단추가 위쪽 머리띠(회사 로고 줄) 밑에 가려졌을 수 있음(2026-11-16 사용자 화면) →
+                        # 단추가 보이게 올린 뒤 다시 봄. 뒤에 깔린 화면의 단추는 올려도 가려져 있어 그대로 빠짐
+                        if self._on_top_scrolled(el):
                             return el
                     except Exception:
                         pass
@@ -5875,11 +5879,22 @@ class ConcurBot:
         except Exception:
             return True
 
+    def _on_top_scrolled(self, el) -> bool:
+        """맨 앞에 보이는지. 가려져 있으면 보이게 올린 뒤 한 번 더 봄(위쪽 머리띠 밑에 들어간 단추)."""
+        if self._on_top(el):
+            return True
+        try:
+            el.evaluate("e => e.scrollIntoView({block: 'center', inline: 'nearest'})")
+            time.sleep(0.2)
+        except Exception:
+            return False
+        return self._on_top(el)
+
     def _report_shown(self) -> bool:
         """리포트 화면(경비 목록)이 맨 앞에 보이는지. 경비를 열어도 리포트 화면이 뒤에 깔려 있어서
         [Add Expense]가 '보이는' 것만으로는 리포트로 돌아왔는지 알 수 없음(2026-11-16 실행 기록)."""
         entry = self._report_entry()
-        return entry is not None and self._on_top(entry[1])
+        return entry is not None and self._on_top_scrolled(entry[1])
 
     def _report_entry(self):
         """리포트 화면에서 새 경비를 여는 곳: [Add Expense] 버튼, 경비가 하나도 없으면 'Manually Create Expense' 카드"""
