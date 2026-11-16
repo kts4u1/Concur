@@ -279,3 +279,41 @@ def test_city_from_district_or_stay_name():
     placed(slip, inv)
     assert ca.group_stay_bundles([slip, inv], OCT, ca.default_settings()) == 1
     assert slip.vendor == "가나 쉼터 유성 1호점" and slip.city.startswith("Daejeon")
+
+
+# ---------- 11월에 처리할 때 10월 서류(11월에 찍음)는 빼기 (2026-11-16 사용자 화면) ----------
+NOV = ca.TargetMonth(2026, 11)
+
+
+def test_october_stay_invoice_left_out_in_november():
+    """10월 숙박 전표·인보이스를 11월에 찍었어도, 11월 처리에서는 인보이스가 '함께 첨부 ✓'가 아니라 다른 달로 빠짐"""
+    slip = make("IMG_5646.HEIC", NOL_SLIP)
+    inv = make("IMG_5647.HEIC", INVOICE_UNREAD, datetime(2026, 11, 15, 10, 1))
+    for r in (slip, inv):
+        ca.place_in_month(r, NOV)
+    ca.group_stay_bundles([slip, inv], NOV, ca.default_settings())
+    assert not slip.use and slip.skip_reason == ca.OTHER_MONTH_NOTE.format(date="2026-10-20")
+    assert not inv.use and inv.bundled_into == "" and inv.skip_reason == slip.skip_reason
+    row = {"사용(O/X)": "X", "[자동] 사용": "X", "확인 필요": inv.skip_reason, "붙는 영수증": inv.bundled_into}
+    assert ca.review_status(row) == "✕ 뺌"
+    # 10월 처리에서는 그대로 함께 첨부(✓)
+    slip, inv = make("IMG_5646.HEIC", NOL_SLIP), make("IMG_5647.HEIC", INVOICE_UNREAD, datetime(2026, 11, 15, 10, 1))
+    placed(slip, inv)
+    ca.group_stay_bundles([slip, inv], OCT, ca.default_settings())
+    assert slip.use and inv.bundled_into == "IMG_5646.HEIC"
+
+
+def test_last_month_papers_photographed_this_month():
+    """이 달에 찍었어도 적힌 날짜가 지난달인 영수증 아닌 사진(승인 메일·10/1·11/1 계기판 사진)은 다른 달로 빠지고(✕),
+    날짜가 없는 사진은 예전처럼 '확인 필요'(⚠)"""
+    taken = datetime(2026, 11, 15, 9, 0)
+    odo = make("IMG_5649.HEIC", "2026.10.01 ODO 12345km\n2026.11.01 ODO 13020km", taken)
+    assert not odo.is_receipt
+    ca.place_in_month(odo, NOV)
+    assert odo.skip_reason == ca.OTHER_MONTH_NOTE.format(date="2026-10-01") and not odo.use
+    blank = make("IMG_9000.HEIC", "가족 사진", taken)
+    ca.place_in_month(blank, NOV)
+    assert blank.skip_reason == ca.NOT_RECEIPT_ASK_NOTE
+    nov_doc = make("IMG_9001.HEIC", "2026.11.01 ODO 13020km\n2026.12.01 ODO 13900km", taken)
+    ca.place_in_month(nov_doc, NOV)
+    assert nov_doc.skip_reason == ca.NOT_RECEIPT_ASK_NOTE                       # 이 달 서류는 그대로 ⚠

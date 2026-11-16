@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 LCRT 화살표로 목록 열기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 다른 달 서류 빼기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -2772,11 +2772,16 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
     gap = lambda a, b: abs((a.taken - b.taken).total_seconds()) if a.taken and b.taken else float("inf")
 
     def attach_to(doc, host):                              # 날짜를 못 읽은 사진은 붙은 숙박 영수증 날짜로 보여 줌
-        doc.use, doc.bundled_into = False, host.original.name
-        doc.skip_reason = f"숙박 영수증({host.original.name})에 함께 첨부"
+        doc.use = False
         doc.category = doc.category if doc.category in cats else (host.category or doc.category)
         if not doc.ocr_dates and host.main_date:
             doc.dates = [host.main_date] + [d for d in doc.dates if d != host.main_date]
+        if host.use or host.skip_reason in ASK_NOTES:
+            doc.bundled_into = host.original.name
+            doc.skip_reason = f"숙박 영수증({host.original.name})에 함께 첨부"
+        else:                                              # 다른 달 숙박 영수증의 인보이스는 같이 뺌(11월에 10월 인보이스가 ✓로 보였음)
+            doc.bundled_into = ""
+            doc.skip_reason = host.skip_reason
 
     cities = cfg.get("도시_목록") or DEFAULT_CITIES
     low_cities = {cities[n] for n in cfg.get("도시_낮은_우선순위", ["서울"]) if n in cities}
@@ -2902,7 +2907,11 @@ def place_in_month(rec: Receipt, tm: TargetMonth):
     rec.skip_reason = ""
     if not rec.is_receipt and not date_edited:      # 날짜를 직접 적었으면 영수증으로 봄
         taken_here = bool(rec.taken) and f"{rec.taken:%Y-%m}" == tm.prefix
-        rec.skip_reason = NOT_RECEIPT_ASK_NOTE if taken_here else NOT_RECEIPT_NOTE   # 그 달에 찍은 사진은 '확인 필요'
+        seen = rec.pay_dates or rec.ocr_dates
+        if taken_here and seen and min(seen) < prefix:  # 이 달에 찍었지만 지난달 서류(승인 메일·계기판 사진 등, 2026-11-16)
+            rec.skip_reason = OTHER_MONTH_NOTE.format(date=min(seen))
+        else:
+            rec.skip_reason = NOT_RECEIPT_ASK_NOTE if taken_here else NOT_RECEIPT_NOTE   # 그 달에 찍은 사진은 '확인 필요'
     else:
         receipt_dates = rec.dates if date_edited else (rec.pay_dates or rec.ocr_dates)   # 승인일시가 있으면 그 날짜로
         if receipt_dates:
