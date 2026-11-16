@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 기본 자동 입력표 = 사용자 표"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 로그인 확인 엄격하게"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -4194,6 +4194,7 @@ class ConcurBot:
         self.timeout_ms = int(cfg.get("대기시간_초", 60)) * 1000
         self.pw = self.ctx = self.page = None
         self.poll_s = 1.0
+        self.login_stable_s = 3.0       # 로그인된 화면이 이만큼 그대로여야 로그인으로 봄(잠깐 보였다 로그인 화면으로 가는 일)
         self.login_timeout_s = 600
         self.diagnose_after_s = 15
         self.last_expense_types = []     # [화면 조사]에서 읽은 Expense Type 목록
@@ -4580,18 +4581,28 @@ class ConcurBot:
         self.screenshot("login_screen")
 
     def is_logged_in(self) -> bool:
+        """로그인된 화면인지: 로그인 주소·화면이 아니고 '리포트 생성'(또는 앱 화면)이 **보임**(예전에는 숨은 것도 셌음)"""
         url = self.page.url or ""
         if "concursolutions.com" not in url or SIGNIN_URL.search(url) or self.on_signin_screen():
             return False
-        for loc in (self.page.get_by_role("link", name=self._re("리포트 생성", exact=False)),
-                    self.page.get_by_text(self._re("리포트 생성", exact=False)),
-                    self.page.locator("#cnqr-app-content")):
-            try:
-                if loc.count() > 0:
-                    return True
-            except Exception:
-                pass
-        return False
+        return self._first_shown([self.page.get_by_role("link", name=self._re("리포트 생성", exact=False)),
+                                  self.page.get_by_text(self._re("리포트 생성", exact=False)),
+                                  self.page.locator("#cnqr-app-content")]) is not None
+
+    def on_signin_page(self) -> bool:
+        url = self.page.url or ""
+        return bool(SIGNIN_URL.search(url)) or self.on_signin_screen()
+
+    def ensure_logged_in(self) -> bool:
+        """로그인 화면으로 돌아가 있으면 다시 로그인합니다. → 다시 로그인했으면 True"""
+        try:
+            if not self.on_signin_page():
+                return False
+        except Exception:
+            return False
+        self.log("Concur가 로그인 화면으로 돌아갔습니다. 다시 로그인합니다.")
+        self.wait_login(go_home=False)
+        return True
 
     def _email_step(self) -> bool:
         """첫 로그인 화면: 이메일 칸 확인 → [다음]. 버튼을 못 누르면 이메일 칸에서 Enter."""
@@ -4657,10 +4668,13 @@ class ConcurBot:
             self.log("열린 Edge 창에서 직접 로그인하세요. 로그인되면 자동으로 이어서 진행합니다.")
         return True
 
-    def wait_login(self, need_home: bool = True):
-        """이미 로그인돼 있으면 바로 진행합니다. 로그인 화면이면 '로그인_방법'에 따라 이메일 링크로 자동 로그인합니다."""
+    def wait_login(self, need_home: bool = True, go_home: bool = True):
+        """이미 로그인돼 있으면 바로 진행합니다. 로그인 화면이면 '로그인_방법'에 따라 이메일 링크로 자동 로그인합니다.
+        로그인된 화면이 잠깐 보였다가 다시 로그인 화면으로 가는 일이 있어서(2026-11-16 사용자 화면: [다음] 1초 뒤
+        '로그인 확인'이 떴지만 실제로는 로그인 화면), 로그인된 화면이 login_stable_s초 동안 그대로일 때만 로그인으로 봅니다."""
         page = self.page
-        page.goto(self.base + "/home", wait_until="domcontentloaded")
+        if go_home:
+            page.goto(self.base + "/home", wait_until="domcontentloaded")
         auto = str(self.cfg.get("로그인_방법", "이메일 링크")).strip() == "이메일 링크"
         self.log("Concur 로그인 확인 중... "
                  + ("로그인 화면이 나오면 이메일 링크로 자동 로그인합니다." if auto
@@ -4671,12 +4685,20 @@ class ConcurBot:
         last_error = ""
         started = time.time()
         deadline = started + self.login_timeout_s
+        seen_at, seen_url = None, ""
         while time.time() < deadline:
             self._check_stop()
             try:
                 if self.is_logged_in():
-                    self.log("로그인 확인")
-                    return
+                    url = (self.page.url or "").split("?")[0]
+                    if seen_at is None or url != seen_url:
+                        seen_at, seen_url = time.time(), url          # 처음 보임: 잠시 그대로인지 더 봄
+                    elif time.time() - seen_at >= self.login_stable_s:
+                        self.log("로그인 확인")
+                        return
+                    time.sleep(0.5)
+                    continue
+                seen_at = None
                 if auto:
                     known = self._email_step() or self._email_link_step()
                     if (not known and not self._diagnosed and SIGNIN_URL.search(self.page.url or "")
@@ -4701,10 +4723,14 @@ class ConcurBot:
         purpose = tm.report_name(self.cfg.get("리포트_Business_Purpose", "service"), report_name=name)
         comment = tm.report_name(self.cfg.get("리포트_Comment_형식", "{report_name}"), report_name=name)
         self.log(f"리포트 생성: {name} ({tm.first_day_us} ~ {tm.last_day_us}), Business Purpose={purpose}, Comment={comment}")
+        new_url = self.base + "/nui/expense?modal=header&context=new-report"
         try:
             page.get_by_role("link", name=self._re("리포트 생성", exact=False)).first.click(timeout=15000)
         except Exception:
-            page.goto(self.base + "/nui/expense?modal=header&context=new-report")
+            page.goto(new_url)
+        time.sleep(1.0)
+        if self.ensure_logged_in():                      # 로그인 화면으로 갔으면 다시 로그인한 뒤 리포트 만들기 화면으로
+            page.goto(new_url)
         self.type_text(self.field("리포트 이름"), name)
         self.type_text(self.field("리포트 시작일"), tm.first_day_us)
         self.type_text(self.field("리포트 종료일"), tm.last_day_us)
@@ -4729,7 +4755,10 @@ class ConcurBot:
         name = tm.report_name(self.cfg["리포트_이름_형식"])
         page = self.page
         try:
-            page.goto(self.base + str(self.cfg.get("리포트_목록_주소") or "/nui/expense"))
+            list_url = self.base + str(self.cfg.get("리포트_목록_주소") or "/nui/expense")
+            page.goto(list_url)
+            if self.ensure_logged_in():                  # 로그인 화면으로 갔으면 다시 로그인하고 목록을 다시 엶(같은 리포트를 또 만들지 않게)
+                page.goto(list_url)
             item = page.get_by_text(name, exact=True).first
             if self._visible(item, int(float(self.cfg.get("리포트_찾기_대기_초", 8)) * 1000)):
                 self.log(f"Concur에 같은 이름의 리포트가 있습니다: {name}")

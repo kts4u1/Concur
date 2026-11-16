@@ -159,19 +159,21 @@ HOME = """<!doctype html><meta charset="utf-8"><h1>안녕하세요?</h1>
 <div role="link" tabindex="0">경비 리포트 생성</div><h2>사용 가능한 경비(4)</h2>"""
 
 REDIRECT = """<!doctype html><meta charset="utf-8"><script>location.replace({url!r})</script>"""
+# 실제로 있었던 일(2026-11-16): 로그인 안 된 상태인데 홈 화면이 잠깐 보였다가 로그인 화면으로 넘어감
+FLASH = HOME + """<script>setTimeout(() => location.replace('https://www.concursolutions.com/nui/signin'), 600)</script>"""
 
 MAGIC = "https://www.concursolutions.com/nui/signin/emaillink?token=abc"
 
 
 class FakeConcur:
-    def __init__(self, logged_in=False, saved_email=""):
-        self.logged_in, self.saved_email = logged_in, saved_email
+    def __init__(self, logged_in=False, saved_email="", flash=False):
+        self.logged_in, self.saved_email, self.flash = logged_in, saved_email, flash
         self.typed_email = None
 
     def handle(self, route, request):
         u = urlparse(request.url)
         if u.netloc == "us2.concursolutions.com" and u.path == "/home":
-            body = HOME if self.logged_in else REDIRECT.format(url="https://www.concursolutions.com/nui/signin")
+            body = HOME if self.logged_in else (FLASH if self.flash else REDIRECT.format(url="https://www.concursolutions.com/nui/signin"))
         elif u.path == "/nui/signin":
             body = SIGNIN.format(value=self.saved_email)
         elif u.path == "/nui/signin/hrd":
@@ -212,6 +214,7 @@ def make_bot(browser, site, cfg_changes=None, ui=None, mail_link=MAGIC, stop_fla
     bot = ca.ConcurBot(cfg, lambda s="": lines.append(s), ui, stop_flag)
     bot.page = ctx.new_page()
     bot.poll_s = 0.05
+    bot.login_stable_s = 1.0
     bot.login_timeout_s = 20
     calls = []
 
@@ -289,6 +292,25 @@ def test_stop_button_stops_login_wait(browser):
     bot, ctx, calls, lines = make_bot(browser, site, stop_flag=stop)
     with pytest.raises(ca.Cancelled):
         bot.wait_login()
+
+
+def test_home_shown_for_a_moment_is_not_logged_in(browser):
+    """홈 화면이 잠깐 보였다가 로그인 화면으로 넘어가면 '로그인 확인'으로 보지 않고 이메일 링크로 실제 로그인함"""
+    site = FakeConcur(saved_email="me@example.com", flash=True)
+    bot, ctx, calls, lines = make_bot(browser, site)
+    bot.wait_login()
+    assert calls and site.logged_in                                              # 메일 링크로 진짜 로그인
+    assert lines.count("로그인 확인") == 1 and bot.is_logged_in()
+
+
+def test_signin_again_when_sent_back_to_signin(browser):
+    """일하다가 로그인 화면으로 돌아가면 다시 로그인함(ensure_logged_in)"""
+    site = FakeConcur(saved_email="me@example.com")
+    bot, ctx, calls, lines = make_bot(browser, site)
+    bot.page.goto("https://www.concursolutions.com/nui/signin")
+    assert bot.ensure_logged_in() and site.logged_in
+    assert any("다시 로그인합니다" in l for l in lines)
+    assert not bot.ensure_logged_in()                                            # 로그인된 화면이면 그대로
 
 
 def test_signin_screen_is_not_mistaken_for_logged_in(browser):
