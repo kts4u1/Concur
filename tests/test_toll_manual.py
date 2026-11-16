@@ -119,12 +119,21 @@ function save() { steps.push('save');
 TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for service", "For service", "Parking & Toll", "", "", "", "", ""]
 
 
-def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False):
+def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False):
     """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
     bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
-    icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')"""
+    icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')
+    behind: 실제 Concur처럼 경비 화면을 열어도 리포트 화면이 뒤에 가려진 채 남고, 영수증 칸의 [Add]는 아이콘 글자가 붙음"""
     js = lambda on: "true" if on else "false"
-    return (REPORT.replace(" MULTIPLE>", " multiple>" if multiple else ">")
+    html = REPORT
+    if behind:
+        html = (html.replace("show('report', 0);", "")
+                .replace('<button id="addr" onclick="openAvail()">Add</button>',
+                         '<button id="addr" onclick="openAvail()"><i class="mi">add</i> Add</button>')
+                + "<style>#form { position:fixed; inset:0; z-index:10; background:#fff; overflow:auto }"
+                  " #dialog, #pop { position:fixed; top:0; left:0; z-index:30; background:#fff }</style>")
+        assert html.count("show('report', 0)") == 0 and "mi" in html
+    return (html.replace(" MULTIPLE>", " multiple>" if multiple else ">")
             .replace("if (EMPTY)", "if (true)" if empty else "if (false)")
             .replace("LIBRARY", "[" + ",".join(f"'{n}'" for n in library) + "]")
             .replace("SLOW = false, BGTHUMB = false, NONAME = false, ICONS = false",
@@ -271,6 +280,18 @@ def test_dialog_button_next_to_delete_without_file_name(browser, tmp_path):
     pg = open_report(browser, noname=True, icons=True)
     rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     assert "delete icon" not in pg.evaluate("steps")                               # 카드의 작은 아이콘이 아니라 사진을 누름
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert [x for x in pg.evaluate("steps") if x.startswith(("attach", "add "))] == [
+        "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
+    assert rows[0]["확인 필요"] == ""
+
+
+def test_report_behind_and_add_with_icon_text(browser, tmp_path):
+    """실제 화면(2026-11-16 실행 기록): 경비 화면 뒤에 리포트 화면이 깔려 있고, 두 번째 사진부터 누를 영수증 칸의 [Add]는
+    이름이 정확히 'Add'가 아니어서 못 찾았음 → 사진 아래 Remove · Add · Open의 Add를 찾아 누름"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, behind=True)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
     assert [x for x in pg.evaluate("steps") if x.startswith(("attach", "add "))] == [
         "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]

@@ -172,3 +172,37 @@ def test_late_missing_info_dialog_still_answered(browser):
     bot.go_next(1, 2, checks, 70000)
     steps = pg.evaluate("steps")
     assert steps[:2] == ["next", "yes"] and "save add 70000" in steps and checks == []
+
+
+# 실제 Concur(2026-11-16 실행 기록): 경비 화면을 열어도 뒤에 리포트 목록이 가려진 채 그대로 있음
+# (Accommodation·Errors 글자와 체크박스, 도구 모음의 Edit). 예전에는 이 가려진 줄을 눌러 Itemization이 안 열렸음.
+BEHIND = """<div id="report" style="position:fixed; inset:0; z-index:1">
+  <h2>Expenses (3)</h2><div class="sapcnqr-toolbar__toolbar"><button onclick="steps.push('report edit')">Edit</button></div>
+  <div style="margin-top:160px">
+  <div class="row" style="display:flex; gap:20px"><input type="checkbox" onchange="steps.push('report check')">
+    <span onclick="steps.push('report open')">Accommodation</span><span>10/20/2026</span><span>Errors: 2 Error</span>
+    <span>KRW 75,000</span></div></div></div>
+"""
+OVER = """<style>#expense, #add, #itemForm { position:fixed; inset:0; z-index:10; background:#fff; overflow:auto }
+#alerts, #dlg, #pop { position:fixed; z-index:20; background:#fff }</style>"""
+
+
+def test_itemization_ignores_report_list_behind(browser):
+    page = PAGE.replace('<div id="expense">', BEHIND + OVER + '<div id="expense">', 1)
+    bot, pg = bot_on(browser, page=page)
+    checks = []
+    bot.go_next(1, 2, checks, 70000)
+    steps = pg.evaluate("steps")
+    assert not [x for x in steps if x.startswith("report")]                    # 뒤에 깔린 리포트 줄·Edit는 안 누름
+    assert "open item" in steps and checks == []
+    assert "save item NA | Accommodation fee for service in Mokpo Hankook Hospital" in steps
+
+
+def test_check_and_edit_ignores_report_edit_behind(browser):
+    page = PAGE.replace('<div id="expense">', BEHIND + OVER + '<div id="expense">', 1).replace(' onclick="openItem()"', "")
+    bot, pg = bot_on(browser, page=page)
+    checks = []
+    bot.go_next(1, 2, checks, 70000)
+    steps = pg.evaluate("steps")
+    assert "check" in steps and "edit" in steps and not [x for x in steps if x.startswith("report")]
+    assert checks == []

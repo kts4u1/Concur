@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 기록 끝까지·막 올린 사진 기다리기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 가려진 화면 무시·영수증 Add 찾기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -364,6 +364,8 @@ def default_settings():
             "LCRT 칸 이름": "LCRT|Legal compliance registration tool",
             "영수증 끌어 놓기": "Upload or drag-and-drop your receipts here|영수증을 업로드하거나 여기에 끌어",
             "영수증 더하기": "Add|추가",
+            "영수증 빼기": "Remove|제거|삭제",               # 영수증 칸 사진 아래 Remove · Add · Open
+            "영수증 열기": "Open|열기",
             "Alerts": "Alerts|알림",
             "닫기": "Close|닫기",
             "경비로 돌아가기": "Expense|경비",
@@ -2202,6 +2204,14 @@ PROVINCES = ("서울특별시|부산광역시|대구광역시|인천광역시|�
              "강원특별자치도|강원도|충청북도|충청남도|전북특별자치도|전라북도|전라남도|경상북도|경상남도|제주특별자치도|"
              "서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주")
 METRO_CITIES = ("서울", "부산", "대구", "인천", "광주", "대전", "울산")
+# 광역시 이름 없이 구 이름만 있어도 한 도시뿐인 구(중구·동구·서구처럼 여러 도시에 있는 이름은 뺌)
+UNIQUE_DISTRICTS = {"유성구": "대전", "대덕구": "대전", "광산구": "광주", "해운대구": "부산", "수영구": "부산", "사하구": "부산",
+                    "금정구": "부산", "연제구": "부산", "사상구": "부산", "부산진구": "부산", "기장군": "부산", "수성구": "대구",
+                    "달서구": "대구", "달성군": "대구", "미추홀구": "인천", "연수구": "인천", "남동구": "인천", "부평구": "인천",
+                    "계양구": "인천", "울주군": "울산"}
+# 숙소 이름에 흔한 동네 이름(예: 'OO 유성 1호점'): 숙박 영수증의 도시를 못 찾았을 때만 씀
+STAY_AREA_NAMES = {"유성": "대전", "둔산": "대전", "해운대": "부산", "서면": "부산", "광안리": "부산", "동성로": "대구",
+                   "수성못": "대구", "상무지구": "광주", "충장로": "광주", "첨단지구": "광주", "부평": "인천", "송도": "인천"}
 
 
 def detect_city(text_compact: str, cities: dict, hospital_key: str = "", low_priority=("서울",)) -> str:
@@ -2226,6 +2236,10 @@ def detect_city(text_compact: str, cities: dict, hospital_key: str = "", low_pri
             m = re.search(re.escape(ko) + r"[가-힣]{1,3}구", text)
             if m and not (ko == "광주" and "경기" in text[max(0, m.start() - 4):m.start()]):
                 add(ko, m.start())
+    for gu, ko in UNIQUE_DISTRICTS.items():                           # '유성구 …'처럼 광역시 이름 없이 구 이름만
+        pos = text.find(gu)
+        if pos >= 0 and ko in (cities or {}):
+            add(ko, pos)
     if names:
         for m in re.finditer(r"(" + PROVINCES + r")(" + "|".join(re.escape(n) for n in names) + r")", text):
             prov, ko = m.group(1), m.group(2)
@@ -2731,6 +2745,15 @@ def stay_categories(cfg: dict) -> set:
     return {"숙박"} | {c for c, t in types.items() if re.search(r"accommodation|hotel|lodging", str(t), re.I)}
 
 
+def stay_area_city(name: str, cities: dict) -> str:
+    """숙소 이름의 동네 이름으로 도시(예: 'OO 유성 1호점' → Daejeon). 모르면 빈칸."""
+    text = compact(name or "")
+    for area, ko in STAY_AREA_NAMES.items():
+        if area in text and ko in (cities or {}):
+            return cities[ko]
+    return ""
+
+
 def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
     """숙박 영수증마다 인보이스와 숙박 승인 메일을 묶습니다(올리는 차례: 영수증 → 인보이스 → 승인 메일).
     인보이스: 같은 사업자번호·같은 금액·같은 날짜·한 시간 안에 찍은 숙박 영수증에 붙이고, 영수증에서 못 읽은 날짜·금액은
@@ -2791,6 +2814,9 @@ def group_stay_bundles(receipts: list, tm, cfg=None) -> int:
         best.vendor = invoice_title(inv.ocr_text) or inv.vendor or best.vendor   # 예약 회사보다 인보이스의 호텔 이름(큰 제목)
         if inv.city and (not best.city or best.city in low_cities):  # 인터넷 예약 전표의 서울 주소보다 호텔 인보이스 주소
             best.city = inv.city
+        if not best.city or best.city in low_cities:       # 주소를 못 읽었으면 숙소 이름의 동네(예: 'OO 유성 1호점' → 대전)
+            area = stay_area_city(best.vendor, cities)
+            best.city = area or best.city
         if not best.is_receipt:
             best.is_receipt = changed = True
         if changed:
@@ -3578,6 +3604,60 @@ JS_COUNT_CARDS = r"""
 """
 
 
+# 화면 맨 앞에 보이는지: 경비 화면을 열어도 뒤에 리포트 목록이 그대로 깔려 있어서(2026-11-16 실행 기록의 단추 목록),
+# 가려진 리포트의 Edit·체크박스·Accommodation 글자를 누르지 않게 화면 그 자리의 맨 위 요소인지 봅니다.
+# 화면 밖(아래로 내려야 보이는 곳)은 알 수 없어서 맨 앞으로 봅니다.
+JS_ON_TOP_FN = r"""
+const onTop = e => {
+  const r = e.getBoundingClientRect();
+  if (!r.width || !r.height) return false;
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return true;
+  const hit = document.elementFromPoint(x, y);
+  return !!hit && (hit === e || e.contains(hit) || hit.contains(e));
+};
+"""
+
+JS_ON_TOP = "e => {" + JS_ON_TOP_FN + " return onTop(e); }"
+
+
+JS_MARK_RECEIPT_ADD = r"""
+({add, near}) => {
+  // 경비 영수증 칸(사진 아래 Remove · Add · Open)의 [Add]. 2026-11-16 실제 화면에서 이름이 정확히 'Add'인 단추로는
+  // 못 찾았음 → 글자가 Add뿐인 것(아이콘 글자·기호가 붙어도 됨)이나 이름표가 Add…receipt인 것 중
+  // 가까이에 Remove·Open이 있고 맨 앞에 보이는 것.
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  ON_TOP
+  document.querySelectorAll('[data-concur-auto-add]').forEach(e => e.removeAttribute('data-concur-auto-add'));
+  const lower = list => list.map(a => a.toLowerCase());
+  const addSet = lower(add), groups = near.map(lower);
+  const words = e => (e.innerText || '').replace(/[^A-Za-z가-힣]+/g, ' ').trim().toLowerCase().split(' ').filter(Boolean);
+  const label = e => ((e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || '')).trim().toLowerCase();
+  const isAdd = e => { const w = words(e), l = label(e);
+    return (w.length >= 1 && w.length <= 2 && w.every(x => addSet.includes(x)))
+      || addSet.some(a => l === a || (l.startsWith(a + ' ') && /receipt|영수증/.test(l))); };
+  const sel = 'button, [role=button], a, [tabindex], div, span';
+  const clickSel = 'button, [role=button], a, [tabindex]';
+  let cands = Array.from(new Set(Array.from(document.querySelectorAll(sel + ', i, b, strong, em, p, label'))
+    .filter(e => vis(e) && isAdd(e)).map(e => e.closest(clickSel) || e))).filter(isAdd);
+  cands = cands.filter(e => !cands.some(o => o !== e && e.contains(o)));   // 단추를 감싼 상자는 빼고 단추만
+  const hasNear = e => {
+    for (let box = e.parentElement, k = 0; box && k < 5; box = box.parentElement, k++) {
+      const ws = Array.from(box.querySelectorAll(sel)).filter(vis).map(x => words(x).concat(label(x).split(/\s+/)));
+      if (groups.every(g => ws.some(w => w.some(x => g.includes(x))))) return true;
+    }
+    return false;
+  };
+  const good = cands.filter(e => onTop(e) && hasNear(e));
+  const pick = good[0] || (cands.filter(onTop).length === 1 ? cands.filter(onTop)[0] : null);
+  if (!pick) return false;
+  pick.setAttribute('data-concur-auto-add', '1');
+  try { pick.scrollIntoView({block: 'center'}); } catch (e) {}
+  return true;
+}
+""".replace("ON_TOP", JS_ON_TOP_FN)
+
+
 JS_LIBRARY_NAMES = r"""
 () => {
   // 화면에 보이는 사진 파일 이름들(보관함에서 카드를 못 찾았을 때 실행 기록에 남김)
@@ -3590,13 +3670,14 @@ JS_LIBRARY_NAMES = r"""
 
 JS_VISIBLE_BUTTONS = r"""
 () => {
-  // 화면에 보이는 단추 글자들(단추를 못 찾았을 때 실행 기록에 남김)
+  // 화면 맨 앞에 보이는 단추 글자들(단추를 못 찾았을 때 실행 기록에 남김. 뒤에 깔린 리포트 화면의 단추는 뺌)
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-  return Array.from(new Set(Array.from(document.querySelectorAll('button, [role=button], a')).filter(vis)
+  ON_TOP
+  return Array.from(new Set(Array.from(document.querySelectorAll('button, [role=button], a')).filter(e => vis(e) && onTop(e))
     .map(e => ((e.innerText || '').trim() || e.getAttribute('aria-label') || e.getAttribute('title') || '').replace(/\s+/g, ' ').slice(0, 30))
-    .filter(Boolean))).slice(0, 25);
+    .filter(Boolean))).slice(0, 40);
 }
-"""
+""".replace("ON_TOP", JS_ON_TOP_FN)
 
 
 JS_ATTACHED_STATE = r"""
@@ -3620,8 +3701,16 @@ JS_MARK_ATTACH = r"""
   document.querySelectorAll('[data-concur-auto-attach]').forEach(e => e.removeAttribute('data-concur-auto-attach'));
   const word = list => new RegExp('^[^A-Za-z가-힣]*(?:' + list.join('|') + ')[^A-Za-z가-힣]*$', 'i');
   const re = word(words), del = word(['Delete', '삭제']);
-  const cands = Array.from(document.querySelectorAll('button, [role=button], a, div, span'))
-    .filter(e => vis(e) && re.test(e.innerText || '') && !Array.from(e.children).some(c => re.test(c.innerText || '')));
+  ON_TOP
+  // 'add Add'처럼 아이콘 글자가 붙어도 단추 글자로 봄(낱말이 모두 그 단추 글자)
+  const plain = list => list.map(a => a.replace(/\\/g, '').toLowerCase());
+  const ws = e => (e.innerText || '').replace(/[^A-Za-z가-힣]+/g, ' ').trim().toLowerCase().split(' ').filter(Boolean);
+  const is = (e, list) => { const w = ws(e), set = plain(list);
+    return word(list).test(e.innerText || '') || (w.length >= 1 && w.length <= 2 && w.every(x => set.includes(x))); };
+  const clickSel = 'button, [role=button], a';
+  let cands = Array.from(new Set(Array.from(document.querySelectorAll('button, [role=button], a, div, span, i, b, strong, em, p'))
+    .filter(e => vis(e) && onTop(e) && is(e, words)).map(e => e.closest(clickSel) || e))).filter(e => is(e, words));
+  cands = cands.filter(e => !cands.some(o => o !== e && e.contains(o)));
   const mark = c => { (c.closest('button, [role=button], a') || c).setAttribute('data-concur-auto-attach', '1'); return true; };
   const want = (name || '').trim().toLowerCase(), core = (stem || '').trim().toLowerCase();
   const near = t => { t = (t || '').toLowerCase(); return (want && t.includes(want)) || (core && t.includes(core)); };
@@ -3636,15 +3725,15 @@ JS_MARK_ATTACH = r"""
   for (const c of cands) {
     let box = c.parentElement;
     for (let k = 0; k < 4 && box; k++, box = box.parentElement) {
-      if (Array.from(box.querySelectorAll('button, [role=button], a, div, span')).some(e => vis(e) && del.test(e.innerText || '')
-          && !Array.from(e.children).some(x => del.test(x.innerText || '')))) return mark(c);
+      if (Array.from(box.querySelectorAll('button, [role=button], a, div, span')).some(e => vis(e) && is(e, ['Delete', '삭제'])
+          && !Array.from(e.children).some(x => is(x, ['Delete', '삭제'])))) return mark(c);
     }
   }
-  const one = cands.filter(c => word(single).test(c.innerText || ''));
+  const one = cands.filter(c => is(c, single));
   if (one.length === 1) return mark(one[0]);
   return false;
 }
-"""
+""".replace("ON_TOP", JS_ON_TOP_FN)
 
 
 JS_LABELED_SELECT = r"""
@@ -3784,38 +3873,61 @@ JS_CLOSE_ALERTS = r"""
 
 
 JS_ITEM_CHECKBOX = r"""
-(heading) => {
-  // 'Itemizations (1)' 목록에서 고칠 항목의 체크박스(오류가 있는 줄 먼저, 없으면 첫 줄)를 표시합니다.
+({heading, edit}) => {
+  // 'Itemizations (1)' 목록에서 고칠 항목(오류가 있는 줄 먼저, 없으면 첫 줄)의 체크박스·제목 글자·[Edit]를 표시합니다.
+  // 경비 화면 뒤에 리포트 목록(Accommodation·Errors 글자와 체크박스, Edit 단추)이 가려진 채 깔려 있어서
+  // (2026-11-16 실제 실행), 'Itemizations (n)' 제목이 든 부분 안에서 맨 앞에 보이는 것만 봅니다.
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-  document.querySelectorAll('[data-concur-auto]').forEach(e => e.removeAttribute('data-concur-auto'));
-  const head = Array.from(document.querySelectorAll('h1, h2, h3, h4, div, span, p')).filter(vis)
-    .filter(e => new RegExp('^(?:' + heading.join('|') + ')\\s*\\(\\d+\\)$', 'i').test((e.innerText || '').trim()))
+  ON_TOP
+  ['data-concur-auto', 'data-concur-auto-item', 'data-concur-auto-edit'].forEach(a =>
+    document.querySelectorAll('[' + a + ']').forEach(e => e.removeAttribute(a)));
+  const headRe = new RegExp('^(?:' + heading.join('|') + ')\\s*\\(\\d+\\)$', 'i');
+  const head = Array.from(document.querySelectorAll('h1, h2, h3, h4, div, span, p')).filter(e => vis(e) && onTop(e))
+    .filter(e => headRe.test((e.innerText || '').trim()))
     .sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length)[0];
   const top = head ? head.getBoundingClientRect().bottom : 0;
+  const allBox = 'input[type=checkbox], [role=checkbox]';
   const shownBox = c => vis(c) ? c : (c.closest('label') || c.parentElement);
-  const boxes = Array.from(document.querySelectorAll('input[type=checkbox], [role=checkbox]'))
-    .filter(c => { const s = shownBox(c); return s && vis(s) && s.getBoundingClientRect().top >= top - 2; })
-    .filter(c => !/select all|모두 선택|전체 선택/i.test((c.getAttribute('aria-label') || '') + ' ' + ((c.closest('label') || {}).innerText || '')));
+  const selectAll = c => /select all|모두 선택|전체 선택/i.test((c.getAttribute('aria-label') || '') + ' ' + ((c.closest('label') || {}).innerText || ''));
+  let area = document.body;                               // 'Itemizations (n)' 제목과 항목 체크박스가 함께 든 가장 작은 부분
+  if (head) {
+    for (let b = head.parentElement; b; b = b.parentElement) {
+      if (Array.from(b.querySelectorAll(allBox)).some(c => !selectAll(c))) { area = b; break; }
+    }
+  }
+  const boxes = Array.from(area.querySelectorAll(allBox))
+    .filter(c => { const s = shownBox(c); return s && vis(s) && onTop(s.parentElement || s) && s.getBoundingClientRect().top >= top - 2; })
+    .filter(c => !selectAll(c));
   const rowOf = c => { let r = c; for (let k = 0; k < 6 && r.parentElement; k++) { r = r.parentElement;
-      if (r.querySelectorAll('input[type=checkbox], [role=checkbox]').length > 1) return null;
+      if (r.querySelectorAll(allBox).length > 1) return null;
       if (/\d/.test(r.innerText || '') && (r.innerText || '').trim().length > 10) return r; } return r; };
   const withError = boxes.find(c => { const r = rowOf(c); return r && /error|오류/i.test(r.innerText || ''); });
   const pick = withError || boxes[0];
   if (!pick) return false;
   pick.setAttribute('data-concur-auto', 'check');
-  // 사용자 설명: 오류가 뜬 항목(예: Accommodation)을 눌러 들어가면 고칠 수 있음 → 줄의 제목 글자에도 표시
-  document.querySelectorAll('[data-concur-auto-item]').forEach(e => e.removeAttribute('data-concur-auto-item'));
+  // 사용자 설명: 'Errors' 글자 바로 위의 항목 이름(Accommodation)을 눌러 들어가면 고칠 수 있음 → 그 글자에 표시
   const row = rowOf(pick);
   if (row) {
-    const title = Array.from(row.querySelectorAll('*')).filter(e => e.children.length === 0 && vis(e)).find(e => {
-      const t = (e.innerText || '').trim();
-      return /[A-Za-z가-힣]{3,}/.test(t) && !/error|오류|krw|원|\d{1,2}\/\d{1,2}\/\d{4}|select/i.test(t);
-    });
+    const leaves = Array.from(row.querySelectorAll('*')).filter(e => e.children.length === 0 && vis(e) && onTop(e));
+    const names = leaves.filter(e => { const t = (e.innerText || '').trim();
+      return /[A-Za-z가-힣]{3,}/.test(t) && !/error|오류|krw|원|\d{1,2}\/\d{1,2}\/\d{4}|select/i.test(t); });
+    const err = leaves.find(e => /error|오류/i.test(e.innerText || ''));
+    let title = names[0];
+    if (err) {
+      const er = err.getBoundingClientRect();
+      const above = names.filter(e => { const r = e.getBoundingClientRect(); return r.bottom <= er.top + 4 && Math.abs(r.left - er.left) < 80; })
+        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+      title = above[0] || title;                          // 같은 줄 맨 위 글자(날짜 위의 Accommodation)
+    }
     if (title) title.setAttribute('data-concur-auto-item', '1');
   }
+  // 체크한 뒤 누를 [Edit]: 같은 부분 안의, 맨 앞에 보이는 것(리포트 화면의 Edit가 아니라)
+  const editRe = new RegExp('^\\s*(?:' + edit.join('|') + ')\\s*$', 'i');
+  const eb = Array.from(area.querySelectorAll('button, [role=button], a')).find(e => vis(e) && onTop(e) && editRe.test(e.innerText || ''));
+  if (eb) eb.setAttribute('data-concur-auto-edit', '1');
   return true;
 }
-"""
+""".replace("ON_TOP", JS_ON_TOP_FN)
 
 
 JS_INSPECT = r"""
@@ -4420,6 +4532,7 @@ class ConcurBot:
                 if auto:
                     known = self._email_step() or self._email_link_step()
                     if (not known and not self._diagnosed and SIGNIN_URL.search(self.page.url or "")
+                            and "setsession" not in (self.page.url or "")         # 메일 링크로 로그인한 뒤 잠깐 거치는 주소
                             and time.time() - started > self.diagnose_after_s):
                         self._diagnosed = True
                         self._diagnose_login()
@@ -4813,10 +4926,11 @@ class ConcurBot:
                 self.log(f"   Itemizations: Room Rate {amount:,}원 넣고 저장")
             # 2. 목록에서 항목 체크 → [Edit]
             self.close_alerts()
+            item_args = {"heading": self._alts("Itemizations"), "edit": [re.escape(a) for a in self._alts("편집")]}
             found = False
             deadline = time.time() + 10
             while time.time() < deadline and not found:
-                found = page.evaluate(JS_ITEM_CHECKBOX, self._alts("Itemizations"))
+                found = page.evaluate(JS_ITEM_CHECKBOX, item_args)
                 if not found:
                     time.sleep(0.5)
             if not found:
@@ -4826,6 +4940,10 @@ class ConcurBot:
             title = page.locator("[data-concur-auto-item]")
             if title.count():                             # 오류가 뜬 항목(Accommodation)을 눌러 들어감(사용자 설명)
                 self.close_alerts()                       # Alerts 창이 목록을 가리면 눌리지 않음
+                try:
+                    self.log(f"   Itemizations: 항목 '{title.first.inner_text().strip()[:30]}'을(를) 눌러 엽니다.")
+                except Exception:
+                    pass
                 tries = [lambda: title.first.click(timeout=3000),                       # 보통 클릭
                          lambda: title.first.evaluate("e => e.click()"),                  # 화면 위를 가려도 누름
                          lambda: title.first.evaluate(                                    # 줄 전체(링크·단추)를 누름
@@ -4844,12 +4962,19 @@ class ConcurBot:
                         self.log(f"   Itemizations: 항목을 눌러 수정 화면을 열었습니다({how + 1}번째 방법).")
                         break
             if not opened:                                # 안 되면 체크 → [Edit]
+                self.log("   Itemizations: 항목을 눌러도 열리지 않아 체크 → [Edit]로 엽니다.")
                 self.close_alerts()
-                page.evaluate(JS_ITEM_CHECKBOX, self._alts("Itemizations"))
+                page.evaluate(JS_ITEM_CHECKBOX, item_args)
                 self.click_checkbox(page.locator("[data-concur-auto]").first)
                 time.sleep(0.4)
                 self.close_alerts()
-                self._click_button("편집")
+                page.evaluate(JS_ITEM_CHECKBOX, item_args)    # 체크한 뒤에 켜진 [Edit]를 다시 표시
+                edit_btn = self._first_shown([page.locator("[data-concur-auto-edit]")])
+                if edit_btn is not None:
+                    edit_btn.click(timeout=5000)
+                    time.sleep(0.8)
+                else:
+                    self._click_button("편집")
             # 3. 빈 칸 채우고 [Save Itemization]
             filled = self.fill_blank_item_fields(getattr(self, "last_values", {}) or {}, checks)
             self._click_button("Save Itemization")
@@ -5075,6 +5200,20 @@ class ConcurBot:
     def _available_open(self) -> bool:
         return self._first_shown([self.page.get_by_text(self._re("사용 가능한 영수증"))]) is not None
 
+    def _receipt_add_button(self):
+        """경비 영수증 칸(사진 아래 Remove · Add · Open)의 [Add]. 화면 아래쪽에 있어도 찾아서 보이게 내립니다.
+        영수증 칸이 다른 틀(iframe) 안에 있을 수도 있어 틀마다 봅니다."""
+        page = self.page
+        args = {"add": self._alts("영수증 더하기"), "near": [self._alts("영수증 빼기"), self._alts("영수증 열기")]}
+        frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
+        for fr in frames:
+            try:
+                if fr.evaluate(JS_MARK_RECEIPT_ADD, args):
+                    return fr.locator("[data-concur-auto-add]").first
+            except Exception:
+                continue
+        return None
+
     def _open_available(self, again: bool = False) -> bool:
         """[Choose From Available Receipts](두 번째 사진부터는 [Add])를 눌러 보관함을 엽니다."""
         page = self.page
@@ -5086,7 +5225,8 @@ class ConcurBot:
             locs = [page.get_by_role("button", name=self._re("영수증 더하기"))] + locs
         deadline = time.time() + self.upload_wait_s
         while time.time() < deadline:
-            el = self._first_shown(locs)
+            el = self._receipt_add_button() if again else None
+            el = el if el is not None else self._first_shown(locs)
             if el is not None:
                 try:
                     el.click()
@@ -5481,10 +5621,23 @@ class ConcurBot:
         else:
             page.get_by_role("link", name=re.compile(re.escape(getattr(self, "report_name", "") or ""), re.I)).first.click()
         deadline = time.time() + self.timeout_ms / 1000
-        while self._report_entry() is None:
+        while not self._report_shown():
             if time.time() >= deadline:
                 raise RuntimeError("리포트 화면으로 돌아가지 못했습니다([Add Expense]를 찾지 못함).")
             time.sleep(0.3)
+
+    def _on_top(self, el) -> bool:
+        """화면 그 자리의 맨 앞 요소인지(경비 화면 뒤에 가려진 리포트 화면의 단추가 아닌지)"""
+        try:
+            return bool(el.evaluate(JS_ON_TOP))
+        except Exception:
+            return True
+
+    def _report_shown(self) -> bool:
+        """리포트 화면(경비 목록)이 맨 앞에 보이는지. 경비를 열어도 리포트 화면이 뒤에 깔려 있어서
+        [Add Expense]가 '보이는' 것만으로는 리포트로 돌아왔는지 알 수 없음(2026-11-16 실행 기록)."""
+        entry = self._report_entry()
+        return entry is not None and self._on_top(entry[1])
 
     def _report_entry(self):
         """리포트 화면에서 새 경비를 여는 곳: [Add Expense] 버튼, 경비가 하나도 없으면 'Manually Create Expense' 카드"""
@@ -5593,7 +5746,7 @@ class ConcurBot:
         """[Save Expense]를 누르고 리포트 화면으로 돌아올 때까지 기다립니다. '필수 정보가 빠졌다'는 창이 뜨면
         숙박(stay_amount)은 [Yes] → Itemizations 넣기 → 다시 저장, 그 밖은 [No]('확인 필요')."""
         page = self.page
-        back = lambda: self._report_entry() is not None
+        back = self._report_shown                            # 리포트 화면이 맨 앞에 보이면 저장이 끝난 것
 
         def press():
             page.get_by_role("button", name=self._re("경비 저장")).first.click()
@@ -5621,7 +5774,7 @@ class ConcurBot:
     def open_expense_row(self, date_us: str, amount: int) -> bool:
         """리포트 경비 목록에서 날짜·금액이 같은 경비를 체크하고 [Edit]로 엽니다(open_first_expense와 같은 방법)."""
         page = self.page
-        if self._report_entry() is None:                 # 저장 뒤 리포트 화면이 아니면 돌아감
+        if not self._report_shown():                     # 저장 뒤 리포트 화면이 아니면 돌아감
             try:
                 self.back_to_report()
             except Exception:

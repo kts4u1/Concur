@@ -267,3 +267,15 @@ def test_booking_slip_ignores_remembered_city():
     memory = {slip.biz_no: {"분류": "숙박", "도시": "Daejeon (ex Taejon), KOREA, REPUBLIC OF", "병원 영문": "Gana Hospital"}}
     assert slip.biz_no and ca.apply_store_memory(slip, memory, ca.default_settings())
     assert slip.category == "숙박" and slip.city.startswith("Seoul") and slip.hospital_en == ""
+
+
+def test_city_from_district_or_stay_name():
+    """주소에 광역시 이름 없이 구 이름만 있거나(유성구 → 대전), 주소를 못 읽어도 숙소 이름의 동네(… 유성 1호점 → 대전)"""
+    c = ca.DEFAULT_CITIES
+    assert ca.detect_city(ca.compact("주소 유성구 봉명동 1"), c).startswith("Daejeon")
+    assert ca.detect_city(ca.compact("서울 구로구 디지털로 1"), c).startswith("Seoul")      # 중구·구로구 같은 구는 그대로
+    slip = make("IMG_5646.HEIC", NOL_SLIP)
+    inv = make("IMG_5647.HEIC", "가나 쉼터 유성 1호점\n인보이스\n입실 일자 퇴실 일자 객실 타입", datetime(2026, 11, 15, 10, 1))
+    placed(slip, inv)
+    assert ca.group_stay_bundles([slip, inv], OCT, ca.default_settings()) == 1
+    assert slip.vendor == "가나 쉼터 유성 1호점" and slip.city.startswith("Daejeon")
