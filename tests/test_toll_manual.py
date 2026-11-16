@@ -120,7 +120,7 @@ TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for s
 
 
 def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False,
-                slow_close=False, no_choose_new=False, save_busy=False, covered_save=False):
+                slow_close=False, no_choose_new=False, save_busy=False, covered_save=False, real_pane=False):
     """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
     bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
     icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')
@@ -128,7 +128,10 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
     slow_close: 사진을 붙이면 보관함의 카드는 바로 사라지지만 보관함은 1.5초 뒤에 닫힘
     no_choose_new: 저장하기 전의 새 경비 화면에는 [Choose From Available Receipts]가 없음(저장한 뒤 다시 열어야 붙임)
     save_busy: 사진을 붙인 뒤 4초 동안은 [Save Expense]를 눌러도 저장되지 않음(사진을 합치는 중)
-    covered_save: 위에 고정된 머리띠(회사 로고 줄)가 있고, 사진을 붙이면 화면이 내려가 [Save Expense]가 머리띠 밑에 가려짐"""
+    covered_save: 위에 고정된 머리띠(회사 로고 줄)가 있고, 사진을 붙이면 화면이 내려가 [Save Expense]가 머리띠 밑에 가려짐
+    real_pane: 실제 Concur처럼 보관함을 열어도 경비 영수증 칸이 그 밑에 그대로 깔려 있고(보관함이 덮음), 경비 칸의
+               [Upload New Receipt](#upload-receipt-button)는 보관함 밖에 보여 누를 수 있으며, 그것으로 올리면 사진이
+               보관함이 아니라 경비에 바로 붙고('direct …') 보관함이 닫힘(2026-11-16 실행 기록)"""
     js = lambda on: "true" if on else "false"
     html = REPORT
     if behind:
@@ -152,6 +155,23 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
         old = "editing = null; resetPane();"
         assert old in html
         html = html.replace(old, "editing = null; resetPane(); show('choose', 0);")
+    if real_pane:
+        old_open = "function openAvail() { shownCards = 4; show('avail', 1); show('pane', 0); drawCards(); }"
+        old_up = '<button id="up" onclick="document.getElementById(\'f\').click()">Upload New Receipt</button>'
+        old_f = '<input type="file" id="f" style="display:none" onchange="toLibrary(this)" MULTIPLE>'
+        assert old_open in html and old_up in html and old_f in html
+        html = (html.replace(old_open, "function openAvail() { shownCards = 4; show('avail', 1); drawCards(); }")
+                .replace(old_up, old_up.replace('id="up"', 'id="upload-receipt-button"'))
+                .replace(old_f, old_f.replace("toLibrary(this)", "attachDirect(this)"))
+                .replace("function resetPane() {", "function attachDirect(inp) { Array.from(inp.files).forEach(f => {\n"
+                         "  uploads.push(f.name); steps.push('direct ' + f.name); }); inp.value = ''; closeAvail();\n"
+                         "  ['drop', 'upload-receipt-button', 'choose'].forEach(id => show(id, 0)); show('viewer', 1);\n"
+                         "  document.getElementById('vname').textContent = uploads[0]; show('pdf', uploads.length > 1); }\n"
+                         "function resetPane() {")
+                .replace("['drop', 'up', 'choose']", "['drop', 'upload-receipt-button', 'choose']")
+                + "<style>#form { position: relative } #avail { position: absolute; inset: 0; z-index: 20; background: #fff }"
+                  " #upload-receipt-button { position: relative; z-index: 30 } #dlg { position: relative; z-index: 40; background: #fff }</style>")
+        assert "'up'" not in html
     if slow_close:
         old = "show('dlg', 0);\n  closeAvail();"
         assert old in html
@@ -364,6 +384,63 @@ def test_save_button_under_fixed_top_bar(browser, tmp_path):
     assert rows[0]["오류"] == "" and rows[0]["확인 필요"] == ""
     assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
     assert pg.evaluate("steps")[-1] == "save" and pg.inner_text("#count") == "Expenses (1)"
+
+
+def test_upload_goes_to_panel_not_expense_pane(browser, tmp_path):
+    """2026-11-16 실행 기록: 보관함에 없는 사진을 올릴 때 보관함 밑에 깔린 경비 칸의 [Upload New Receipt]를 눌러 사진이
+    경비에 바로 붙고(그 사진 한 장만), 그 이름을 보관함 카드로 잘못 봐서 나머지를 못 붙였음
+    → 보관함 안의 [Upload New Receipt]로 올리고 차례대로 붙임"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, real_pane=True, library=("IMG_5648.jpg", "IMG_5652.jpg"))
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert not [s for s in steps if s.startswith("direct")]                        # 경비 칸의 업로드 단추를 누르지 않음
+    assert [s for s in steps if s.startswith("library")] == ["library IMG_5651.jpg"]    # 없는 사진만 보관함에
+    assert [x for x in steps if x.startswith(("attach", "add "))] == [
+        "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert rows[0]["확인 필요"] == "" and steps[-1] == "save" and steps.count("save") == 1
+
+
+def test_resume_after_a_middle_photo_was_attached_directly(browser, tmp_path):
+    """②를 다시 돌렸을 때 가운데 사진(IMG_5651) 한 장만 붙어 있는 경비(지난 실행에서 바로 붙음): 나머지 두 장을 [Add]로
+    붙이고 순서 확인을 남김(예전에는 첫 사진이 아니라고 '이미 첨부됨'으로 건너뜀)"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, real_pane=True, library=("IMG_5648.jpg", "IMG_5652.jpg"))
+    pg.goto("http://concur.test/report")
+    pg.evaluate("() => { openDialog(); pickType(document.querySelector('.t')); }")
+    pg.evaluate("""() => { uploads = ['IMG_5651.jpg']; ['drop', 'upload-receipt-button', 'choose'].forEach(id => show(id, 0));
+                           show('viewer', 1); document.getElementById('vname').textContent = 'IMG_5651.jpg'; }""")
+    bot = make_bot(pg, tmp_path)
+    s1, s2, s3 = photos(tmp_path)
+    done, checks = [], []
+    ok = bot.attach_from_available([s1, s2, s3], done, checks)
+    assert ok and pg.evaluate("uploads") == ["IMG_5651.jpg", "IMG_5648.jpg", "IMG_5652.jpg"]
+    assert any("순서 확인" in c for c in checks) and "이미 첨부됨(IMG_5651.jpg)" in done
+
+
+REPORT_BEHIND_SCROLLED = """<!doctype html><meta charset="utf-8">
+<div id="report"><h1>Monthly Expense for Oct</h1><button id="addbtn">Add Expense</button><div style="height:200px"></div></div>
+<div id="form" style="position:absolute; top:0; left:0; right:0; min-height:4000px; z-index:10; background:#fff">
+  <div style="height:90px"></div><button id="save" onclick="window.pressed = (window.pressed || 0) + 1">Save Expense</button>
+  <div style="height:3800px">Receipts</div></div>
+<div id="bar" style="position:fixed; top:0; left:0; right:0; height:60px; background:#eee; z-index:50">LOGO</div>"""
+
+
+def test_report_check_does_not_scroll_or_misread_hidden_report(browser, tmp_path):
+    """2026-11-16 사용자 화면: 저장을 기다리며 '리포트로 돌아왔나'를 볼 때 뒤에 깔린 리포트의 [Add Expense]를 보이게 옮기느라
+    화면이 위아래로 흔들렸고, 화면 밖으로 밀린 그 단추를 '보인다'고 봐서 저장이 안 됐는데 끝났다고 넘어감(숙박에서 멈춤).
+    → 화면을 옮기지 않고, 경비 화면([Save Expense])이 열려 있으면 리포트가 아님. 내려간 화면의 [Save Expense]는 올려서 누름."""
+    pg = browser.new_page()
+    pg.set_content(REPORT_BEHIND_SCROLLED)
+    pg.evaluate("window.scrollTo(0, 1500)")
+    bot = make_bot(pg, tmp_path)
+    assert bot._report_shown() is False
+    assert pg.evaluate("window.scrollY") == 1500                                   # 화면을 옮기지 않음
+    bot._press_top("경비 저장")
+    assert pg.evaluate("window.pressed") == 1                                       # 올려서 누름
+    pg.evaluate("document.getElementById('form').style.display = 'none'")
+    assert bot._report_shown() is True
 
 
 def test_receipt_stem():
