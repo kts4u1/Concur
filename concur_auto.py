@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 보관함 안에서 올리기·화면 안 흔들기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 저장 전 사진 한 번에 올리기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -5911,6 +5911,38 @@ class ConcurBot:
             self.screenshot("attach_receipt")
         return not missed
 
+    def attach_before_save(self, files: list, done: list, checks: list) -> list:
+        """저장하기 전의 새 경비에 사진을 붙입니다 → 못 붙인 사진(저장한 뒤 다시 열어 [Add]로 붙일 것).
+        저장 전 화면은 사진을 한 장 붙이면 그 아래에 [Remove]만 있고 [Add]가 없어서(2026-11-16 23:26 사용자 화면·실행 기록),
+        보관함에서 한 장씩 고르는 방식으로는 첫 장만 붙었음. 경비 칸의 [Upload New Receipt]로 여러 장을 한 번에 올리면
+        차례대로 합쳐져 붙음('1 의 3', 2026-11-16 사용자 화면). 파일 고르기 창이 한 장만 받거나, 올린 사진이 보관함으로만
+        가면 남은 사진을 돌려줍니다."""
+        files = [Path(f) for f in files]
+        sub_done, sub_checks = [], []
+        try:
+            sent = self._attach_one(files, sub_done, sub_checks)
+        except Exception as e:
+            self.log(f"   저장 전에 사진을 올리지 못했습니다: {str(e).splitlines()[0][:80]}")
+            return files
+        if not sent:
+            return files
+        empty = self._first_shown([self.page.get_by_text(self._re("영수증 끌어 놓기", exact=False))]) is not None
+        if empty or self._upload_control() is not None:   # 경비에 안 붙고 보관함으로만 감 → 저장한 뒤 보관함에서
+            self.log(f"   저장 전 화면에서 올린 사진이 경비에 붙지 않았습니다: {', '.join(f.name for f in files[:sent])}")
+            return files
+        got = files[:sent]
+        if sent > 1:                                      # 여러 장이 합쳐지면 PDF 보기('1 의 3')가 생김
+            try:
+                state = self.page.evaluate(JS_ATTACHED_STATE) or {}
+            except Exception:
+                state = {"pdf": True}
+            if not state.get("pdf"):
+                shown = {receipt_stem(n).lower() for n in state.get("names", [])}
+                got = [f for f in files[:sent] if receipt_stem(f.name).lower() in shown] or files[:1]
+        done.append(f"영수증 첨부({', '.join(f.name for f in got)})")
+        self.log(f"   저장 전에 영수증 {len(got)}장을 한 번에 붙였습니다: {', '.join(f.name for f in got)}")
+        return [f for f in files if f not in got]
+
     def _attached_directly(self, names: list) -> list:
         """보관함에 올린 사진 중 보관함이 닫히고 경비 영수증 칸에 바로 붙은 것(이름이 영수증 칸에 보임)"""
         if not names or self._available_open():
@@ -6158,24 +6190,19 @@ class ConcurBot:
                 done += self.fill_expense(rec, None, checks)          # 칸을 채우고
                 if stay:
                     self.fill_vendor(rec, done, checks)
-                # 사진은 저장하기 전에 보관함에서 골라 붙임(사용자 요청 2026-11-16: 저장했다 다시 열 필요 없음)
+                # 사진은 저장하기 전에 붙임(사용자 요청 2026-11-16). 저장 전 화면에는 [Add]가 없어(사진 아래 [Remove]만)
+                # 경비 칸의 [Upload New Receipt]로 여러 장을 한 번에 올리고, 못 붙인 사진은 저장한 뒤 다시 열어 [Add]로 붙임
                 uploads = upload_files_for(rec, self.cfg, work_dir)
-                before = (len(done), len(checks))
-                attached = self.attach_receipt(uploads, done, checks, pick=True)
-                some = any(str(d).startswith("영수증 첨부(") for d in done[before[0]:])
-                retry = not attached and not some                 # 한 장도 못 붙였으면 예전처럼 저장한 뒤 다시 열어 붙임
-                if retry:
-                    del checks[before[1]:]
-                    del done[before[0]:]
-                    self.log("   저장하기 전에는 사진을 붙이지 못해, 저장한 뒤 다시 열어 붙입니다.")
+                left = self.attach_before_save(uploads, done, checks)
                 self.save_expense(checks, rec.total if stay else None)
                 rec.used_for = f"새 경비 {us} {rec.total:,}"
-                if retry:
+                if left:
+                    self.log(f"   저장하기 전에는 다 붙이지 못해({', '.join(f.name for f in left)}), 저장한 뒤 다시 열어 붙입니다.")
                     if self.open_expense_row(us, rec.total):
-                        self.attach_receipt(uploads, done, checks, pick=True)
+                        self.attach_from_available(uploads, done, checks)
                         self.save_expense(checks)
                     else:
-                        checks.append(f"영수증 직접 올리기(저장한 새 경비를 다시 열지 못함: {', '.join(p.name for p in uploads)})")
+                        checks.append(f"영수증 직접 올리기(저장한 새 경비를 다시 열지 못함: {', '.join(p.name for p in left)})")
                         self.screenshot("manual_reopen")
                 row["처리"] = ", ".join(done)
                 self.log(f"   새 경비 저장: {row['처리']}")

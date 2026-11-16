@@ -72,11 +72,12 @@ function drawCards() { document.getElementById('cards').innerHTML = library.slic
 function openAvail() { shownCards = 4; show('avail', 1); show('pane', 0); drawCards(); }
 function closeAvail() { show('avail', 0); show('pane', 1); }
 function openDlg(n) { current = n; document.getElementById('dname').textContent = NONAME ? '' : n;
-  document.getElementById('dbtn').textContent = uploads.length ? 'Add' : 'Attach'; show('dlg', 1); }
-function resetPane() { uploads = []; ['drop', 'up', 'choose'].forEach(id => show(id, 1)); show('viewer', 0); }
-function attachDlg() { uploads.push(current); steps.push((uploads.length > 1 ? 'add ' : 'attach ') + current); show('dlg', 0);
+  document.getElementById('dbtn').textContent = (uploads.length || window.had) ? 'Add' : 'Attach'; show('dlg', 1); }
+function resetPane() { uploads = []; window.had = 0; ['drop', 'up', 'choose'].forEach(id => show(id, 1)); show('viewer', 0); }
+function attachDlg() { uploads.push(current); steps.push((uploads.length > 1 || window.had ? 'add ' : 'attach ') + current); show('dlg', 0);
   closeAvail(); ['drop', 'up', 'choose'].forEach(id => show(id, 0)); show('viewer', 1);
-  document.getElementById('vname').textContent = uploads[0]; show('pdf', uploads.length > 1); }
+  document.getElementById('vname').textContent = window.had ? document.getElementById('vname').textContent : uploads[0];
+  show('pdf', uploads.length + (window.had || 0) > 1); }
 const TYPES = ['M card parking & toll', 'M card taxi', 'Parking & Toll', 'Public Transport', 'Taxi'];
 const lists = {city: ['Gwangju (ex Kwangju), KOREA, REPUBLIC OF', 'Seoul, KOREA, REPUBLIC OF'], lcrt: ['NA'],
                receipt: ['No Receipt', 'Receipt']};
@@ -99,7 +100,11 @@ function drawRows() { document.getElementById('list').innerHTML = expenses.map((
   '"></span><span>' + e.date + '</span><span>' + e.type + '</span><span>KRW ' +
   Number(String(e.amount).replace(/,/g, '')).toLocaleString('en-US') + '</span></div>').join(''); }
 function editSel() { const cb = document.querySelector('#list input:checked'); if (!cb) return;
-  editing = +cb.dataset.i; steps.push('edit'); show('report', 0); show('form', 1); resetPane(); }
+  editing = +cb.dataset.i; steps.push('edit'); show('report', 0); show('form', 1); resetPane();
+  const had = expenses[editing].uploads || []; window.had = had.length;            // 이미 붙은 영수증은 그대로 보임
+  if (had.length) { ['drop', 'up', 'choose'].forEach(id => show(id, 0)); show('viewer', 1); show('addr', 1);
+    if (document.getElementById('opn')) show('opn', 1);
+    document.getElementById('vname').textContent = had[0]; show('pdf', had.length > 1); } }
 function save() { steps.push('save');
   if (editing !== null) { saved = expenses[editing]; saved.uploads = saved.uploads.concat(uploads); }
   else { saved = {type: document.getElementById('type').textContent, date: document.getElementById('transactionDate-date-input-field-input').value,
@@ -120,7 +125,8 @@ TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for s
 
 
 def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False,
-                slow_close=False, no_choose_new=False, save_busy=False, covered_save=False, real_pane=False):
+                slow_close=False, no_choose_new=False, save_busy=False, covered_save=False, real_pane=False,
+                presave_no_add=False):
     """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
     bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
     icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')
@@ -131,7 +137,9 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
     covered_save: 위에 고정된 머리띠(회사 로고 줄)가 있고, 사진을 붙이면 화면이 내려가 [Save Expense]가 머리띠 밑에 가려짐
     real_pane: 실제 Concur처럼 보관함을 열어도 경비 영수증 칸이 그 밑에 그대로 깔려 있고(보관함이 덮음), 경비 칸의
                [Upload New Receipt](#upload-receipt-button)는 보관함 밖에 보여 누를 수 있으며, 그것으로 올리면 사진이
-               보관함이 아니라 경비에 바로 붙고('direct …') 보관함이 닫힘(2026-11-16 실행 기록)"""
+               보관함이 아니라 경비에 바로 붙고('direct …') 보관함이 닫힘(2026-11-16 실행 기록)
+    presave_no_add: 실제 Concur처럼 저장하기 전의 새 경비는 사진을 붙여도 그 아래에 [Remove]만 있고 [Add]·[Open]이 없음
+               (저장한 뒤 다시 열면 생김, 2026-11-16 23:26 사용자 화면)"""
     js = lambda on: "true" if on else "false"
     html = REPORT
     if behind:
@@ -172,6 +180,16 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
                 + "<style>#form { position: relative } #avail { position: absolute; inset: 0; z-index: 20; background: #fff }"
                   " #upload-receipt-button { position: relative; z-index: 30 } #dlg { position: relative; z-index: 40; background: #fff }</style>")
         assert "'up'" not in html
+    if presave_no_add:
+        old_btns = '<button id="addr" onclick="openAvail()">Add</button><button>Open</button>'
+        assert old_btns in html and "function pickType(el) {" in html and "editing = +cb.dataset.i;" in html
+        html = (html.replace(old_btns, '<button id="addr" onclick="openAvail()">Add</button><button id="opn">Open</button>')
+                .replace("function pickType(el) {", "function pickType(el) { window.presave = true;")
+                .replace("editing = +cb.dataset.i;", "editing = +cb.dataset.i; window.presave = false;")
+                .replace("show('pdf', uploads.length > 1);",
+                         "show('pdf', uploads.length > 1); show('addr', !window.presave); show('opn', !window.presave);")
+                .replace("show('pdf', uploads.length + (window.had || 0) > 1);",
+                         "show('pdf', uploads.length + (window.had || 0) > 1); show('addr', !window.presave); show('opn', !window.presave);"))
     if slow_close:
         old = "show('dlg', 0);\n  closeAvail();"
         assert old in html
@@ -243,7 +261,8 @@ def test_manual_toll_expense(page, tmp_path):
     assert [x for x in steps if x.startswith(("attach", "add "))] == [            # 첫 장 Attach, 다음 장은 Add
         "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
     assert "card icon" not in steps                                                # 'Receipt Image' 창의 [Attach]를 누름
-    assert steps[-1] == "save" and steps.count("save") == 1 and "edit" not in steps   # 사진을 붙이고 한 번만 저장(2026-11-16)
+    # 이 가짜 화면은 저장 전 화면에서 올린 사진이 보관함으로만 감 → 저장한 뒤 다시 열어 보관함에서 붙임(2026-11-16)
+    assert steps.count("save") == 2 and steps.index("save") < steps.index("edit") < steps.index("attach IMG_5648.jpg")
     assert saved["vendor"] == ""                                                   # Vendor Name은 숙박만
     assert rows[0]["순번"] == 5 and rows[0]["Concur 날짜"] == "10/22/2026" and rows[0]["확인 필요"] == ""
     assert "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"] and rec.used_for
@@ -278,15 +297,26 @@ def test_one_at_a_time_when_chooser_takes_one(browser, tmp_path):
     assert "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"]
 
 
+def attach_via_library(pg, tmp_path):
+    """보관함(Available Receipts) 방식만 따로 봄(카드 경비·저장한 뒤 다시 연 경비에 쓰는 방식): 새 경비 화면에서 바로
+    attach_from_available → (다 붙였는지, done, checks)"""
+    bot = make_bot(pg, tmp_path)
+    bot.back_to_report()
+    bot.open_manual_expense("Parking & Toll")
+    done, checks = [], []
+    ok = bot.attach_from_available(photos(tmp_path), done, checks)
+    return ok, done, checks
+
+
 def test_already_uploaded_receipts_are_picked_not_uploaded_again(browser, tmp_path):
     """예전 실행에서 보관함(Available Receipts)에 올라간 사진은 다시 올리지 않고 골라서 붙임"""
     pytest.importorskip("cv2")
     pg = open_report(browser, library=("IMG_5648.jpg", "IMG_5651.jpg"))
-    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    ok, done, checks = attach_via_library(pg, tmp_path)
     steps = pg.evaluate("steps")
     assert [s for s in steps if s.startswith("library")] == ["library IMG_5652.jpg"]       # 없는 것만 올림
-    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
-    assert rows[0]["확인 필요"] == ""
+    assert pg.evaluate("uploads") == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert ok and checks == []
 
 
 def test_single_upload_that_only_reaches_library_is_picked(browser, tmp_path):
@@ -392,14 +422,14 @@ def test_upload_goes_to_panel_not_expense_pane(browser, tmp_path):
     → 보관함 안의 [Upload New Receipt]로 올리고 차례대로 붙임"""
     pytest.importorskip("cv2")
     pg = open_report(browser, real_pane=True, library=("IMG_5648.jpg", "IMG_5652.jpg"))
-    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    ok, done, checks = attach_via_library(pg, tmp_path)
     steps = pg.evaluate("steps")
     assert not [s for s in steps if s.startswith("direct")]                        # 경비 칸의 업로드 단추를 누르지 않음
     assert [s for s in steps if s.startswith("library")] == ["library IMG_5651.jpg"]    # 없는 사진만 보관함에
     assert [x for x in steps if x.startswith(("attach", "add "))] == [
         "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
-    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
-    assert rows[0]["확인 필요"] == "" and steps[-1] == "save" and steps.count("save") == 1
+    assert pg.evaluate("uploads") == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert ok and checks == []
 
 
 def test_resume_after_a_middle_photo_was_attached_directly(browser, tmp_path):
@@ -417,6 +447,47 @@ def test_resume_after_a_middle_photo_was_attached_directly(browser, tmp_path):
     ok = bot.attach_from_available([s1, s2, s3], done, checks)
     assert ok and pg.evaluate("uploads") == ["IMG_5651.jpg", "IMG_5648.jpg", "IMG_5652.jpg"]
     assert any("순서 확인" in c for c in checks) and "이미 첨부됨(IMG_5651.jpg)" in done
+
+
+def test_presave_photos_uploaded_together(browser, tmp_path):
+    """2026-11-16 23:26 실행 기록·사용자 화면: 저장 전 새 경비는 사진을 한 장 붙이면 그 아래에 [Remove]만 있고 [Add]가 없어
+    세 경비 모두 첫 사진만 붙었음 → 경비 칸의 [Upload New Receipt]로 여러 장을 한 번에 올려 차례대로 붙이고 한 번 저장"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, real_pane=True, presave_no_add=True)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert [s for s in steps if s.startswith("direct")] == [
+        "direct IMG_5648.jpg", "direct IMG_5651.jpg", "direct IMG_5652.jpg"]          # 한 번에, 차례대로
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert steps.count("save") == 1 and "edit" not in steps and steps[-1] == "save"
+    assert rows[0]["확인 필요"] == "" and "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"]
+
+
+def test_presave_one_photo_then_add_after_save(browser, tmp_path):
+    """파일 고르기 창이 한 장만 받으면 저장 전에는 첫 장만 붙이고, 저장한 뒤 다시 열어 [Add]로 나머지를 차례대로 붙임"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, real_pane=True, presave_no_add=True, multiple=False)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert pg.evaluate("expenses")[0]["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert steps.index("direct IMG_5648.jpg") < steps.index("save") < steps.index("edit") < steps.index("add IMG_5651.jpg")
+    assert steps.index("add IMG_5651.jpg") < steps.index("add IMG_5652.jpg") and steps.count("save") == 2
+    assert rows[0]["확인 필요"] == ""
+
+
+def test_presave_upload_goes_to_library_then_attach_after_save(browser, tmp_path):
+    """저장 전 화면에서 올린 사진이 경비에 안 붙고 보관함으로만 가면(2026-11-15 네 번째 실제 확인) 저장한 뒤 다시 열어
+    보관함에서 차례대로 붙임(다시 올리지 않음)"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, presave_no_add=True)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert [s for s in steps if s.startswith("library")] == ["library IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"]
+    assert [x for x in steps if x.startswith(("attach", "add "))] == [
+        "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
+    assert steps.index("save") < steps.index("edit") and steps.count("save") == 2
+    assert pg.evaluate("expenses")[0]["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert rows[0]["확인 필요"] == ""
 
 
 REPORT_BEHIND_SCROLLED = """<!doctype html><meta charset="utf-8">
@@ -611,11 +682,11 @@ def test_cards_below_need_scrolling(browser, tmp_path):
     pytest.importorskip("cv2")
     others = tuple(f"IMG_90{i:02d}_업로드용.jpg" for i in range(8))
     pg = open_report(browser, library=others + ("IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"))
-    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    ok, done, checks = attach_via_library(pg, tmp_path)
     steps = pg.evaluate("steps")
     assert not [s for s in steps if s.startswith("library")]                       # 이미 있는 사진은 다시 안 올림
-    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
-    assert rows[0]["확인 필요"] == ""
+    assert pg.evaluate("uploads") == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert ok and checks == []
 
 
 def test_resume_when_only_first_receipt_attached(browser, tmp_path):
@@ -648,8 +719,8 @@ def test_slow_loading_cards_are_waited_for(browser, tmp_path):
     pg = browser.new_page()
     pg.set_default_timeout(3000)
     pg.route("**/report", lambda route: route.fulfill(body=html, content_type="text/html; charset=utf-8"))
-    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    ok, done, checks = attach_via_library(pg, tmp_path)
     steps = pg.evaluate("steps")
     assert not [s for s in steps if s.startswith("library")]                       # 다시 안 올림
-    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
-    assert rows[0]["확인 필요"] == ""
+    assert pg.evaluate("uploads") == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert ok and checks == []
