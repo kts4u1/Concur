@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 로그인 확인 엄격하게"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 저장 기다렸다 다시 누르기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -4195,6 +4195,8 @@ class ConcurBot:
         self.pw = self.ctx = self.page = None
         self.poll_s = 1.0
         self.login_stable_s = 3.0       # 로그인된 화면이 이만큼 그대로여야 로그인으로 봄(잠깐 보였다 로그인 화면으로 가는 일)
+        self.save_dialog_wait_s = 12.0   # [Save Expense] 뒤 '필수 정보 빠짐' 창을 기다리는 시간
+        self.save_retry_s = 15.0         # 그 뒤로도 화면이 그대로면 다시 누르기까지 기다리는 시간
         self.login_timeout_s = 600
         self.diagnose_after_s = 15
         self.last_expense_types = []     # [화면 조사]에서 읽은 Expense Type 목록
@@ -5994,8 +5996,9 @@ class ConcurBot:
 
     def save_expense(self, checks: list, stay_amount=None):
         """[Save Expense]를 누르고 리포트 화면으로 돌아올 때까지 기다립니다. '필수 정보가 빠졌다'는 창이 뜨면
-        숙박(stay_amount)은 [Yes] → Itemizations 넣기 → 다시 저장, 그 밖은 [No]('확인 필요')."""
-        page = self.page
+        숙박(stay_amount)은 [Yes] → Itemizations 넣기 → 다시 저장, 그 밖은 [No]('확인 필요').
+        사진을 막 붙인 뒤에는 Concur가 사진을 합치는 동안 눌러도 저장되지 않을 수 있어서(2026-11-16 사용자 화면: 사진 세 장을
+        붙인 새 경비에서 멈춤), 업로드·처리 중 글자가 사라지고 단추가 켜질 때까지 기다리고, 그대로면 세 번까지 다시 누릅니다."""
         back = self._report_shown                            # 리포트 화면이 맨 앞에 보이면 저장이 끝난 것
 
         def press():                                      # 맨 앞에 보이는 [Save Expense](가려진 것을 누르다 60초 멈췄음)
@@ -6005,25 +6008,47 @@ class ConcurBot:
                 btn = self._top_button("경비 저장", 10)
             if btn is None:
                 raise RuntimeError("[Save Expense] 버튼을 찾지 못했습니다.")
+            end = time.time() + 15                        # 사진을 합치는 동안 단추가 잠깐 꺼져 있을 수 있음
+            while time.time() < end:
+                try:
+                    if btn.is_enabled() and (btn.get_attribute("aria-disabled") or "").lower() != "true":
+                        break
+                except Exception:
+                    break
+                time.sleep(0.3)
             try:
                 btn.click(timeout=10000)
             except Exception:
                 btn.evaluate("e => e.click()")
 
-        press()
-        box = self.missing_info_dialog(12.0, back)            # 저장이 느리면 창이 늦게 뜸(리포트로 돌아가면 바로 끝)
-        if box is not None and stay_amount:
-            self.answer_dialog(box, "예")
-            itemized = self.fill_itemization(stay_amount, checks)
-            self.close_alerts()
+        itemized_tried = False
+        self._wait_uploaded()
+        for attempt in range(3):
+            if attempt:
+                if back() or self._top_button("경비 저장") is None:
+                    break
+                self.log("   [Save Expense]를 눌렀는데 화면이 그대로라 다시 누릅니다.")
+                self._wait_uploaded()
             press()
-            box = self.missing_info_dialog(8.0, back)
-            if box is not None and itemized:
+            box = self.missing_info_dialog(self.save_dialog_wait_s, back)   # 저장이 느리면 창이 늦게 뜸
+            if box is not None and stay_amount and not itemized_tried:
+                itemized_tried = True
+                self.answer_dialog(box, "예")
+                itemized = self.fill_itemization(stay_amount, checks)
+                self.close_alerts()
+                press()
+                box = self.missing_info_dialog(8.0, back)
+                if box is not None and itemized:
+                    checks.append("필수 정보 확인(저장해도 빠졌다고 함)")
+            elif box is not None and "필수 정보 확인(저장해도 빠졌다고 함)" not in checks:
                 checks.append("필수 정보 확인(저장해도 빠졌다고 함)")
-        elif box is not None:
-            checks.append("필수 정보 확인(저장해도 빠졌다고 함)")
-        if box is not None:
-            self.answer_dialog(box, "아니요")
+            if box is not None:
+                self.answer_dialog(box, "아니요")
+            end = time.time() + self.save_retry_s
+            while not back() and time.time() < end:
+                time.sleep(0.3)
+            if back():
+                return
         deadline = time.time() + self.timeout_ms / 1000
         while not back() and time.time() < deadline:
             time.sleep(0.3)
