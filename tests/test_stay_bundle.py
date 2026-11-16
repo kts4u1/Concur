@@ -248,3 +248,22 @@ def test_vendor_name_in_english():
     placed(slip, inv)
     ca.group_stay_bundles([slip, inv], OCT, ca.default_settings())
     assert slip.vendor == "가나 쉼터 1호점"
+
+
+# ---------- 도시: 크게 읽은 글자에만 주소가 있는 인보이스(2026-11-16 숙박 도시가 Seoul) ----------
+def test_city_from_zoomed_read_even_when_not_chosen(tmp_path, monkeypatch):
+    inv_small = "가나 쉼터 1호점\n인보이스\n입실 일자 퇴실 일자 객실 타입"
+    texts = {"2026-10-20_164000.jpg": NOL_SLIP, "2026-10-20_170000.jpg": inv_small,
+             "2026-10-20_170000.jpg#크게": inv_small + "\n주소 대전광역시 유성구 가나로 1"}   # 날짜·금액은 똑같이 못 읽음
+    got, _, _ = build(tmp_path, monkeypatch, texts)
+    slip = got["2026-10-20_164000.jpg"]
+    assert [p.name for p in slip.bundle] == ["2026-10-20_170000.jpg"]
+    assert slip.city.startswith("Daejeon")                       # 예약 회사 주소(서울)가 아니라 크게 읽은 인보이스 주소
+
+
+def test_booking_slip_ignores_remembered_city():
+    """예약 회사 전표는 사업자번호가 늘 같아서, 한 번 고친 도시를 기억해 쓰면 다른 숙소도 그 도시가 됨"""
+    slip = make("IMG_5646.HEIC", NOL_SLIP)
+    memory = {slip.biz_no: {"분류": "숙박", "도시": "Daejeon (ex Taejon), KOREA, REPUBLIC OF", "병원 영문": "Gana Hospital"}}
+    assert slip.biz_no and ca.apply_store_memory(slip, memory, ca.default_settings())
+    assert slip.category == "숙박" and slip.city.startswith("Seoul") and slip.hospital_en == ""

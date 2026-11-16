@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 늦게 뜨는 창·사진 목록 기다리기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 기록 끝까지·막 올린 사진 기다리기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -699,12 +699,31 @@ def write_csv(path: Path, header: list, rows: list):
 
 
 class Log:
+    """실행 기록(실행기록_YYYYMMDD_HHMMSS.txt). 줄마다 파일을 열어 쓰고 바로 닫습니다.
+    예전에는 실행이 끝날 때까지 파일을 열어 두어서, 문서 폴더가 OneDrive와 동기화되는 PC에서는 Edge 창을 닫기 전까지
+    앞부분만 올라갔습니다(2026-11-16 사용자가 받은 기록이 리포트 생성에서 끊김)."""
+
     def __init__(self, folder: Path, sink=print):
         folder.mkdir(parents=True, exist_ok=True)
         self.folder = folder
         self.sink = sink
         self.path = folder / f"실행기록_{datetime.now():%Y%m%d_%H%M%S}.txt"
-        self._f = open(self.path, "a", encoding="utf-8")
+        self._pending = []
+        try:
+            self.path.touch()
+        except OSError:
+            pass
+
+    def _write(self, line):
+        self._pending.append(line)
+        for _ in range(3):                                # 동기화 프로그램이 잠깐 잠가도 다음 줄과 함께 다시 씀
+            try:
+                with open(self.path, "a", encoding="utf-8", errors="replace") as f:
+                    f.write("\n".join(self._pending) + "\n")
+                self._pending = []
+                return
+            except OSError:
+                time.sleep(0.1)
 
     def __call__(self, msg: str = ""):
         line = f"[{datetime.now():%H:%M:%S}] {msg}" if msg else ""
@@ -712,14 +731,12 @@ class Log:
             self.sink(line)
         except Exception:
             pass
-        self._f.write(line + "\n")
-        self._f.flush()
+        self._write(line)
 
     def close(self):
-        try:
-            self._f.close()
-        except Exception:
-            pass
+        if self._pending:                                 # 못 쓴 줄이 남았으면 마지막으로 한 번 더
+            line = self._pending.pop()
+            self._write(line)
 
 
 class Cancelled(Exception):
@@ -1763,6 +1780,23 @@ def info_score(rec) -> int:
             + (1 if rec.hospital_en else 0) + (2 if (toll_statement_info(rec.ocr_text) or {}).get("total") else 0))
 
 
+def fill_from_other_reads(rec, texts: list, cfg: dict):
+    """고르지 않은 다른 읽기(크게 읽기·보정)에서 도시·사업자번호만 채웁니다. 숙박 인보이스의 주소처럼 작은 글자는
+    크게 읽어야 보이는데, 날짜·금액은 원래 읽기가 나아서 크게 읽은 글자를 버리면 도시가 빠졌음(2026-11-16 숙박 도시가 Seoul)."""
+    cities = cfg.get("도시_목록") or DEFAULT_CITIES
+    low_names = cfg.get("도시_낮은_우선순위", ["서울"])
+    low = {cities[n] for n in low_names if n in cities}
+    for t in texts:
+        if not (t or "").strip():
+            continue
+        if not rec.city or rec.city in low:
+            city = detect_city(compact(t), cities, rec.hospital_key, low_names)
+            if city and (not rec.city or city not in low):
+                rec.city = city
+        if not rec.biz_no:
+            rec.biz_no = find_business_number(t)
+
+
 def toll_total_missing(rec) -> bool:
     """하이패스 사용내역인데 '총액 61,500원'을 못 읽었으면 True(작은 글자라 크게 다시 읽음)"""
     info = toll_statement_info(rec.ocr_text)
@@ -2448,15 +2482,21 @@ def apply_store_memory(rec: Receipt, memory: dict, cfg: dict) -> bool:
     category = entry.get("분류") or ""
     if category and category in (cfg.get("분류_우선순위") or CATEGORIES):
         rec.category, applied = category, True
+    text = compact(rec.ocr_text).lower()
+    if any(w.lower().replace(" ", "") in text for w in ACCOM_PLATFORM_WORDS + ["야놀자", "여기어때", "에어비앤비"]):
+        return applied and _remembered(rec)                # 예약 회사 전표는 사업자번호가 같아도 숙소(병원·도시)가 매번 다름
     if entry.get("병원 영문"):
         rec.hospital_en, rec.hospital_src, applied = entry["병원 영문"], HOSP_FROM_MEMORY, True
     if entry.get("도시"):
         rec.city, applied = resolve_city(entry["도시"], cfg.get("도시_목록") or DEFAULT_CITIES), True
-    if applied:
-        rec.remembered = True
-        if not rec.is_receipt:                     # 기억한 가게의 영수증이면 영수증으로 봄
-            rec.is_receipt = rec.use = True
-    return applied
+    return applied and _remembered(rec)
+
+
+def _remembered(rec) -> bool:
+    rec.remembered = True
+    if not rec.is_receipt:                         # 기억한 가게의 영수증이면 영수증으로 봄
+        rec.is_receipt = rec.use = True
+    return True
 
 
 def category_from_vendor(vendor: str, cfg: dict) -> str:
@@ -3140,6 +3180,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
                 early_names.add(orig.name)
             first = analyze_receipt(orig, orig, text, cfg, hospitals, taken)
             first_is_receipt = first.is_receipt
+            others = []                                     # 고르지 않은 다른 읽기(주소처럼 작은 글자는 여기에만 있을 수 있음)
             best = info_score(first)
             missing = (not first.total or not first.date_from_ocr or toll_total_missing(first)) and orig.name not in early_names
             # 날짜나 금액을 못 읽은 영수증(또는 영수증 글자가 보이는 사진)은 줄이지 않고 크게 다시 읽음
@@ -3149,22 +3190,29 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
                 if big.strip():
                     again = analyze_receipt(orig, orig, big, cfg, hospitals, taken)
                     if info_score(again) > best:
+                        others.append(text)
                         text, best = big, info_score(again)
                         first_is_receipt = first_is_receipt or again.is_receipt
                         missing = not again.total or not again.date_from_ocr or toll_total_missing(again)
                         counts["크게 나아짐"] += 1
+                    else:
+                        others.append(big)
             # 그래도 금액이나 날짜를 못 읽었으면 보정(대비·선명하게)해서 한 번 더 읽음
             if use_pre and first_is_receipt and missing:
                 counts["보정"] += 1
                 better = enhanced_text(orig, st)
                 if better.strip() and info_score(analyze_receipt(orig, orig, better, cfg, hospitals, taken)) > best:
+                    others.append(text)
                     text = better
                     counts["나아짐"] += 1
+                elif better.strip():
+                    others.append(better)
 
             def analyze():
                 r = analyze_receipt(orig, ocr_file, text, cfg, hospitals, taken)
                 if first_is_receipt and not r.is_receipt:
                     r.is_receipt = True
+                fill_from_other_reads(r, others, cfg)
                 apply_store_memory(r, memory, cfg)
                 place_in_month(r, tm)
                 return r
@@ -3310,6 +3358,11 @@ def prepare_upload_file(rec: Receipt, cfg: dict, work_dir: Path) -> Path:
     return prepare_upload_path(src, cfg, work_dir)
 
 
+def receipt_stem(name: str) -> str:
+    """'IMG_5648_업로드용.jpg' → 'IMG_5648': Concur 보관함 카드의 이름과 비교할 원래 사진 이름"""
+    return re.sub(r"_업로드용$", "", Path(str(name)).stem)
+
+
 def prepare_upload_path(src: Path, cfg: dict, work_dir: Path) -> Path:
     """사진 한 장을 Concur에 올릴 수 있게: 5MB를 넘거나 HEIC면 JPEG 사본을 만듭니다."""
     cv2, _ = _cv2()
@@ -3427,30 +3480,61 @@ JS_MARK_ROW = r"""
 
 
 JS_MARK_RECEIPT_CARD = r"""
-(name) => {
-  // Available Receipts(올린 영수증 보관함)에서 파일 이름이 같은 카드의 사진에 표시합니다.
-  // 카드 안에 Attach(첨부) 단추가 따로 있으면 그것에도 표시합니다(사진 창이 안 뜰 때 씀).
+({name, stem}) => {
+  // Available Receipts(올린 영수증 보관함)에서 파일 이름이 같은 카드의 사진에 표시합니다. → 'img' / 'card' / 'loading' / ''
+  // 카드 밖으로 올라가 옆 카드의 사진을 누르지 않게, 다른 사진 이름이 들어 있는 상자에서는 멈춥니다(2026-11-16).
+  // 이름은 'IMG_5648_업로드용.jpg' 그대로 또는 원래 이름(IMG_5648)으로 시작하면 같은 사진으로 봅니다(…로 줄여 보여도).
+  // 카드 안에 Attach/Add 단추가 따로 있으면 그것에도 표시합니다(사진 창이 안 뜰 때 씀).
   document.querySelectorAll('[data-concur-auto-card],[data-concur-auto-cardattach]').forEach(e => {
     e.removeAttribute('data-concur-auto-card'); e.removeAttribute('data-concur-auto-cardattach'); });
-  const want = name.trim().toLowerCase();
+  const want = (name || '').trim().toLowerCase(), core = (stem || '').trim().toLowerCase();
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-  const labels = Array.from(document.querySelectorAll('body *')).filter(e =>
-    e.children.length === 0 && (e.textContent || '').trim().toLowerCase() === want)
-    .sort((a, b) => vis(b) - vis(a));                     // 보이는 카드 먼저
+  const fileLike = t => /\.(jpe?g|png|pdf|tiff?|heic|gif)$/i.test((t || '').trim());
+  const mine = raw => {
+    const t = (raw || '').trim().toLowerCase();
+    if (!t) return false;
+    if (t === want) return true;
+    if (!core || !t.startsWith(core)) return false;
+    const rest = t.slice(core.length);
+    return rest === '' || /^[^0-9a-z]/.test(rest);
+  };
+  const leaves = Array.from(document.querySelectorAll('body *')).filter(e => e.children.length === 0);
+  const labels = leaves.filter(e => mine(e.textContent)).sort((a, b) => vis(b) - vis(a));   // 보이는 카드 먼저
+  const other = box => Array.from(box.querySelectorAll('*')).some(e => e.children.length === 0
+    && fileLike(e.textContent) && !mine(e.textContent));
+  const busy = /processing|analyzing|uploading|처리 중|분석 중|업로드 중/i;
+  const area = e => { const r = e.getBoundingClientRect(); return r.width * r.height; };
+  const thumb = box => {                                  // 카드 안에서 가장 큰 그림(작은 아이콘·삭제 단추가 아니라 영수증 사진)
+    const pics = Array.from(box.querySelectorAll('img, canvas, [role=img]')).concat(Array.from(box.querySelectorAll('*')).filter(e =>
+      vis(e) && /url\(/.test(getComputedStyle(e).backgroundImage || '')));
+    return pics.sort((a, b) => area(b) - area(a))[0] || null;
+  };
+  const markBtn = box => {
+    const btn = Array.from(box.querySelectorAll('button, [role=button]')).find(b =>
+      /attach|첨부|^\s*add\b|추가/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.innerText || '')));
+    if (btn) btn.setAttribute('data-concur-auto-cardattach', '1');
+  };
   for (const lab of labels) {
-    let box = lab;
-    for (let k = 0; k < 7 && box; k++, box = box.parentElement) {
-      const img = box.querySelector('img, canvas, [role=img]');
+    let card = lab, near = lab;
+    for (let box = lab.parentElement, k = 0; box && box !== document.body && k < 8; box = box.parentElement, k++) {
+      if (other(box)) break;                              // 옆 카드까지 들어간 상자: 여기서 멈춤
+      card = box;
+      if (k < 3) near = box;
+      const img = thumb(box);
       if (img) {
+        if (busy.test(box.innerText || '') || (img.tagName === 'IMG' && !img.complete)) {   // 깨진 그림(complete인데 크기 0)은 그냥 누름
+          try { img.scrollIntoView({block: 'nearest'}); } catch (e) {}   // 화면에 들어와야 사진을 그리는 목록
+          return 'loading';
+        }
         img.setAttribute('data-concur-auto-card', '1');
-        const btn = Array.from(box.querySelectorAll('button, [role=button]')).find(b =>
-          /attach|첨부|^\s*add\b|추가/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.innerText || '')));
-        if (btn) btn.setAttribute('data-concur-auto-cardattach', '1');
+        markBtn(box);
         return 'img';
       }
     }
-    lab.setAttribute('data-concur-auto-card', '1');
-    return 'name';
+    if (busy.test(card.innerText || '')) return 'loading';
+    near.setAttribute('data-concur-auto-card', '1');      // 사진을 못 찾으면 이름 가까운 상자(카드)를 누름
+    markBtn(card);
+    return 'card';
   }
   return '';
 }
@@ -3462,7 +3546,7 @@ JS_SCROLL_RECEIPTS = r"""
   // 보관함(Available Receipts) 카드 목록을 맨 위로('top') 올리거나 조금 내립니다('down'). 아래 카드는 내려야 나타남.
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
   const named = Array.from(document.querySelectorAll('body *')).filter(e => e.children.length === 0 && vis(e)
-    && /\.(jpe?g|png|pdf|tiff?)$/i.test((e.textContent || '').trim()));
+    && /\.(jpe?g|png|pdf|tiff?|heic|gif)$/i.test((e.textContent || '').trim()));
   const boxes = new Set();
   for (const n of named) {
     for (let b = n.parentElement; b && b !== document.body; b = b.parentElement) {
@@ -3486,10 +3570,31 @@ JS_COUNT_CARDS = r"""
   // 보이는 영수증 카드 수(파일 이름 글자 + 가까이에 사진) — 보관함 목록이 다 떴는지 볼 때
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
   return Array.from(document.querySelectorAll('body *')).filter(e => {
-    if (e.children.length || !vis(e) || !/\.(jpe?g|png|pdf|tiff?)$/i.test((e.textContent || '').trim())) return false;
+    if (e.children.length || !vis(e) || !/\.(jpe?g|png|pdf|tiff?|heic|gif)$/i.test((e.textContent || '').trim())) return false;
     for (let b = e, k = 0; b && k < 7; b = b.parentElement, k++) if (b.querySelector('img, canvas, [role=img]')) return true;
     return false;
   }).length;
+}
+"""
+
+
+JS_LIBRARY_NAMES = r"""
+() => {
+  // 화면에 보이는 사진 파일 이름들(보관함에서 카드를 못 찾았을 때 실행 기록에 남김)
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  return Array.from(new Set(Array.from(document.querySelectorAll('body *')).filter(e => e.children.length === 0 && vis(e))
+    .map(e => (e.textContent || '').trim()).filter(t => /\.(jpe?g|png|pdf|tiff?|heic|gif)$/i.test(t)))).slice(0, 15);
+}
+"""
+
+
+JS_VISIBLE_BUTTONS = r"""
+() => {
+  // 화면에 보이는 단추 글자들(단추를 못 찾았을 때 실행 기록에 남김)
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  return Array.from(new Set(Array.from(document.querySelectorAll('button, [role=button], a')).filter(vis)
+    .map(e => ((e.innerText || '').trim() || e.getAttribute('aria-label') || e.getAttribute('title') || '').replace(/\s+/g, ' ').slice(0, 30))
+    .filter(Boolean))).slice(0, 25);
 }
 """
 
@@ -3499,7 +3604,7 @@ JS_ATTACHED_STATE = r"""
   // 영수증 칸에 이미 붙은 영수증: 보이는 파일 이름들과, 여러 장이 합쳐진 PDF 보기(iframe·embed)가 있는지
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
   const names = Array.from(document.querySelectorAll('body *')).filter(e => e.children.length === 0 && vis(e))
-    .map(e => (e.textContent || '').trim()).filter(t => /\.(jpe?g|png|pdf|tiff?)$/i.test(t));
+    .map(e => (e.textContent || '').trim()).filter(t => /\.(jpe?g|png|pdf|tiff?|heic|gif)$/i.test(t));
   const pdf = Array.from(document.querySelectorAll('iframe, embed, object')).some(vis);
   return {names, pdf};
 }
@@ -3507,25 +3612,36 @@ JS_ATTACHED_STATE = r"""
 
 
 JS_MARK_ATTACH = r"""
-({name, words, single}) => {
-  // 'Receipt Image' 창의 [Attach]: 글자가 Attach인 보이는 단추 중 같은 파일 이름이 가까이 있는 것(없으면 하나뿐인 것)
+({name, stem, words, single}) => {
+  // 'Receipt Image' 창의 [Attach](두 번째 장부터 [Add]): 글자가 그 단추인 보이는 단추 중
+  // ① 같은 파일 이름이 가장 가까이 있는 것 → ② [Delete] 바로 옆에 있는 것(사진 창에는 Delete와 Attach/Add가 같이 있음,
+  // 경비의 영수증 칸은 Remove·Add·Open) → ③ 하나뿐인 Attach. '+ Add'처럼 기호가 붙어도 됨.
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
   document.querySelectorAll('[data-concur-auto-attach]').forEach(e => e.removeAttribute('data-concur-auto-attach'));
-  const re = new RegExp('^\\s*(?:' + words.join('|') + ')\\s*$', 'i');
+  const word = list => new RegExp('^[^A-Za-z가-힣]*(?:' + list.join('|') + ')[^A-Za-z가-힣]*$', 'i');
+  const re = word(words), del = word(['Delete', '삭제']);
   const cands = Array.from(document.querySelectorAll('button, [role=button], a, div, span'))
     .filter(e => vis(e) && re.test(e.innerText || '') && !Array.from(e.children).some(c => re.test(c.innerText || '')));
-  const want = (name || '').trim().toLowerCase();
+  const mark = c => { (c.closest('button, [role=button], a') || c).setAttribute('data-concur-auto-attach', '1'); return true; };
+  const want = (name || '').trim().toLowerCase(), core = (stem || '').trim().toLowerCase();
+  const near = t => { t = (t || '').toLowerCase(); return (want && t.includes(want)) || (core && t.includes(core)); };
+  let best = null, bestK = 99;
   for (const c of cands) {
     let box = c;
     for (let k = 0; k < 8 && box; k++, box = box.parentElement) {
-      if (want && (box.innerText || '').toLowerCase().includes(want)) {
-        (c.closest('button, [role=button], a') || c).setAttribute('data-concur-auto-attach', '1');
-        return true;
-      }
+      if ((want || core) && near(box.innerText)) { if (k < bestK) { best = c; bestK = k; } break; }
     }
   }
-  const one = cands.filter(c => new RegExp('^\\s*(?:' + single.join('|') + ')\\s*$', 'i').test(c.innerText || ''));
-  if (one.length === 1) { (one[0].closest('button, [role=button], a') || one[0]).setAttribute('data-concur-auto-attach', '1'); return true; }
+  if (best) return mark(best);
+  for (const c of cands) {
+    let box = c.parentElement;
+    for (let k = 0; k < 4 && box; k++, box = box.parentElement) {
+      if (Array.from(box.querySelectorAll('button, [role=button], a, div, span')).some(e => vis(e) && del.test(e.innerText || '')
+          && !Array.from(e.children).some(x => del.test(x.innerText || '')))) return mark(c);
+    }
+  }
+  const one = cands.filter(c => word(single).test(c.innerText || ''));
+  if (one.length === 1) return mark(one[0]);
   return false;
 }
 """
@@ -4985,17 +5101,33 @@ class ConcurBot:
             time.sleep(0.5)
         return False
 
-    def _card_shown(self, name: str) -> bool:
+    def _card_shown(self, name: str) -> str:
+        """보관함에 이름이 같은 카드가 보이면 표시하고 'img'/'card'/'loading'(막 올려 아직 준비 중), 없으면 ''"""
         try:
-            return bool(self.page.evaluate(JS_MARK_RECEIPT_CARD, name))
+            return self.page.evaluate(JS_MARK_RECEIPT_CARD, {"name": name, "stem": receipt_stem(name)}) or ""
         except Exception:
-            return False
+            return ""
+
+    def _last_shown(self, locs: list):
+        """보이는 것 중 마지막(보관함 안의 [Upload New Receipt]는 경비 화면의 같은 버튼보다 뒤에 있음)"""
+        for loc in locs:
+            try:
+                n = loc.count()
+            except Exception:
+                continue
+            for i in range(n - 1, -1, -1):
+                try:
+                    if loc.nth(i).is_visible():
+                        return loc.nth(i)
+                except Exception:
+                    pass
+        return None
 
     def _upload_to_available(self, files: list) -> list:
         """보관함 안의 [Upload New Receipt]로 사진을 올리고 카드가 보일 때까지 기다립니다. → 못 올린 파일 이름"""
         page = self.page
-        missing = list(files)
-        control = self._upload_control()
+        control = self._last_shown([page.locator(self.sel("영수증 업로드 버튼")),
+                                    page.get_by_role("button", name=self._re("영수증 업로드", exact=False))])
         try:
             if control is not None:
                 with page.expect_file_chooser(timeout=15000) as chooser:
@@ -5010,13 +5142,32 @@ class ConcurBot:
         except Exception as e:
             self.log(f"   보관함에 사진을 올리지 못했습니다: {str(e).splitlines()[0][:80]}")
             return [f.name for f in files]
-        end = time.time() + self.upload_done_s
+        end, scroll_at = time.time() + self.upload_done_s, time.time() + 6
         while time.time() < end and any(not self._card_shown(f.name) for f in sent):
+            if time.time() > scroll_at:                    # 목록 아래쪽에 들어가 내려야 보이는 카드
+                if all(self._find_card(f.name, settle=False) for f in sent if not self._card_shown(f.name)):
+                    break
+                scroll_at = time.time() + 6
             time.sleep(0.5)
-        missing = [f for f in files if not self._card_shown(f.name)]
+        missing = [f for f in files if not (self._card_shown(f.name) or self._find_card(f.name, settle=False))]
         if missing and len(sent) < len(files):           # 한 장씩만 받는 창이면 나머지도 차례로
             return self._upload_to_available(missing) if missing != files else [f.name for f in missing]
+        if missing:
+            self.log(f"   올린 사진이 보관함에 보이지 않습니다: {', '.join(f.name for f in missing)} "
+                     f"(보이는 사진: {', '.join(self._library_names()) or '없음'})")
         return [f.name for f in missing]
+
+    def _library_names(self) -> list:
+        try:
+            return list(self.page.evaluate(JS_LIBRARY_NAMES) or [])
+        except Exception:
+            return []
+
+    def _button_texts(self) -> str:
+        try:
+            return ", ".join(self.page.evaluate(JS_VISIBLE_BUTTONS) or []) or "없음"
+        except Exception:
+            return "모름"
 
     def _wait_cards(self, timeout_s: float = 12.0):
         """보관함의 사진 카드가 다 뜰 때까지(보이는 카드 수가 1초 동안 그대로일 때까지) 기다립니다."""
@@ -5033,20 +5184,24 @@ class ConcurBot:
             time.sleep(0.5)
         return last
 
-    def _find_card(self, name: str) -> bool:
+    def _find_card(self, name: str, settle: bool = True) -> str:
         """보관함에서 이름이 같은 카드를 찾습니다. 아래 카드는 목록을 내려야 나타나므로 맨 위부터 조금씩 내리며 봅니다."""
         page = self.page
-        if self._card_shown(name):
-            return True
-        self._wait_cards()                                # [Add]로 연 보관함은 사진 목록이 조금 늦게 뜸
-        if self._card_shown(name):
-            return True
+        state = self._card_shown(name)
+        if state:
+            return state
+        if settle:
+            self._wait_cards()                            # [Add]로 연 보관함은 사진 목록이 조금 늦게 뜸
+        state = self._card_shown(name)
+        if state:
+            return state
         try:
             page.evaluate(JS_SCROLL_RECEIPTS, "top")
             for _ in range(60):
                 time.sleep(0.4)
-                if self._card_shown(name):
-                    return True
+                state = self._card_shown(name)
+                if state:
+                    return state
                 if not page.evaluate(JS_SCROLL_RECEIPTS, "down"):
                     break
             time.sleep(0.4)
@@ -5054,28 +5209,70 @@ class ConcurBot:
             pass
         return self._card_shown(name)
 
-    def _attach_card(self, name: str) -> bool:
-        """보관함에서 이름이 같은 사진 → 'Receipt Image' 창의 [Attach](두 번째 장부터는 [Add])"""
-        page = self.page
-        if not self._find_card(name):
-            self.log(f"   보관함에서 {name} 카드를 찾지 못했습니다.")
-            return False
-        page.locator("[data-concur-auto-card]").first.click()
-        mark = page.locator("[data-concur-auto-attach]")
-        args = {"name": name, "words": [re.escape(a) for a in self._alts("영수증 창 단추")],   # 첫 장 Attach, 다음 장 Add
+    def _ready_card(self, name: str, state: str) -> str:
+        """막 올린 사진은 Concur가 사진을 다 받을 때까지 눌러도 안 열릴 수 있어서, 준비될 때까지(최대 upload_done_s초) 기다립니다."""
+        end = time.time() + max(self.upload_done_s, 5)
+        while state == "loading" and time.time() < end:
+            time.sleep(1.0)
+            state = self._card_shown(name) or self._find_card(name)
+        return state
+
+    def _mark_dialog_button(self, name: str) -> bool:
+        args = {"name": name, "stem": receipt_stem(name),
+                "words": [re.escape(a) for a in self._alts("영수증 창 단추")],   # 첫 장 Attach, 다음 장 Add
                 "single": [re.escape(a) for a in self._alts("영수증 붙이기")]}
-        end = time.time() + 10
-        while time.time() < end:
-            btn = None
-            try:                                          # 'Receipt Image' 창(파일 이름 + [Delete]·[Attach])의 [Attach]
-                if page.evaluate(JS_MARK_ATTACH, args):
-                    btn = mark.first
+        try:
+            return bool(self.page.evaluate(JS_MARK_ATTACH, args))
+        except Exception:
+            return False
+
+    def _close_receipt_image(self):
+        """잘못 열린 'Receipt Image' 창을 [Close]로 닫습니다(없으면 Escape)."""
+        page = self.page
+        try:
+            if page.evaluate(JS_MARK_ATTACH, {"name": "", "stem": "", "words": ["Close", "닫기"], "single": ["Close", "닫기"]}):
+                page.locator("[data-concur-auto-attach]").first.click(timeout=3000)
+            else:
+                page.keyboard.press("Escape")
+            time.sleep(0.8)
+        except Exception:
+            pass
+
+    def _attach_card(self, name: str) -> bool:
+        """보관함에서 이름이 같은 사진 → 'Receipt Image' 창의 [Attach](두 번째 장부터는 [Add]).
+        창이 안 뜨거나 단추가 안 보이면 창을 닫고 세 번까지 다시 누릅니다."""
+        page = self.page
+        mark = page.locator("[data-concur-auto-attach]")
+        for attempt in range(3):
+            state = self._find_card(name)
+            if not state:
+                self.log(f"   보관함에서 {name} 카드를 찾지 못했습니다. 보이는 사진: {', '.join(self._library_names()) or '없음'}")
+                return False
+            if state == "loading":
+                self.log(f"   {name}: 보관함 사진이 아직 준비 중이라 기다립니다.")
+                state = self._ready_card(name, state)
+            target = page.locator("[data-concur-auto-card]").first
+            try:
+                target.click(timeout=5000)
             except Exception:
-                btn = None
-            if btn is None and time.time() > end - 5:     # 사진 창이 없으면 카드의 Attach 단추
-                btn = self._first_shown([page.locator("[data-concur-auto-cardattach]")])
+                try:
+                    target.evaluate("e => e.click()")
+                except Exception:
+                    pass
+            end = time.time() + 8
+            btn = None
+            while time.time() < end and btn is None:
+                if self._mark_dialog_button(name):        # 'Receipt Image' 창(파일 이름 + [Delete]·[Attach]/[Add])
+                    btn = mark.first
+                elif time.time() > end - 3:               # 사진 창이 없으면 카드의 Attach 단추
+                    btn = self._first_shown([page.locator("[data-concur-auto-cardattach]")])
+                if btn is None:
+                    time.sleep(0.3)
             if btn is not None:
-                btn.click()
+                try:
+                    btn.click(timeout=5000)
+                except Exception:
+                    btn.evaluate("e => e.click()")
                 gone = time.time() + 15                   # 누른 단추(창)가 사라질 때까지
                 while time.time() < gone:
                     try:
@@ -5086,8 +5283,25 @@ class ConcurBot:
                     time.sleep(0.3)
                 time.sleep(1.0)
                 return True
-            time.sleep(0.3)
+            self.log(f"   {name} 사진을 눌렀지만 [Attach]/[Add]가 보이지 않습니다({attempt + 1}/3, 카드 {state}). "
+                     f"보이는 단추: {self._button_texts()}")
+            if attempt == 0:
+                self.screenshot("receipt_image")
+            self._close_receipt_image()
+            if not self._available_open():
+                self._open_available(again=True)
         return False
+
+    def _close_available(self):
+        page = self.page
+        close = self._first_shown([page.get_by_role("button", name=self._re("사용 가능한 영수증 닫기", exact=False)),
+                                   page.locator("[aria-label*='Close Available' i], [title*='Close Available' i]")])
+        if close is None:
+            return
+        try:
+            close.click(timeout=3000)
+        except Exception:
+            pass
 
     def attach_from_available(self, files: list, done: list, checks: list):
         page = self.page
@@ -5098,7 +5312,9 @@ class ConcurBot:
                 state = page.evaluate(JS_ATTACHED_STATE)
             except Exception:
                 state = {"names": [], "pdf": True}
-            if files[0].name in state.get("names", []) and not state.get("pdf") and len(files) > 1:
+            first = receipt_stem(files[0].name).lower()
+            if (any(receipt_stem(n).lower() == first for n in state.get("names", []))
+                    and not state.get("pdf") and len(files) > 1):
                 self.log(f"   {files[0].name}만 붙어 있어 나머지를 [Add]로 붙입니다.")   # 첫 장만 붙고 멈췄던 경비
                 done.append(f"이미 첨부됨({files[0].name})")
                 start = 1
@@ -5109,11 +5325,11 @@ class ConcurBot:
             start = 0
         if start == 0 and not self._open_available():
             checks.append(f"영수증 직접 붙이기(Choose From Available Receipts를 못 찾음: {', '.join(f.name for f in files)})")
-            self.log("   [Choose From Available Receipts]를 찾지 못했습니다. 화면을 저장합니다.")
+            self.log(f"   [Choose From Available Receipts]를 찾지 못했습니다. 보이는 단추: {self._button_texts()}")
             self.screenshot("available_receipts")
             return
         if start == 0:
-            need = [f for f in files if not self._find_card(f.name)]
+            need = [f for i, f in enumerate(files) if not self._find_card(f.name, settle=i == 0)]   # 목록은 처음 한 번만 기다림
             if need:
                 self.log(f"   보관함에 없는 사진을 올립니다: {', '.join(f.name for f in need)}")
                 failed = set(self._upload_to_available(need))
@@ -5121,25 +5337,25 @@ class ConcurBot:
         for k, f in enumerate(files):
             if k < start or f.name in missed:
                 continue
-            if k and not self._open_available(again=True):
-                self.log(f"   [Add]를 찾지 못해 {f.name}을(를) 붙이지 못했습니다.")
-                missed.append(f.name)
-                continue
-            if start and not self._find_card(f.name):     # 이어서 붙일 때 보관함에 없으면 올림
-                if self._upload_to_available([f]):
+            try:
+                if k and not self._open_available(again=True):
+                    self.log(f"   [Add]를 찾지 못해 {f.name}을(를) 붙이지 못했습니다. 보이는 단추: {self._button_texts()}")
                     missed.append(f.name)
                     continue
-            if self._attach_card(f.name):
-                attached.append(f.name)
-                self.log(f"   영수증 붙임: {f.name}")
-            else:
+                if start and not self._find_card(f.name):     # 이어서 붙일 때 보관함에 없으면 올림
+                    if self._upload_to_available([f]):
+                        missed.append(f.name)
+                        continue
+                if self._attach_card(f.name):
+                    attached.append(f.name)
+                    self.log(f"   영수증 붙임: {f.name}")
+                else:
+                    missed.append(f.name)
+            except Exception as e:
+                self.log(f"   {f.name}을(를) 붙이다 멈췄습니다: {str(e).splitlines()[0][:100] if str(e) else type(e).__name__}")
                 missed.append(f.name)
-        close = self._first_shown([page.get_by_role("button", name=self._re("사용 가능한 영수증 닫기", exact=False))])
-        if close is not None:
-            try:
-                close.click()
-            except Exception:
-                pass
+        if self._available_open():                         # 다 붙이면 보통 저절로 닫힘. 못 붙였으면 닫고 저장
+            self._close_available()
         if attached:
             done.append(f"영수증 첨부({', '.join(attached)})")
         if missed:
@@ -5630,6 +5846,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
         return
     try:
         log(f"===== {title} | {tm.prefix} ({tm.month_name}) | 프로그램 {APP_VERSION} =====")
+        log(f"기록 파일: '실행기록' 폴더의 {log.path.name}")
         shutil.rmtree(work_dir, ignore_errors=True)          # 지난 실행의 임시 파일
         if is_unfinished_month(tm):
             log(unfinished_month_note(tm))

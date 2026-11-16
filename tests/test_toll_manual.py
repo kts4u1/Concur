@@ -55,17 +55,23 @@ REPORT = """<!doctype html><meta charset="utf-8">
 <script>
 window.steps = []; window.uploads = []; window.saved = null; window.expenses = []; let editing = null;
 window.library = LIBRARY; let current = null, shownCards = 4;
-const PIX = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+const fresh = {}, SLOW = false, BGTHUMB = false, NONAME = false, ICONS = false;
+const PIX = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 function toLibrary(inp) { const names = Array.from(inp.files).map(f => f.name); library.push(...names);
+  if (SLOW) { names.forEach(n => { fresh[n] = Date.now() + 1500; }); setTimeout(drawCards, 1600); }
+  else if (BGTHUMB) names.forEach(n => { fresh[n] = 1; });
   steps.push('library ' + names.join(',')); inp.value = ''; drawCards(); }
 function more(box) { if (box.scrollTop + box.clientHeight >= box.scrollHeight - 5 && shownCards < library.length) {
   const top = box.scrollTop; shownCards += 2; drawCards(); box.scrollTop = top; } }
+function thumbOf(n) { if (fresh[n] && Date.now() < fresh[n]) return '<div class="spin">Processing...</div>';   // 막 올린 사진
+  if (BGTHUMB && fresh[n]) return '<div class="thumb" style="width:60px;height:40px;background-image:url(' + PIX + ')" onclick="openDlg(&quot;' + n + '&quot;)"></div>';
+  return '<img src="' + PIX + '" width="60" height="40" onclick="openDlg(&quot;' + n + '&quot;)">'; }
 function drawCards() { document.getElementById('cards').innerHTML = library.slice(0, shownCards).map(n => '<div class="card" style="height:60px"><div>' + n +
-  '</div><img src="' + PIX + '" width="60" height="40" onclick="openDlg(this.previousSibling.textContent)">' +
+  '</div>' + (ICONS ? '<img src="' + PIX + '" width="12" height="12" onclick="steps.push(&quot;delete icon&quot;)">' : '') + thumbOf(n) +
   '<button aria-label="Attach receipt" onclick="steps.push(&quot;card icon&quot;)">i</button></div>').join(''); }
 function openAvail() { shownCards = 4; show('avail', 1); show('pane', 0); drawCards(); }
 function closeAvail() { show('avail', 0); show('pane', 1); }
-function openDlg(n) { current = n; document.getElementById('dname').textContent = n;
+function openDlg(n) { current = n; document.getElementById('dname').textContent = NONAME ? '' : n;
   document.getElementById('dbtn').textContent = uploads.length ? 'Add' : 'Attach'; show('dlg', 1); }
 function resetPane() { uploads = []; ['drop', 'up', 'choose'].forEach(id => show(id, 1)); show('viewer', 0); }
 function attachDlg() { uploads.push(current); steps.push((uploads.length > 1 ? 'add ' : 'attach ') + current); show('dlg', 0);
@@ -113,10 +119,16 @@ function save() { steps.push('save');
 TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for service", "For service", "Parking & Toll", "", "", "", "", ""]
 
 
-def report_html(multiple=True, empty=False, library=()):
+def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False):
+    """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
+    bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
+    icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')"""
+    js = lambda on: "true" if on else "false"
     return (REPORT.replace(" MULTIPLE>", " multiple>" if multiple else ">")
             .replace("if (EMPTY)", "if (true)" if empty else "if (false)")
-            .replace("LIBRARY", "[" + ",".join(f"'{n}'" for n in library) + "]"))
+            .replace("LIBRARY", "[" + ",".join(f"'{n}'" for n in library) + "]")
+            .replace("SLOW = false, BGTHUMB = false, NONAME = false, ICONS = false",
+                     f"SLOW = {js(slow)}, BGTHUMB = {js(bg)}, NONAME = {js(noname)}, ICONS = {js(icons)}"))
 
 
 @pytest.fixture
@@ -240,6 +252,34 @@ def test_single_upload_that_only_reaches_library_is_picked(browser, tmp_path):
     bot.attach_receipt(photos(tmp_path), done, checks)                             # 첫 장만 붙어 있으면 나머지를 올려 붙임
     assert pg.evaluate("uploads") == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"] and checks == []
     assert "이미 첨부됨(IMG_5648.jpg)" in done
+
+
+def test_fresh_uploads_wait_and_never_open_neighbour(browser, tmp_path):
+    """막 올린 사진(2026-11-16 실제 실행: 10:37에 올라갔지만 안 붙음): 준비 중인 카드는 사진이 없어서 예전에는 위로 올라가
+    옆 카드(다른 영수증)의 사진을 눌렀음 → 준비될 때까지 기다리고, 카드 밖으로는 올라가지 않음"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, slow=True, bg=True, library=("IMG_5000.jpg", "IMG_5001.jpg"))
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]   # 옆 사진(IMG_5000)이 아님
+    assert rows[0]["확인 필요"] == ""
+
+
+def test_dialog_button_next_to_delete_without_file_name(browser, tmp_path):
+    """'Receipt Image' 창에 파일 이름이 안 보여도 [Delete] 옆의 [Attach]/[Add]를 누름(경비 칸의 Remove·Add·Open이 아님).
+    카드에 작은 아이콘 그림이 있어도 가장 큰 그림(영수증 사진)을 누름"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, noname=True, icons=True)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    assert "delete icon" not in pg.evaluate("steps")                               # 카드의 작은 아이콘이 아니라 사진을 누름
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert [x for x in pg.evaluate("steps") if x.startswith(("attach", "add "))] == [
+        "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
+    assert rows[0]["확인 필요"] == ""
+
+
+def test_receipt_stem():
+    assert ca.receipt_stem("IMG_5648_업로드용.jpg") == "IMG_5648"
+    assert ca.receipt_stem("IMG_5648.HEIC") == "IMG_5648" and ca.receipt_stem("KakaoTalk_1.jpg") == "KakaoTalk_1"
 
 
 def test_empty_report_uses_manual_card(browser, tmp_path):
