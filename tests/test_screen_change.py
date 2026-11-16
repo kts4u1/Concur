@@ -63,7 +63,7 @@ def test_fields_found_by_label_when_position_changed(page):
     done = bot.fill_expense(rec, None, [])
     assert done == ["Business Purpose 입력", "Comment 입력"]                # 화면 위에서 아래 순서
     assert page.input_value("#f3") == "Parking fee for service in Chosun University Hospital"
-    assert page.input_value("#f4") == "For service"
+    assert page.input_value("#f4") == "Parking"                             # 기본 주차 Business Purpose(사용자 표)
 
 
 def test_position_fixed_in_settings(page, tmp_path):
