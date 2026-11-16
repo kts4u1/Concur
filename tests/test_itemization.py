@@ -232,3 +232,27 @@ def test_lcrt_search_list_and_hidden_row_text(browser):
     assert "open item" in steps                                                 # 숨은 글이 있어도 Accommodation을 누름
     assert "save item NA | Accommodation fee for service in Mokpo Hankook Hospital" in steps   # 모양이 다른 목록에서도 NA
     assert not [x for x in steps if x.startswith("report")] and checks == []
+
+
+# 실제 Itemization 수정 화면(2026-11-16 사용자 설명): LCRT 칸을 눌러도 '필수 정보' 안내만 뜨고, 칸 오른쪽의 아래 화살표(⌄)를
+# 눌러야 'Search by Text' 목록이 열림 → NA. (경비 화면의 LCRT처럼 옆에 지우기 X 단추도 있음)
+ARROW_FIELD = """<div id="lcrtField" style="display:flex; width:420px; border:1px solid red">
+  <input class="lcrt-in" role="combobox" readonly style="flex:1" onclick="steps.push('lcrt box')">
+  <button class="combo-arrow" style="width:30px" onclick="steps.push('arrow'); openList(document.querySelector('.lcrt-in'))">v</button>
+  <button aria-label="Clear" style="width:30px" onclick="steps.push('clear')">X</button></div>"""
+
+
+def test_lcrt_opened_with_arrow(browser):
+    page = (PAGE.replace(OLD_POP, SEARCH_POP)
+            .replace('<div id="custom32"><span class="sapcnqr-select-field__input" onclick="openList(this)"></span></div>', ARROW_FIELD)
+            .replace("function pick(el) { target.textContent = el.textContent;",
+                     "function pick(el) { if (target.tagName === 'INPUT') target.value = el.textContent; else target.textContent = el.textContent;")
+            .replace("const l = document.querySelector('#itemForm .sapcnqr-select-field__input').textContent;",
+                     "const l = document.querySelector('#itemForm .lcrt-in').value;"))
+    assert "lcrt-in" in page and "target.value" in page and "'#itemForm .lcrt-in'" in page
+    bot, pg = bot_on(browser, page=page)
+    checks = []
+    bot.go_next(1, 2, checks, 70000)
+    steps = pg.evaluate("steps")
+    assert "arrow" in steps and "clear" not in steps                            # 지우기(X)가 아니라 화살표
+    assert "save item NA | Accommodation fee for service in Mokpo Hankook Hospital" in steps and checks == []

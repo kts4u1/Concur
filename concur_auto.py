@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 LCRT 목록·사진 모두 붙이기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 LCRT 화살표로 목록 열기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -3506,14 +3506,50 @@ JS_MARK_OPTION = r"""
   const want = (text || '').trim().toLowerCase();
   const own = e => (e.innerText || '').trim().toLowerCase();
   const tr = trig.getBoundingClientRect();
-  const cands = Array.from(document.querySelectorAll('body *')).filter(e => vis(e) && e !== trig && !trig.contains(e)
-    && !e.contains(trig) && !/^(input|textarea|select|option|script|style)$/i.test(e.tagName) && own(e) === want
-    && !Array.from(e.children).some(c => own(c) === want) && onTop(e));
   const inList = e => !!e.closest('[role=option], [role=listbox], [role=menu], [role=menuitem], li, ul, [class*=option], [class*=listbox], [class*=dropdown], [class*=popover], [class*=menu]');
+  // 트리거 안의 글자(지금 값)는 빼되, 목록이 트리거 상자 안에 그려지는 경우(항목이 목록 안에 있음)는 받음
+  const cands = Array.from(document.querySelectorAll('body *')).filter(e => vis(e) && e !== trig && !e.contains(trig)
+    && (!trig.contains(e) || inList(e)) && !/^(input|textarea|select|option|script|style)$/i.test(e.tagName)
+    && own(e) === want && !Array.from(e.children).some(c => own(c) === want) && onTop(e));
   const score = e => (inList(e) ? 0 : 1000) + Math.abs(e.getBoundingClientRect().top - tr.bottom) / 10;
   cands.sort((a, b) => score(a) - score(b));
   if (!cands.length) return false;
   (cands[0].closest('[role=option], [role=menuitem], li, button') || cands[0]).setAttribute('data-concur-auto-option', '1');
+  return true;
+}
+""".replace("ON_TOP", JS_ON_TOP_FN)
+
+
+JS_MARK_DROPDOWN_ARROW = r"""
+(trig) => {
+  // 목록 칸 오른쪽의 아래 화살표(⌄). Itemization 화면의 LCRT 칸은 칸을 눌러도 '필수 정보' 안내만 뜨고 목록은
+  // 화살표를 눌러야 열림(2026-11-16 사용자 설명). 지우기(X) 단추는 빼고, 칸 오른쪽에 있는 단추·아이콘을 고릅니다.
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  ON_TOP
+  document.querySelectorAll('[data-concur-auto-arrow]').forEach(e => e.removeAttribute('data-concur-auto-arrow'));
+  const tr = trig.getBoundingClientRect();
+  const fieldSel = 'input, [role=combobox], select, textarea';
+  let box = trig;                                         // 이 칸 하나만 든 가장 큰 상자(4단계까지)
+  for (let b = trig.parentElement, k = 0; b && k < 4; b = b.parentElement, k++) {
+    if (Array.from(b.querySelectorAll(fieldSel)).filter(vis).length > 1) break;
+    box = b;
+  }
+  const label = e => ((e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || '') + ' '
+    + (typeof e.className === 'string' ? e.className : (e.getAttribute('class') || ''))).toLowerCase();
+  const clear = e => /clear|remove|delete|reset|지우기|삭제/.test(label(e)) || /^\s*[x×✕]\s*$/i.test(e.innerText || '');
+  const arrowWord = /arrow|chevron|caret|toggle|expand|dropdown|drop-down|show|open|trigger|icon|select/;
+  const middle = tr.top + tr.height / 2;
+  const cands = Array.from(box.querySelectorAll('button, [role=button], svg, i, span, div')).filter(e => {
+    if (!vis(e) || e === trig || e.contains(trig) || clear(e) || (e.closest('button, [role=button]') && clear(e.closest('button, [role=button]')))) return false;
+    const r = e.getBoundingClientRect();
+    return r.width > 0 && r.width < 60 && r.height < 60 && r.top <= middle && r.bottom >= middle && r.left + r.width / 2 > tr.left + tr.width * 0.6;
+  });
+  const score = e => (arrowWord.test(label(e)) ? 0 : 100) + (e.closest('button, [role=button]') ? 0 : 10)
+    - e.getBoundingClientRect().left / 1000;
+  cands.sort((a, b) => score(a) - score(b));
+  const pick = cands.find(onTop) || cands[0];
+  if (!pick) return false;
+  (pick.closest('button, [role=button]') || pick).setAttribute('data-concur-auto-arrow', '1');
   return true;
 }
 """.replace("ON_TOP", JS_ON_TOP_FN)
@@ -4285,6 +4321,18 @@ class ConcurBot:
         exact.first.click()
         time.sleep(0.5)
 
+    def _list_open(self) -> bool:
+        """드롭다운 목록이 열려 있는지(맨 앞에 보이는 항목·목록이 있음)"""
+        page = self.page
+        loc = page.locator(f"{self._visible_css('드롭다운 항목')}, [role=listbox]:visible, [role=option]:visible")
+        try:
+            for i in range(min(loc.count(), 5)):
+                if self._on_top(loc.nth(i)):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def choose_option(self, trigger, option_text: str):
         page = self.page
         options = page.locator(self._visible_css("드롭다운 항목")).filter(has_text=self._exact(option_text))
@@ -4305,7 +4353,24 @@ class ConcurBot:
                 time.sleep(0.3)
 
         trigger.click()
-        item = find(4)
+        item = find(2)
+        if item is None and not self._list_open():       # 칸을 눌러도 목록이 안 열림 → 오른쪽 화살표(⌄)
+            try:
+                if trigger.evaluate(JS_MARK_DROPDOWN_ARROW):
+                    arrow = page.locator("[data-concur-auto-arrow]").first
+                    try:
+                        arrow.click(timeout=3000)
+                    except Exception:
+                        arrow.evaluate("e => e.click()")
+                    item = find(3)
+            except Exception:
+                pass
+        if item is None and not self._list_open():       # 그래도 안 열리면 키보드(Alt+↓)
+            try:
+                page.keyboard.press("Alt+ArrowDown")
+            except Exception:
+                pass
+            item = find(2)
         if item is None:
             page.keyboard.type(option_text.split(",")[0][:20], delay=30)
             item = find(6)
