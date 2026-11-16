@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 다른 달 서류 빼기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 저장 전 사진 붙이기·기본 항목 6개"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -178,6 +178,8 @@ PARKING_MORE_WORDS = ["입출차", "파킹", "발렛", "parking", "valet"]
 # 예전 자동입력표에 판마다 한 번씩만 더할 글자(사용자가 나중에 지운 글자는 다시 넣지 않음)
 TOLL_DEFAULT_WORDS = ["톨게이트", "통행료", "하이패스", "한국도로공사", "도로공사", "hi-pass", "사용내역"]
 MILEAGE_DEFAULT_WORDS = ["차량유지비", "유지비보조금", "Car Record", "Driven Distance", "Total Km", "마일리지", "mileage"]
+# 새로 만드는 자동입력표의 마일리지 찾을 글자: 가게 영수증의 '마일리지 적립'에 맞지 않게 낱말 '마일리지'·'mileage'는 뺌
+MILEAGE_FORM_WORDS = [w for w in MILEAGE_DEFAULT_WORDS if w not in ("마일리지", "mileage")]
 DEFAULT_WORDS_VERSION = 7
 DEFAULT_WORDS_BY_VERSION = {
     1: {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS},
@@ -308,8 +310,10 @@ def default_settings():
             "카페": CAFE_WORDS + CAFE_MORE_WORDS,
             "식대": MEAL_USER_WORDS + MEAL_MORE_WORDS,
             "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS + ACCOM_PLATFORM_WORDS,
+            "마일리지": MILEAGE_FORM_WORDS,
+            "톨게이트": TOLL_DEFAULT_WORDS,
         },
-        "분류_우선순위": ["식대", "숙박", "카페", "주차"],
+        "분류_우선순위": ["식대", "마일리지", "숙박", "카페", "주차", "톨게이트"],   # 사용자가 쓰는 순서(2026-11-16)
         "_영수증_판별_설명": "폴더에 일반 사진이 섞여 있어도 됩니다. 금액이 보이고 아래 글자·OCR 날짜·분류 키워드 중 하나가 있으면 영수증으로 봅니다. 아니면 영수증 목록 맨 아래에 '사용 X'로 넣습니다.",
         "영수증_판별_단어": ["합계", "결제", "승인", "카드", "영수증", "금액", "부가세", "사업자", "매출", "가맹점", "거래", "주차"],
         "_병원_엑셀_설명": "병원 정보 엑셀(MR System Information 탭)을 고르면 실행할 때마다 새 병원을 병원목록.csv에 더합니다. 영문 이름은 한글을 자동으로 바꾼 것이라 확인이 필요합니다. 열을 비워 두면 병원 이름처럼 보이는 열을 자동으로 고르고, 열 제목(예: 병원명)이나 열 문자(예: C)를 적어도 됩니다.",
@@ -326,6 +330,8 @@ def default_settings():
             "카페": {"Comment": "Cafe for wifi in hospital", "Business Purpose": "For wifi"},
             "식대": {"Comment": "Overtime meal fee for service in hospital", "Business Purpose": "For Overtime meal"},
             "숙박": {"Comment": "Accommodation fee for service in hospital", "Business Purpose": "For service in hospital"},
+            "마일리지": {"Comment": "Car mileage", "Business Purpose": "Car mileage"},
+            "톨게이트": {"Comment": "Toll fee for service", "Business Purpose": "For service"},
         },
         "_Undefined_설명": ("자동입력표.csv를 처음 만들 때만 씁니다. Expense Type이 Undefined인 경비에 고를 유형. "
                           "어느 항목에도 맞지 않는 경비는 Undefined 그대로 두고 결과 파일 '확인 필요'에 남깁니다."),
@@ -334,6 +340,8 @@ def default_settings():
             "카페": "Other Staff Expenses",
             "식대": "Other Staff Expenses",
             "숙박": "Accommodation",
+            "마일리지": "Car mileage",
+            "톨게이트": "Parking & Toll",
         },
         "_화면_문구_설명": "Concur 화면에 보이는 글자. '|'로 나눠 여러 개를 적으면 그중 하나가 보이면 됩니다(예: 다음|Next). 화면이 영어로 바뀌어도 되도록 영어도 같이 적어 두었습니다.",
         "화면_문구": {
@@ -1157,6 +1165,10 @@ def _is_no_category(name: str) -> bool:
 CATEGORY_NOTE = "위에 있는 분류가 먼저 맞춰집니다. Comment의 hospital 자리에 병원 영문명이 들어가고, 병원을 못 찾으면 ' in hospital'은 빠집니다."
 
 
+# 기본 자동 입력 항목의 Concur 칸 값(빈칸은 기본 동작). 마일리지 새 경비는 Receipt Status가 No Receipt(2026-11-16 사용자 화면)
+DEFAULT_ITEM_EXTRAS = {"마일리지": {"Receipt Status": "No Receipt"}}
+
+
 def category_rows_from_cfg(cfg: dict) -> list:
     """설정 파일의 키워드·입력 문구로 처음 자동입력표를 만듭니다. 위에 있는 분류가 먼저 맞춰집니다."""
     priority = list(cfg.get("분류_우선순위") or [])
@@ -1165,8 +1177,13 @@ def category_rows_from_cfg(cfg: dict) -> list:
     rows = []
     for cat in order:
         t = (cfg.get("입력_문구") or {}).get(cat, {})
-        rows.append(_category_row([cat, ", ".join((cfg.get("키워드") or {}).get(cat, [])), t.get("Comment", ""),
-                                   t.get("Business Purpose", ""), types.get(cat, ""), ""]))
+        row = _category_row([cat, ", ".join((cfg.get("키워드") or {}).get(cat, [])), t.get("Comment", ""),
+                             t.get("Business Purpose", ""), types.get(cat, ""), ""])
+        extra = DEFAULT_ITEM_EXTRAS.get(cat, {})
+        row[C_CITY] = extra.get("도시", row[C_CITY])
+        row[C_LCRT] = extra.get("LCRT", row[C_LCRT])
+        row[C_RECEIPT] = extra.get("Receipt Status", row[C_RECEIPT])
+        rows.append(row)
     if rows:
         rows[0][C_NOTE] = CATEGORY_NOTE
     return rows
@@ -5358,9 +5375,9 @@ class ConcurBot:
             if sent and empty and "영수증이 올라갔는지 확인" in checks[before:]:   # 보관함으로만 감 → 골라서 붙임
                 checks.remove("영수증이 올라갔는지 확인")
                 done.pop()
-                self.attach_from_available(files, done, checks)
-            return
-        self.attach_from_available(files, done, checks)
+                return self.attach_from_available(files, done, checks)
+            return bool(sent) and len(checks) == before
+        return self.attach_from_available(files, done, checks)
 
     def _available_open(self) -> bool:
         """보관함(Available Receipts)이 맨 앞에 열려 있는지(닫히는 중이거나 뒤에 가려진 것은 아님)"""
@@ -5649,14 +5666,14 @@ class ConcurBot:
                 start = 1
             else:
                 done.append("이미 첨부됨(건너뜀)")            # 같은 사진을 또 붙이지 않음
-                return
+                return True
         else:
             start = 0
         if start == 0 and not self._open_available():
             checks.append(f"영수증 직접 붙이기(Choose From Available Receipts를 못 찾음: {', '.join(f.name for f in files)})")
             self.log(f"   [Choose From Available Receipts]를 찾지 못했습니다. 보이는 단추: {self._button_texts()}")
             self.screenshot("available_receipts")
-            return
+            return False
         if start == 0:
             need = [f for i, f in enumerate(files) if not self._find_card(f.name, settle=i == 0)]   # 목록은 처음 한 번만 기다림
             if need:
@@ -5691,6 +5708,7 @@ class ConcurBot:
             checks.append(f"영수증 {len(missed)}장 직접 붙이기({', '.join(missed)})")
             self.log(f"   보관함에서 붙이지 못한 영수증: {', '.join(missed)}. Concur에서 직접 붙여 주세요.")
             self.screenshot("attach_receipt")
+        return not missed
 
     def _attach_more(self, files: list, done: list, checks: list):
         """두 번째 장부터: [영수증 업로드] 버튼이 다시 보이면 그것으로, 아니면 영수증 칸의 파일 입력에 바로 넣습니다."""
@@ -5877,9 +5895,9 @@ class ConcurBot:
     def create_manual_expenses(self, recs: list, work_dir: Path, start_no: int = 1) -> list:
         """카드 경비와 맞지 않은 영수증(톨게이트·마일리지, 사용자가 넣기로 한 숙박 등)마다 새 경비를 만듭니다(사용자 설명 2026-11-15):
         [Add Expense] → [Manually Create Expense] → 항목의 Expense Type → Transaction Date(톨게이트 = 마지막 이용일,
-        마일리지 = 그 달 말일, 그 밖 = 영수증 날짜), Amount → 나머지 칸 → [Save Expense].
-        사진은 저장하기 전의 새 경비 화면에서 올리면 붙지 않아서(2026-11-15 실제 실행), 저장한 뒤 목록에서 그 경비를 다시 열어
-        카드 경비처럼 올리고 다시 저장합니다."""
+        마일리지 = 그 달 말일, 그 밖 = 영수증 날짜), Amount → 나머지 칸 → 사진(보관함에서 골라 붙임) → [Save Expense].
+        예전에는 저장하기 전에 [Upload New Receipt]로 올린 사진이 붙지 않아 저장한 뒤 다시 열어 붙였는데, 보관함에서 고르는
+        지금 방식은 저장 전에 붙여 보라는 사용자 요청(2026-11-16)에 따라 먼저 붙이고, 한 장도 못 붙였을 때만 예전 방식으로."""
         results = []
         stay_cats = stay_categories(self.cfg)
         for k, rec in enumerate(recs):
@@ -5908,18 +5926,28 @@ class ConcurBot:
                 if rec.new_kind == "톨게이트" and not rec.last_use and "날짜" not in rec.edited:
                     checks.append("Transaction Date 확인(마지막 이용일을 못 읽음)")
                 done += [f"새 경비({expense_type})", f"Transaction Date={us}", f"Amount={rec.total:,}"]
-                done += self.fill_expense(rec, None, checks)          # 칸만 채움(사진은 저장한 뒤)
+                done += self.fill_expense(rec, None, checks)          # 칸을 채우고
                 if stay:
                     self.fill_vendor(rec, done, checks)
+                # 사진은 저장하기 전에 보관함에서 골라 붙임(사용자 요청 2026-11-16: 저장했다 다시 열 필요 없음)
+                uploads = upload_files_for(rec, self.cfg, work_dir)
+                before = (len(done), len(checks))
+                attached = self.attach_receipt(uploads, done, checks, pick=True)
+                some = any(str(d).startswith("영수증 첨부(") for d in done[before[0]:])
+                retry = not attached and not some                 # 한 장도 못 붙였으면 예전처럼 저장한 뒤 다시 열어 붙임
+                if retry:
+                    del checks[before[1]:]
+                    del done[before[0]:]
+                    self.log("   저장하기 전에는 사진을 붙이지 못해, 저장한 뒤 다시 열어 붙입니다.")
                 self.save_expense(checks, rec.total if stay else None)
                 rec.used_for = f"새 경비 {us} {rec.total:,}"
-                uploads = upload_files_for(rec, self.cfg, work_dir)
-                if self.open_expense_row(us, rec.total):
-                    self.attach_receipt(uploads, done, checks, pick=True)
-                    self.save_expense(checks)
-                else:
-                    checks.append(f"영수증 직접 올리기(저장한 새 경비를 다시 열지 못함: {', '.join(p.name for p in uploads)})")
-                    self.screenshot("manual_reopen")
+                if retry:
+                    if self.open_expense_row(us, rec.total):
+                        self.attach_receipt(uploads, done, checks, pick=True)
+                        self.save_expense(checks)
+                    else:
+                        checks.append(f"영수증 직접 올리기(저장한 새 경비를 다시 열지 못함: {', '.join(p.name for p in uploads)})")
+                        self.screenshot("manual_reopen")
                 row["처리"] = ", ".join(done)
                 self.log(f"   새 경비 저장: {row['처리']}")
             except Exception as e:

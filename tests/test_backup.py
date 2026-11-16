@@ -17,7 +17,7 @@ def make_base(base: Path, city="Gwangju (ex Kwangju), KOREA, REPUBLIC OF", rule=
     cfg = ca.default_settings()
     cfg["기본_도시"] = city
     ca.save_settings(base / ca.SETTINGS_FILE_NAME, cfg)
-    rows = ca.load_category_rows(base / ca.CATEGORY_FILE_NAME, cfg)
+    rows = [r for r in ca.load_category_rows(base / ca.CATEGORY_FILE_NAME, cfg) if r[0] != rule]   # 기본 톨게이트 항목 대신
     rows.append([rule, "통행료, 톨게이트", "Toll fee for service in {hospital}", "For service", "Parking & Toll", ""])
     ca.save_category_rows(base / ca.CATEGORY_FILE_NAME, rows)
     (base / ca.HOSPITAL_FILE_NAME).write_text("찾을 글자,영문 이름\n원광대,Wonkwang University Hospital\n", encoding="utf-8-sig")

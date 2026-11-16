@@ -36,7 +36,7 @@ def test_default_words(text, category):
 def test_new_table_has_user_items(tmp_path):
     rows = ca.load_category_rows(tmp_path / ca.CATEGORY_FILE_NAME, ca.default_settings())
     by = {r[ca.C_NAME]: r for r in rows}
-    assert [r[ca.C_NAME] for r in rows] == ["식대", "숙박", "카페", "주차"]
+    assert [r[ca.C_NAME] for r in rows] == ["식대", "마일리지", "숙박", "카페", "주차", "톨게이트"]
     assert by["식대"][ca.C_KEYWORDS].startswith("찌개, 한식, 식당, ")
     assert by["숙박"][ca.C_KEYWORDS].startswith("모텔, 호텔, ") and by["숙박"][ca.C_TYPE] == "Accommodation"
     assert by["숙박"][ca.C_COMMENT] == "Accommodation fee for service in hospital"

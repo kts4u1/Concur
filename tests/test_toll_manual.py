@@ -120,12 +120,13 @@ TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for s
 
 
 def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False,
-                slow_close=False):
+                slow_close=False, no_choose_new=False):
     """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
     bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
     icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')
     behind: 실제 Concur처럼 경비 화면을 열어도 리포트 화면이 뒤에 가려진 채 남고, 영수증 칸의 [Add]는 아이콘 글자가 붙음
-    slow_close: 사진을 붙이면 보관함의 카드는 바로 사라지지만 보관함은 1.5초 뒤에 닫힘"""
+    slow_close: 사진을 붙이면 보관함의 카드는 바로 사라지지만 보관함은 1.5초 뒤에 닫힘
+    no_choose_new: 저장하기 전의 새 경비 화면에는 [Choose From Available Receipts]가 없음(저장한 뒤 다시 열어야 붙임)"""
     js = lambda on: "true" if on else "false"
     html = REPORT
     if behind:
@@ -135,6 +136,10 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
                 + "<style>#form { position:fixed; inset:0; z-index:10; background:#fff; overflow:auto }"
                   " #dialog, #pop { position:fixed; top:0; left:0; z-index:30; background:#fff }</style>")
         assert html.count("show('report', 0)") == 0 and "mi" in html
+    if no_choose_new:
+        old = "editing = null; resetPane();"
+        assert old in html
+        html = html.replace(old, "editing = null; resetPane(); show('choose', 0);")
     if slow_close:
         old = "show('dlg', 0);\n  closeAvail();"
         assert old in html
@@ -202,11 +207,11 @@ def test_manual_toll_expense(page, tmp_path):
     steps = page.evaluate("steps")
     assert steps[:2] == ["manual", "type Parking & Toll"] and steps[-1] == "save"
     one = "library IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"                         # 보관함에 한 번에 여러 장 올림
-    assert steps.index("date") < steps.index("amount") < steps.index("save") < steps.index("edit") < steps.index(one)
+    assert steps.index("date") < steps.index("amount") < steps.index(one) < steps.index("save")
     assert [x for x in steps if x.startswith(("attach", "add "))] == [            # 첫 장 Attach, 다음 장은 Add
         "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
     assert "card icon" not in steps                                                # 'Receipt Image' 창의 [Attach]를 누름
-    assert steps[-1] == "save" and steps.count("save") == 2                        # 저장 → 다시 열어 사진 → 다시 저장
+    assert steps[-1] == "save" and steps.count("save") == 1 and "edit" not in steps   # 사진을 붙이고 한 번만 저장(2026-11-16)
     assert saved["vendor"] == ""                                                   # Vendor Name은 숙박만
     assert rows[0]["순번"] == 5 and rows[0]["Concur 날짜"] == "10/22/2026" and rows[0]["확인 필요"] == ""
     assert "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"] and rec.used_for
@@ -311,6 +316,17 @@ def test_panel_closing_slowly_after_add(browser, tmp_path):
     pg = open_report(browser, behind=True, slow_close=True)
     rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert rows[0]["확인 필요"] == ""
+
+
+def test_attach_after_save_when_new_expense_cannot_attach(browser, tmp_path):
+    """저장하기 전의 새 경비 화면에서 사진을 붙일 수 없으면, 예전처럼 저장한 뒤 다시 열어 붙임"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, no_choose_new=True)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert steps.index("save") < steps.index("edit") and steps.count("save") == 2
     assert rows[0]["확인 필요"] == ""
 
 
