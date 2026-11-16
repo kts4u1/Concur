@@ -427,3 +427,23 @@ def test_resume_when_only_first_receipt_attached(browser, tmp_path):
     assert done[0] == "이미 첨부됨(IMG_5648.jpg)"
     bot.attach_receipt(files, done, checks, pick=True)                              # 다 붙은 뒤에는 건너뜀
     assert pg.evaluate("uploads") == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"] and done[-1] == "이미 첨부됨(건너뜀)"
+
+
+
+def test_slow_loading_cards_are_waited_for(browser, tmp_path):
+    """[Add]·[Choose From Available Receipts]로 연 보관함의 사진 목록이 늦게 뜨면(실제 화면) 다 뜰 때까지 기다렸다 고름
+    — 예전에는 바로 못 찾아 같은 사진을 또 올리고 두 번째 사진부터 못 붙였음"""
+    pytest.importorskip("cv2")
+    html = report_html(library=("IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg")).replace(
+        "function openAvail() { shownCards = 4; show('avail', 1); show('pane', 0); drawCards(); }",
+        "function openAvail() { shownCards = 4; show('avail', 1); show('pane', 0);"
+        " document.getElementById('cards').innerHTML = ''; setTimeout(drawCards, 1500); }")
+    assert "setTimeout(drawCards" in html
+    pg = browser.new_page()
+    pg.set_default_timeout(3000)
+    pg.route("**/report", lambda route: route.fulfill(body=html, content_type="text/html; charset=utf-8"))
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert not [s for s in steps if s.startswith("library")]                       # 다시 안 올림
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert rows[0]["확인 필요"] == ""

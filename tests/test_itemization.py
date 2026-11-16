@@ -159,3 +159,16 @@ def test_itemization_lcrt_found_by_label(browser):
     checks = []
     bot.go_next(1, 2, checks, 70000)
     assert "save item NA | Accommodation fee for service in Mokpo Hankook Hospital" in pg.evaluate("steps") and checks == []
+
+
+
+def test_late_missing_info_dialog_still_answered(browser):
+    """저장 뒤 '필수 정보 빠짐' 창이 5초 늦게 떠도 [Yes]를 누르고 Itemizations를 넣음(실제 화면에서 못 누르고 지나쳤음)"""
+    page = PAGE.replace("function next() { steps.push('next'); if (!done()) show('dlg', 1);",
+                        "function next() { steps.push('next'); if (!done()) setTimeout(() => show('dlg', 1), 5000);")
+    assert page != PAGE
+    bot, pg = bot_on(browser, page=page)
+    checks = []
+    bot.go_next(1, 2, checks, 70000)
+    steps = pg.evaluate("steps")
+    assert steps[:2] == ["next", "yes"] and "save add 70000" in steps and checks == []

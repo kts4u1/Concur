@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-15 보관함 목록 내리기·두 번째부터 Add"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 늦게 뜨는 창·사진 목록 기다리기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -3444,7 +3444,7 @@ JS_MARK_RECEIPT_CARD = r"""
       if (img) {
         img.setAttribute('data-concur-auto-card', '1');
         const btn = Array.from(box.querySelectorAll('button, [role=button]')).find(b =>
-          /attach|첨부/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.innerText || '')));
+          /attach|첨부|^\s*add\b|추가/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.innerText || '')));
         if (btn) btn.setAttribute('data-concur-auto-cardattach', '1');
         return 'img';
       }
@@ -3477,6 +3477,19 @@ JS_SCROLL_RECEIPTS = r"""
   box.scrollTop = before + Math.max(200, box.clientHeight * 0.8);
   box.dispatchEvent(new Event('scroll'));
   return box.scrollTop > before;
+}
+"""
+
+
+JS_COUNT_CARDS = r"""
+() => {
+  // 보이는 영수증 카드 수(파일 이름 글자 + 가까이에 사진) — 보관함 목록이 다 떴는지 볼 때
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  return Array.from(document.querySelectorAll('body *')).filter(e => {
+    if (e.children.length || !vis(e) || !/\.(jpe?g|png|pdf|tiff?)$/i.test((e.textContent || '').trim())) return false;
+    for (let b = e, k = 0; b && k < 7; b = b.parentElement, k++) if (b.querySelector('img, canvas, [role=img]')) return true;
+    return false;
+  }).length;
 }
 """
 
@@ -4560,7 +4573,12 @@ class ConcurBot:
         deadline = time.time() + wait_s
         while time.time() < deadline:
             box = self._first_shown([page.get_by_role("dialog").filter(has_text=text),
-                                     page.locator("[role=alertdialog], .modal, [class*=dialog]").filter(has_text=text)])
+                                     page.locator("[role=alertdialog], .modal, [class*=dialog], [class*=modal]").filter(has_text=text)])
+            if box is None:                               # 창 표시가 없어도 긴 안내 글과 [Yes] 단추가 보이면 그 창
+                line = self._first_shown([page.get_by_text(re.compile(
+                    "Would you like to make corrections now|missing required information|지금 수정하시겠습니까", re.I))])
+                if line is not None and self._first_shown([page.get_by_role("button", name=self._re("예"))]) is not None:
+                    box = line
             if box is not None:
                 return box
             try:
@@ -4793,7 +4811,7 @@ class ConcurBot:
             return i < total and self.progress()[0] != i
 
         press()
-        box = self.missing_info_dialog(4.0, moved)
+        box = self.missing_info_dialog(8.0, moved)            # 다음 경비로 넘어가면 바로 끝
         if box is None:
             return
         self.log("   '필수 정보가 빠졌다'는 창이 떠서 [Yes]를 눌렀습니다.")
@@ -5000,9 +5018,27 @@ class ConcurBot:
             return self._upload_to_available(missing) if missing != files else [f.name for f in missing]
         return [f.name for f in missing]
 
+    def _wait_cards(self, timeout_s: float = 12.0):
+        """보관함의 사진 카드가 다 뜰 때까지(보이는 카드 수가 1초 동안 그대로일 때까지) 기다립니다."""
+        last, same, end = -1, 0, time.time() + timeout_s
+        while time.time() < end:
+            try:
+                n = self.page.evaluate(JS_COUNT_CARDS)
+            except Exception:
+                n = 0
+            same = same + 1 if n == last else 0
+            if same >= (2 if n else 4):                   # 카드가 있으면 1초, 하나도 없으면 2초 동안 그대로면 다 뜬 것
+                return n
+            last = n
+            time.sleep(0.5)
+        return last
+
     def _find_card(self, name: str) -> bool:
         """보관함에서 이름이 같은 카드를 찾습니다. 아래 카드는 목록을 내려야 나타나므로 맨 위부터 조금씩 내리며 봅니다."""
         page = self.page
+        if self._card_shown(name):
+            return True
+        self._wait_cards()                                # [Add]로 연 보관함은 사진 목록이 조금 늦게 뜸
         if self._card_shown(name):
             return True
         try:
@@ -5347,13 +5383,13 @@ class ConcurBot:
             page.get_by_role("button", name=self._re("경비 저장")).first.click()
 
         press()
-        box = self.missing_info_dialog(4.0, back)
+        box = self.missing_info_dialog(12.0, back)            # 저장이 느리면 창이 늦게 뜸(리포트로 돌아가면 바로 끝)
         if box is not None and stay_amount:
             self.answer_dialog(box, "예")
             itemized = self.fill_itemization(stay_amount, checks)
             self.close_alerts()
             press()
-            box = self.missing_info_dialog(4.0, back)
+            box = self.missing_info_dialog(8.0, back)
             if box is not None and itemized:
                 checks.append("필수 정보 확인(저장해도 빠졌다고 함)")
         elif box is not None:
