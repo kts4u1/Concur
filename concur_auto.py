@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 가려진 화면 무시·영수증 Add 찾기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 LCRT 목록·사진 모두 붙이기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -3478,6 +3478,47 @@ def apply_vendor_hospital(rec, vendor: str, hospitals: list) -> bool:
     return True
 
 
+# 화면 맨 앞에 보이는지: 경비 화면을 열어도 뒤에 리포트 목록이 그대로 깔려 있어서(2026-11-16 실행 기록의 단추 목록),
+# 가려진 리포트의 Edit·체크박스·Accommodation 글자를 누르지 않게 화면 그 자리의 맨 위 요소인지 봅니다.
+# 화면 밖(아래로 내려야 보이는 곳)은 알 수 없어서 맨 앞으로 봅니다.
+JS_ON_TOP_FN = r"""
+const onTop = e => {
+  const r = e.getBoundingClientRect();
+  if (!r.width || !r.height) return false;
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return true;
+  const hit = document.elementFromPoint(x, y);
+  return !!hit && (hit === e || e.contains(hit) || hit.contains(e));
+};
+"""
+
+JS_ON_TOP = "e => {" + JS_ON_TOP_FN + " return onTop(e); }"
+
+
+JS_MARK_OPTION = r"""
+(trig, text) => {
+  // 열린 드롭다운에서 글자가 똑같은 항목(예: NA). Itemization 화면의 LCRT 목록은 'Search by Text' 칸이 있는 다른 모양이라
+  // 설정의 '드롭다운 항목' 위치로는 못 찾았음(2026-11-16). 트리거 자신과 뒤에 가려진 화면의 글자는 빼고,
+  // 목록(option·listbox·li 등) 안의 것, 트리거에 가까운 것을 먼저.
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  ON_TOP
+  document.querySelectorAll('[data-concur-auto-option]').forEach(e => e.removeAttribute('data-concur-auto-option'));
+  const want = (text || '').trim().toLowerCase();
+  const own = e => (e.innerText || '').trim().toLowerCase();
+  const tr = trig.getBoundingClientRect();
+  const cands = Array.from(document.querySelectorAll('body *')).filter(e => vis(e) && e !== trig && !trig.contains(e)
+    && !e.contains(trig) && !/^(input|textarea|select|option|script|style)$/i.test(e.tagName) && own(e) === want
+    && !Array.from(e.children).some(c => own(c) === want) && onTop(e));
+  const inList = e => !!e.closest('[role=option], [role=listbox], [role=menu], [role=menuitem], li, ul, [class*=option], [class*=listbox], [class*=dropdown], [class*=popover], [class*=menu]');
+  const score = e => (inList(e) ? 0 : 1000) + Math.abs(e.getBoundingClientRect().top - tr.bottom) / 10;
+  cands.sort((a, b) => score(a) - score(b));
+  if (!cands.length) return false;
+  (cands[0].closest('[role=option], [role=menuitem], li, button') || cands[0]).setAttribute('data-concur-auto-option', '1');
+  return true;
+}
+""".replace("ON_TOP", JS_ON_TOP_FN)
+
+
 JS_MARK_ROW = r"""
 ({sel, date, amount}) => {
   // 리포트 경비 목록에서 날짜(MM/DD/YYYY)와 금액이 같은 줄의 체크박스에 표시합니다(저장한 새 경비를 다시 열 때).
@@ -3593,32 +3634,19 @@ JS_SCROLL_RECEIPTS = r"""
 
 JS_COUNT_CARDS = r"""
 () => {
-  // 보이는 영수증 카드 수(파일 이름 글자 + 가까이에 사진) — 보관함 목록이 다 떴는지 볼 때
+  // 맨 앞에 보이는 영수증 카드 수(파일 이름 글자 + 가까이에 사진) — 보관함 목록이 다 떴는지 볼 때.
+  // 보관함 뒤에 가려진 경비 영수증 칸의 이름(이미 붙인 사진)은 세지 않음.
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  ON_TOP
   return Array.from(document.querySelectorAll('body *')).filter(e => {
-    if (e.children.length || !vis(e) || !/\.(jpe?g|png|pdf|tiff?|heic|gif)$/i.test((e.textContent || '').trim())) return false;
+    if (e.children.length || !vis(e) || !onTop(e) || !/\.(jpe?g|png|pdf|tiff?|heic|gif)$/i.test((e.textContent || '').trim())) return false;
     for (let b = e, k = 0; b && k < 7; b = b.parentElement, k++) if (b.querySelector('img, canvas, [role=img]')) return true;
     return false;
   }).length;
 }
-"""
+""".replace("ON_TOP", JS_ON_TOP_FN)
 
 
-# 화면 맨 앞에 보이는지: 경비 화면을 열어도 뒤에 리포트 목록이 그대로 깔려 있어서(2026-11-16 실행 기록의 단추 목록),
-# 가려진 리포트의 Edit·체크박스·Accommodation 글자를 누르지 않게 화면 그 자리의 맨 위 요소인지 봅니다.
-# 화면 밖(아래로 내려야 보이는 곳)은 알 수 없어서 맨 앞으로 봅니다.
-JS_ON_TOP_FN = r"""
-const onTop = e => {
-  const r = e.getBoundingClientRect();
-  if (!r.width || !r.height) return false;
-  const x = r.left + r.width / 2, y = r.top + r.height / 2;
-  if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return true;
-  const hit = document.elementFromPoint(x, y);
-  return !!hit && (hit === e || e.contains(hit) || hit.contains(e));
-};
-"""
-
-JS_ON_TOP = "e => {" + JS_ON_TOP_FN + " return onTop(e); }"
 
 
 JS_MARK_RECEIPT_ADD = r"""
@@ -3898,9 +3926,13 @@ JS_ITEM_CHECKBOX = r"""
   const boxes = Array.from(area.querySelectorAll(allBox))
     .filter(c => { const s = shownBox(c); return s && vis(s) && onTop(s.parentElement || s) && s.getBoundingClientRect().top >= top - 2; })
     .filter(c => !selectAll(c));
-  const rowOf = c => { let r = c; for (let k = 0; k < 6 && r.parentElement; k++) { r = r.parentElement;
-      if (r.querySelectorAll(allBox).length > 1) return null;
-      if (/\d/.test(r.innerText || '') && (r.innerText || '').trim().length > 10) return r; } return r; };
+  // 항목 한 줄: 이 체크박스만 들고 있고 'Itemizations (n)' 제목은 들지 않은 가장 큰 상자
+  // (예전에는 체크박스 바로 위 상자에서 멈춰, 화면 낭독용 글만 있는 상자를 줄로 보고 제목을 못 찾았음)
+  const rowOf = c => { let r = null;
+    for (let b = c.parentElement, k = 0; b && k < 8 && b !== area.parentElement; b = b.parentElement, k++) {
+      if ((head && b.contains(head)) || Array.from(b.querySelectorAll(allBox)).filter(x => !selectAll(x)).length > 1) break;
+      r = b; }
+    return r; };
   const withError = boxes.find(c => { const r = rowOf(c); return r && /error|오류/i.test(r.innerText || ''); });
   const pick = withError || boxes[0];
   if (!pick) return false;
@@ -3916,8 +3948,8 @@ JS_ITEM_CHECKBOX = r"""
     if (err) {
       const er = err.getBoundingClientRect();
       const above = names.filter(e => { const r = e.getBoundingClientRect(); return r.bottom <= er.top + 4 && Math.abs(r.left - er.left) < 80; })
-        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-      title = above[0] || title;                          // 같은 줄 맨 위 글자(날짜 위의 Accommodation)
+        .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
+      title = above[0] || title;                          // 'Errors' 바로 위 글자(날짜는 빼므로 Accommodation)
     }
     if (title) title.setAttribute('data-concur-auto-item', '1');
   }
@@ -4256,13 +4288,34 @@ class ConcurBot:
     def choose_option(self, trigger, option_text: str):
         page = self.page
         options = page.locator(self._visible_css("드롭다운 항목")).filter(has_text=self._exact(option_text))
+        marked = page.locator("[data-concur-auto-option]")
+
+        def find(timeout_s):
+            end = time.time() + timeout_s
+            while True:
+                if self._first_shown([options]) is not None:
+                    return options.first
+                try:                                      # 모양이 다른 목록(Itemization의 LCRT 등): 글자가 똑같은 맨 앞 항목
+                    if trigger.evaluate(JS_MARK_OPTION, option_text):
+                        return marked.first
+                except Exception:
+                    pass
+                if time.time() >= end:
+                    return None
+                time.sleep(0.3)
+
         trigger.click()
-        if not self._visible(options.first, 4000):
+        item = find(4)
+        if item is None:
             page.keyboard.type(option_text.split(",")[0][:20], delay=30)
-            if not self._visible(options.first, 6000):
+            item = find(6)
+            if item is None:
                 page.keyboard.press("Escape")
                 raise RuntimeError(f"드롭다운에서 '{option_text}' 항목을 찾지 못했습니다.")
-        options.first.click()
+        try:
+            item.click(timeout=5000)
+        except Exception:
+            item.evaluate("e => e.click()")
         time.sleep(0.5)
 
     def wait_until_closed(self, stop_flag=None):
@@ -5023,21 +5076,49 @@ class ConcurBot:
             time.sleep(0.5)
         raise RuntimeError("Room Rate 칸에 금액을 넣지 못했습니다" + (f" ({'; '.join(tried[-2:])})" if tried else ""))
 
-    def _leave_itemization(self):
-        """Itemization 화면에서 멈췄으면 왼쪽 위 '< Expense'로 경비 화면에 돌아갑니다."""
+    def _top_button(self, key: str, timeout_s: float = 0.0, loose: bool = True):
+        """화면 문구(key)의 단추 중 맨 앞에 보이는 것(뒤에 가려진 화면의 같은 단추가 아니라). 없으면 None.
+        loose: 글자가 들어 있기만 해도(예: 'Save Expense ⌄') 찾음."""
         page = self.page
-        save = page.get_by_role("button", name=self._re("Save Itemization", exact=False))
-        if self._first_shown([save]) is None:
-            return
-        try:
-            page.keyboard.press("Escape")
-            back = self._first_shown([page.get_by_role("link", name=self._re("경비로 돌아가기")),
-                                      page.get_by_role("button", name=self._re("경비로 돌아가기"))])
-            if back is not None:
-                back.click()
-                time.sleep(1.0)
-        except Exception:
-            pass
+        locs = [page.get_by_role("button", name=self._re(key)), page.get_by_role("link", name=self._re(key))]
+        if loose:
+            locs.append(page.get_by_role("button", name=self._re(key, exact=False)))
+        end = time.time() + timeout_s
+        while True:
+            for loc in locs:
+                try:
+                    n = loc.count()
+                except Exception:
+                    continue
+                for i in range(min(n, 8)):
+                    el = loc.nth(i)
+                    try:
+                        if el.is_visible() and self._on_top(el):
+                            return el
+                    except Exception:
+                        pass
+            if time.time() >= end:
+                return None
+            time.sleep(0.3)
+
+    def _leave_itemization(self):
+        """Itemization 화면에서 멈췄으면 왼쪽 위 '< Expense'로 경비 화면에 돌아갑니다(열린 목록은 Escape로 닫고)."""
+        page = self.page
+        for _ in range(3):
+            if self._top_button("Save Itemization") is None:
+                return
+            try:
+                page.keyboard.press("Escape")
+                time.sleep(0.3)
+                back = self._top_button("경비로 돌아가기", 3, loose=False)   # 'Save Expense'를 잘못 누르지 않게
+                if back is not None:
+                    try:
+                        back.click(timeout=5000)
+                    except Exception:
+                        back.evaluate("e => e.click()")
+                    time.sleep(1.5)
+            except Exception:
+                pass
 
     def go_next(self, i: int, total: int, checks: list, amount=None):
         """[다음 경비](마지막은 [경비 저장])를 누릅니다. 필수 정보가 빠졌다는 창이 뜨면 [Yes]를 누르고
@@ -5045,8 +5126,18 @@ class ConcurBot:
         page = self.page
         key = "경비 저장" if i == total else "다음 경비"
 
-        def press():
-            page.get_by_role("button", name=self._re(key, exact=(key == "경비 저장"))).first.click()
+        def press():                                      # 맨 앞에 보이는 단추(뒤에 가려진 화면의 같은 단추가 아니라)
+            btn = self._top_button(key, 5)
+            if btn is None:
+                self._leave_itemization()
+                btn = self._top_button(key, 5)
+            if btn is None:
+                page.get_by_role("button", name=self._re(key, exact=(key == "경비 저장"))).first.click()
+                return
+            try:
+                btn.click(timeout=10000)
+            except Exception:
+                btn.evaluate("e => e.click()")
 
         def moved():
             return i < total and self.progress()[0] != i
@@ -5198,7 +5289,16 @@ class ConcurBot:
         self.attach_from_available(files, done, checks)
 
     def _available_open(self) -> bool:
-        return self._first_shown([self.page.get_by_text(self._re("사용 가능한 영수증"))]) is not None
+        """보관함(Available Receipts)이 맨 앞에 열려 있는지(닫히는 중이거나 뒤에 가려진 것은 아님)"""
+        el = self._first_shown([self.page.get_by_text(self._re("사용 가능한 영수증"))])
+        return el is not None and self._on_top(el)
+
+    def _wait_available_closed(self, timeout_s: float = 5.0):
+        """사진을 붙인 뒤 보관함이 닫히는 동안 기다립니다(닫히는 중에 다음 사진을 찾으면 못 찾음, 2026-11-16 세 번째 사진)."""
+        end = time.time() + timeout_s
+        while time.time() < end and self._available_open():
+            time.sleep(0.3)
+        time.sleep(0.5)
 
     def _receipt_add_button(self):
         """경비 영수증 칸(사진 아래 Remove · Add · Open)의 [Add]. 화면 아래쪽에 있어도 찾아서 보이게 내립니다.
@@ -5217,7 +5317,7 @@ class ConcurBot:
     def _open_available(self, again: bool = False) -> bool:
         """[Choose From Available Receipts](두 번째 사진부터는 [Add])를 눌러 보관함을 엽니다."""
         page = self.page
-        if self._available_open():
+        if not again and self._available_open():
             return True
         locs = [page.get_by_role("button", name=self._re("사용 가능한 영수증에서 선택", exact=False)),
                 page.locator("button, [role=button], a").filter(has_text=self._re("사용 가능한 영수증에서 선택", exact=False))]
@@ -5225,7 +5325,9 @@ class ConcurBot:
             locs = [page.get_by_role("button", name=self._re("영수증 더하기"))] + locs
         deadline = time.time() + self.upload_wait_s
         while time.time() < deadline:
-            el = self._receipt_add_button() if again else None
+            el = self._receipt_add_button() if again else None   # 영수증 칸의 [Add]가 보이면 먼저 누름
+            if again and el is None and self._available_open():
+                return True                                   # [Add]가 가려졌으면 보관함이 이미 열려 있는 것
             el = el if el is not None else self._first_shown(locs)
             if el is not None:
                 try:
@@ -5330,24 +5432,29 @@ class ConcurBot:
         state = self._card_shown(name)
         if state:
             return state
-        if settle:
-            self._wait_cards()                            # [Add]로 연 보관함은 사진 목록이 조금 늦게 뜸
-        state = self._card_shown(name)
-        if state:
-            return state
-        try:
-            page.evaluate(JS_SCROLL_RECEIPTS, "top")
-            for _ in range(60):
+        end = time.time() + (10 if settle else 0)          # [Add]로 연 보관함은 사진 목록이 늦게 뜰 수 있음
+        while True:
+            if settle:
+                self._wait_cards()
+            state = self._card_shown(name)
+            if state:
+                return state
+            try:
+                page.evaluate(JS_SCROLL_RECEIPTS, "top")
+                for _ in range(60):
+                    time.sleep(0.4)
+                    state = self._card_shown(name)
+                    if state:
+                        return state
+                    if not page.evaluate(JS_SCROLL_RECEIPTS, "down"):
+                        break
                 time.sleep(0.4)
-                state = self._card_shown(name)
-                if state:
-                    return state
-                if not page.evaluate(JS_SCROLL_RECEIPTS, "down"):
-                    break
-            time.sleep(0.4)
-        except Exception:
-            pass
-        return self._card_shown(name)
+            except Exception:
+                pass
+            state = self._card_shown(name)
+            if state or time.time() >= end:
+                return state
+            time.sleep(1.0)
 
     def _ready_card(self, name: str, state: str) -> str:
         """막 올린 사진은 Concur가 사진을 다 받을 때까지 눌러도 안 열릴 수 있어서, 준비될 때까지(최대 upload_done_s초) 기다립니다."""
@@ -5386,8 +5493,15 @@ class ConcurBot:
         for attempt in range(3):
             state = self._find_card(name)
             if not state:
-                self.log(f"   보관함에서 {name} 카드를 찾지 못했습니다. 보이는 사진: {', '.join(self._library_names()) or '없음'}")
-                return False
+                self.log(f"   보관함에서 {name} 카드를 찾지 못했습니다({attempt + 1}/3). "
+                         f"보이는 사진: {', '.join(self._library_names()) or '없음'}")
+                if attempt == 2:
+                    return False
+                if self._available_open():                 # 보관함을 닫았다가 다시 엶([Add])
+                    self._close_available()
+                    self._wait_available_closed()
+                self._open_available(again=True)
+                continue
             if state == "loading":
                 self.log(f"   {name}: 보관함 사진이 아직 준비 중이라 기다립니다.")
                 state = self._ready_card(name, state)
@@ -5422,6 +5536,7 @@ class ConcurBot:
                         break
                     time.sleep(0.3)
                 time.sleep(1.0)
+                self._wait_available_closed()             # 보관함이 닫히는 동안 다음 사진을 찾지 않게
                 return True
             self.log(f"   {name} 사진을 눌렀지만 [Attach]/[Add]가 보이지 않습니다({attempt + 1}/3, 카드 {state}). "
                      f"보이는 단추: {self._button_texts()}")
@@ -5748,8 +5863,17 @@ class ConcurBot:
         page = self.page
         back = self._report_shown                            # 리포트 화면이 맨 앞에 보이면 저장이 끝난 것
 
-        def press():
-            page.get_by_role("button", name=self._re("경비 저장")).first.click()
+        def press():                                      # 맨 앞에 보이는 [Save Expense](가려진 것을 누르다 60초 멈췄음)
+            btn = self._top_button("경비 저장", 5)
+            if btn is None:
+                self._leave_itemization()                 # Itemization 화면에 남아 있으면 경비 화면으로
+                btn = self._top_button("경비 저장", 10)
+            if btn is None:
+                raise RuntimeError("[Save Expense] 버튼을 찾지 못했습니다.")
+            try:
+                btn.click(timeout=10000)
+            except Exception:
+                btn.evaluate("e => e.click()")
 
         press()
         box = self.missing_info_dialog(12.0, back)            # 저장이 느리면 창이 늦게 뜸(리포트로 돌아가면 바로 끝)

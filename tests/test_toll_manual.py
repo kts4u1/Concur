@@ -119,11 +119,13 @@ function save() { steps.push('save');
 TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for service", "For service", "Parking & Toll", "", "", "", "", ""]
 
 
-def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False):
+def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False,
+                slow_close=False):
     """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
     bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
     icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')
-    behind: 실제 Concur처럼 경비 화면을 열어도 리포트 화면이 뒤에 가려진 채 남고, 영수증 칸의 [Add]는 아이콘 글자가 붙음"""
+    behind: 실제 Concur처럼 경비 화면을 열어도 리포트 화면이 뒤에 가려진 채 남고, 영수증 칸의 [Add]는 아이콘 글자가 붙음
+    slow_close: 사진을 붙이면 보관함의 카드는 바로 사라지지만 보관함은 1.5초 뒤에 닫힘"""
     js = lambda on: "true" if on else "false"
     html = REPORT
     if behind:
@@ -133,6 +135,10 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
                 + "<style>#form { position:fixed; inset:0; z-index:10; background:#fff; overflow:auto }"
                   " #dialog, #pop { position:fixed; top:0; left:0; z-index:30; background:#fff }</style>")
         assert html.count("show('report', 0)") == 0 and "mi" in html
+    if slow_close:
+        old = "show('dlg', 0);\n  closeAvail();"
+        assert old in html
+        html = html.replace(old, "show('dlg', 0);\n  document.getElementById('cards').innerHTML = ''; setTimeout(closeAvail, 1500);")
     return (html.replace(" MULTIPLE>", " multiple>" if multiple else ">")
             .replace("if (EMPTY)", "if (true)" if empty else "if (false)")
             .replace("LIBRARY", "[" + ",".join(f"'{n}'" for n in library) + "]")
@@ -295,6 +301,16 @@ def test_report_behind_and_add_with_icon_text(browser, tmp_path):
     assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
     assert [x for x in pg.evaluate("steps") if x.startswith(("attach", "add "))] == [
         "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
+    assert rows[0]["확인 필요"] == ""
+
+
+def test_panel_closing_slowly_after_add(browser, tmp_path):
+    """2026-11-16 실제 실행: 두 번째 사진을 [Add]로 붙인 뒤 보관함이 닫히는 동안 세 번째 사진을 찾아 '없다'고 하고 넘어감
+    → 보관함이 닫힐 때까지 기다린 뒤 영수증 칸의 [Add]로 다시 열어 세 장 모두 붙임"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, behind=True, slow_close=True)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
     assert rows[0]["확인 필요"] == ""
 
 

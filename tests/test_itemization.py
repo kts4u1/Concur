@@ -206,3 +206,29 @@ def test_check_and_edit_ignores_report_edit_behind(browser):
     steps = pg.evaluate("steps")
     assert "check" in steps and "edit" in steps and not [x for x in steps if x.startswith("report")]
     assert checks == []
+
+
+# 실제 Itemization 수정 화면(2026-11-16 사용자 화면): LCRT 목록이 'Search by Text' 칸·안내 글·NA/Registration Number가 있는
+# 다른 모양이라 설정의 '드롭다운 항목' 위치로는 못 찾았음. 항목 줄의 체크박스에는 화면 낭독용 글이 숨어 있음.
+SEARCH_POP = """<div id="pop" style="display:none"><input placeholder="Search by Text">
+  <p>This field is missing required information.</p>
+  <ul role="listbox"><li role="option" onclick="pick(this)">NA</li>
+    <li role="option" onclick="pick(this)">Registration Number</li></ul></div>"""
+OLD_POP = """<div id="pop" style="display:none"><div class="sapcnqr-listbox-item__wrapper" onclick="pick(this)">NA</div></div>"""
+SR_ROW = ("'<label><input type=\"checkbox\" onchange=\"chk(this)\"><span style=\"position:absolute; width:1px; height:1px;"
+          " overflow:hidden; clip:rect(0 0 0 0)\">Select Accommodation 10/20/2026 KRW 70,000</span></label>")
+
+
+def test_lcrt_search_list_and_hidden_row_text(browser):
+    page = PAGE.replace(OLD_POP, SEARCH_POP).replace(
+        "'<input type=\"checkbox\" onchange=\"chk(this)\">", SR_ROW)
+    assert SEARCH_POP in page and "Select Accommodation" in page
+    page = page.replace('<div id="expense">', BEHIND.replace("Errors: 2 Error", "Errors: 2 Error</span><span>NA") + OVER
+                        + '<div id="expense">', 1)
+    bot, pg = bot_on(browser, page=page)
+    checks = []
+    bot.go_next(1, 2, checks, 70000)
+    steps = pg.evaluate("steps")
+    assert "open item" in steps                                                 # 숨은 글이 있어도 Accommodation을 누름
+    assert "save item NA | Accommodation fee for service in Mokpo Hankook Hospital" in steps   # 모양이 다른 목록에서도 NA
+    assert not [x for x in steps if x.startswith("report")] and checks == []
