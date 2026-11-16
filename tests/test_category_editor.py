@@ -23,7 +23,8 @@ def test_load_and_save_rows(tmp_path):
     assert "분류없음" not in cfg["Undefined일_때_선택할_유형"]                 # '어느 항목에도 안 맞을 때'는 없앰
     assert cfg["항목_추가_입력"]["Taxi"] == {"도시": "Mokpo, KOREA, REPUBLIC OF", "LCRT": "NA",
                                          "Receipt Status": "Receipt", "Personal Expense": True}
-    assert cfg["항목_추가_입력"]["주차"] == {"도시": "", "LCRT": "", "Receipt Status": "", "Personal Expense": False}
+    assert cfg["항목_추가_입력"]["주차"] == {"도시": "", "LCRT": "NA", "Receipt Status": "Receipt", "Personal Expense": False}
+    assert cfg["항목_추가_입력"]["식대"] == {"도시": "", "LCRT": "", "Receipt Status": "", "Personal Expense": False}
 
 
 def test_problems():

@@ -100,11 +100,11 @@ iPhone 카메라로 찍으면 iCloud 사진으로 올라가고 PC로도 자동�
 | 식대 | 찌개, 한식, 식당, 중식, 일식, 양식, 분식, 백반, 국밥, 김밥, 칼국수, 국수, 냉면, 짜장, 짬뽕, 반점, 돈까스, 돈가스, 삼겹살, 갈비, 불고기, 제육, 비빔밥, 덮밥, 볶음밥, 공기밥, 해장국, 설렁탕, 곰탕, 감자탕, 순대, 족발, 보쌈, 치킨, 피자, 버거, 도시락, 초밥, 라면, 떡볶이, 스테이크, 한우, 횟집, 식사, 음식, 식권 | Other Staff Expenses |
 | 숙박 | 모텔, 호텔, 숙박, 여관, 여인숙, 리조트, 펜션, 게스트하우스, 레지던스, 콘도, 객실, 입실, 퇴실, 체크인, 체크아웃, 야놀자, 여기어때, 에어비앤비, hotel, motel, resort | Accommodation |
 | 카페 | 메리카, 리카노, 테이크, 카페, 커피, 라떼, 카푸치노, 에스프레소, 프라푸치노, 스무디, 디저트, 베이커리, 스타벅스, 이디야, 투썸, 메가커피, 메가엠지씨, 컴포즈, 빽다방, 할리스, 파스쿠찌, 엔제리너스, 커피빈, 폴바셋, 탐앤탐스, 공차, 매머드, 더벤티, 블루보틀, 파리바게뜨, 뚜레쥬르, coffee, cafe, starbucks, latte | Other Staff Expenses |
-| 주차 | 주차, 입차, 출차, 주자, 입출차, 파킹, 발렛, parking, valet | Parking & Toll |
-| 마일리지 | 차량유지비, 유지비보조금, Car Record, Driven Distance, Total Km (Comment·Business Purpose 'Car mileage', Receipt Status 'No Receipt') | Car mileage |
-| 톨게이트 | 톨게이트, 통행료, 하이패스, 한국도로공사, 도로공사, hi-pass, 사용내역 (Comment 'Toll fee for service', Business Purpose 'For service') | Parking & Toll |
+| 주차 | 주차, 입차, 출차, 주자, 입출차, 파킹, 발렛, parking, valet (Business Purpose 'Parking', LCRT NA, Receipt Status Receipt) | Parking & Toll |
+| 마일리지 | car record entry, total km, total driven distance, 차량유지비, 유지비보조금, Car Record, Driven Distance, 마일리지, mileage (Comment·Business Purpose 'Car mileage', LCRT NA, Receipt Status 'No Receipt') | Car mileage |
+| 톨게이트 | 차종, 이용차로, 톨게이트, 톨, toll, 하이패스, hi-pass, 통행료, 한국도로공사, 도로공사, 사용내역 (Comment 'Toll fee for service in hospital', Business Purpose 'Toll', LCRT NA, Receipt Status Receipt) | Parking & Toll |
 
-- 마일리지 기본 글자에는 '마일리지' 낱말을 넣지 않았습니다(가게 영수증의 '마일리지 적립'에 잘못 맞지 않게). 신청서는 '차량유지비·Car Record'로 찾습니다.
+- 기본 항목은 지금 쓰는 자동입력표와 똑같습니다. 가게 영수증의 '마일리지 적립' 글자로 마일리지로 잘못 맞춰지면 마일리지 항목의 찾을 글자에서 '마일리지'를 빼세요.
 - 영어 글자(hotel 등)는 대소문자 상관없이 찾습니다. 한 글자짜리나 지명과 겹치는 글자(예: 부산 해운대구 '우동')는 다른 영수증에도 맞을 수 있어 넣지 않았습니다.
 - 이미 쓰던 자동입력표에는 새 판을 처음 실행할 때 새 기본 글자(식대·숙박, 그다음 카페·주차)를 **한 번만** 더합니다(쓰시던 글자·문구는 그대로, 숙박 항목이 없으면 식대 아래에 넣음). 그 뒤에 지운 글자는 다시 넣지 않습니다.
 

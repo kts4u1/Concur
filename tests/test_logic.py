@@ -198,7 +198,7 @@ def test_find_receipt_prefers_total_then_any_amount():
 def test_texts_for_drops_hospital_phrase_when_unknown():
     cfg = ca.default_settings()
     rec = ca.Receipt(Path("a"), Path("a"), category="주차", hospital_en="KYUH")
-    assert ca.texts_for(rec, cfg) == {"Comment": "Parking fee for service in KYUH", "Business Purpose": "For service"}
+    assert ca.texts_for(rec, cfg) == {"Comment": "Parking fee for service in KYUH", "Business Purpose": "Parking"}
     rec.hospital_en = ""
     assert ca.texts_for(rec, cfg)["Comment"] == "Parking fee for service"
     rec.category = ""

@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 저장 전 사진 붙이기·기본 항목 6개"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-16 기본 자동 입력표 = 사용자 표"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -178,8 +178,10 @@ PARKING_MORE_WORDS = ["입출차", "파킹", "발렛", "parking", "valet"]
 # 예전 자동입력표에 판마다 한 번씩만 더할 글자(사용자가 나중에 지운 글자는 다시 넣지 않음)
 TOLL_DEFAULT_WORDS = ["톨게이트", "통행료", "하이패스", "한국도로공사", "도로공사", "hi-pass", "사용내역"]
 MILEAGE_DEFAULT_WORDS = ["차량유지비", "유지비보조금", "Car Record", "Driven Distance", "Total Km", "마일리지", "mileage"]
-# 새로 만드는 자동입력표의 마일리지 찾을 글자: 가게 영수증의 '마일리지 적립'에 맞지 않게 낱말 '마일리지'·'mileage'는 뺌
-MILEAGE_FORM_WORDS = [w for w in MILEAGE_DEFAULT_WORDS if w not in ("마일리지", "mileage")]
+# 새로 만드는 자동입력표의 마일리지·톨게이트 찾을 글자: 사용자가 쓰는 자동입력표 그대로(2026-11-16 사용자가 보낸 파일)
+MILEAGE_USER_WORDS = ["car record entry", "total km", "total driven distance", "차량유지비", "유지비보조금", "Car Record",
+                      "Driven Distance", "마일리지", "mileage"]
+TOLL_USER_WORDS = ["차종", "이용차로", "톨게이트", "톨", "toll", "하이패스", "hi-pass", "통행료", "한국도로공사", "도로공사", "사용내역"]
 DEFAULT_WORDS_VERSION = 7
 DEFAULT_WORDS_BY_VERSION = {
     1: {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS},
@@ -310,8 +312,8 @@ def default_settings():
             "카페": CAFE_WORDS + CAFE_MORE_WORDS,
             "식대": MEAL_USER_WORDS + MEAL_MORE_WORDS,
             "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS + ACCOM_PLATFORM_WORDS,
-            "마일리지": MILEAGE_FORM_WORDS,
-            "톨게이트": TOLL_DEFAULT_WORDS,
+            "마일리지": MILEAGE_USER_WORDS,
+            "톨게이트": TOLL_USER_WORDS,
         },
         "분류_우선순위": ["식대", "마일리지", "숙박", "카페", "주차", "톨게이트"],   # 사용자가 쓰는 순서(2026-11-16)
         "_영수증_판별_설명": "폴더에 일반 사진이 섞여 있어도 됩니다. 금액이 보이고 아래 글자·OCR 날짜·분류 키워드 중 하나가 있으면 영수증으로 봅니다. 아니면 영수증 목록 맨 아래에 '사용 X'로 넣습니다.",
@@ -326,12 +328,12 @@ def default_settings():
         "가게_이름_라벨": "공급업체|가맹점|판매처|상호|Vendor|Merchant",
         "_입력_문구_설명": "자동입력표.csv를 처음 만들 때만 씁니다. Comment의 hospital 자리에 병원 영문명. 병원을 못 찾으면 ' in hospital' 부분은 빠집니다.",
         "입력_문구": {
-            "주차": {"Comment": "Parking fee for service in hospital", "Business Purpose": "For service"},
+            "주차": {"Comment": "Parking fee for service in hospital", "Business Purpose": "Parking"},
             "카페": {"Comment": "Cafe for wifi in hospital", "Business Purpose": "For wifi"},
             "식대": {"Comment": "Overtime meal fee for service in hospital", "Business Purpose": "For Overtime meal"},
             "숙박": {"Comment": "Accommodation fee for service in hospital", "Business Purpose": "For service in hospital"},
             "마일리지": {"Comment": "Car mileage", "Business Purpose": "Car mileage"},
-            "톨게이트": {"Comment": "Toll fee for service", "Business Purpose": "For service"},
+            "톨게이트": {"Comment": "Toll fee for service in hospital", "Business Purpose": "Toll"},
         },
         "_Undefined_설명": ("자동입력표.csv를 처음 만들 때만 씁니다. Expense Type이 Undefined인 경비에 고를 유형. "
                           "어느 항목에도 맞지 않는 경비는 Undefined 그대로 두고 결과 파일 '확인 필요'에 남깁니다."),
@@ -1165,8 +1167,10 @@ def _is_no_category(name: str) -> bool:
 CATEGORY_NOTE = "위에 있는 분류가 먼저 맞춰집니다. Comment의 hospital 자리에 병원 영문명이 들어가고, 병원을 못 찾으면 ' in hospital'은 빠집니다."
 
 
-# 기본 자동 입력 항목의 Concur 칸 값(빈칸은 기본 동작). 마일리지 새 경비는 Receipt Status가 No Receipt(2026-11-16 사용자 화면)
-DEFAULT_ITEM_EXTRAS = {"마일리지": {"Receipt Status": "No Receipt"}}
+# 기본 자동 입력 항목의 Concur 칸 값(빈칸은 기본 동작) — 사용자가 쓰는 자동입력표 그대로(2026-11-16)
+DEFAULT_ITEM_EXTRAS = {"마일리지": {"LCRT": "NA", "Receipt Status": "No Receipt"},
+                       "주차": {"LCRT": "NA", "Receipt Status": "Receipt"},
+                       "톨게이트": {"LCRT": "NA", "Receipt Status": "Receipt"}}
 
 
 def category_rows_from_cfg(cfg: dict) -> list:

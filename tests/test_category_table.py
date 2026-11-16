@@ -35,14 +35,17 @@ def test_first_table_has_current_settings(tmp_path):
     assert parking["Comment"] == "Parking fee for service in hospital"
     assert "{" not in rows[0]["설명"]
     assert parking["Expense Type이 Undefined일 때"] == "Parking & Toll"
+    assert (parking["Business Purpose"], parking["LCRT"], parking["Receipt Status"]) == ("Parking", "NA", "Receipt")
     assert cfg["키워드"]["주차"] == ca.PARKING_WORDS + ca.PARKING_MORE_WORDS
     assert lines == ["자동 입력표: 분류 6개 (식대, 마일리지, 숙박, 카페, 주차, 톨게이트)"]
     by = {r["분류"]: r for r in rows}
     assert by["마일리지"]["Expense Type이 Undefined일 때"] == "Car mileage" and by["마일리지"]["Receipt Status"] == "No Receipt"
     assert by["마일리지"]["Comment"] == "Car mileage" and by["마일리지"]["Business Purpose"] == "Car mileage"
-    assert "마일리지" not in by["마일리지"]["영수증에서 찾을 글자(쉼표로 구분)"]    # '마일리지 적립' 영수증에 안 맞게
+    assert by["마일리지"]["영수증에서 찾을 글자(쉼표로 구분)"] == ", ".join(ca.MILEAGE_USER_WORDS) and by["마일리지"]["LCRT"] == "NA"
     assert by["톨게이트"]["Expense Type이 Undefined일 때"] == "Parking & Toll"
-    assert by["톨게이트"]["Comment"] == "Toll fee for service" and by["톨게이트"]["Business Purpose"] == "For service"
+    assert by["톨게이트"]["Comment"] == "Toll fee for service in hospital" and by["톨게이트"]["Business Purpose"] == "Toll"
+    assert by["톨게이트"]["영수증에서 찾을 글자(쉼표로 구분)"] == ", ".join(ca.TOLL_USER_WORDS)
+    assert (by["톨게이트"]["LCRT"], by["톨게이트"]["Receipt Status"]) == ("NA", "Receipt")
 
 
 def test_add_new_category_and_change_existing_text(tmp_path):
@@ -88,7 +91,7 @@ def test_new_category_can_be_typed_in_receipt_list(tmp_path):
 
 def test_empty_table_keeps_settings(tmp_path):
     cfg, order, _, lines = table(tmp_path, [["", "", "", "", "", ""]])
-    assert order == ["식대", "마일리지", "숙박", "카페", "주차", "톨게이트"] and cfg["입력_문구"]["주차"]["Business Purpose"] == "For service"
+    assert order == ["식대", "마일리지", "숙박", "카페", "주차", "톨게이트"] and cfg["입력_문구"]["주차"]["Business Purpose"] == "Parking"
     assert "분류가 없어" in lines[0]
 
 
