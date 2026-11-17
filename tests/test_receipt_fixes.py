@@ -5,6 +5,7 @@
 3. 'SK쉴더스 전주 수병원 주차장'의 수병원을 못 찾음(4글자 미만이라 버림) → 짧은 이름도, 영문은 Jeonju Soo Hospital
 4. 1,400원 주차 영수증이 411,400원 → 점선(......)을 4·1로 읽어 붙은 금액은 뺌"""
 
+from datetime import datetime
 from pathlib import Path
 
 import concur_auto as ca
@@ -484,3 +485,17 @@ def test_garbled_shop_name_is_not_used():
     text = "[ 영 수 증]-재발행\n가나돼시Ⅱ|기|\n123-4/-67891\n홍길동\n전남 목포시 가나로 1 가나돼시Ⅱ|기|\n2026-09-07 13:34:21"
     assert ca.find_vendor_name(text) == ""
     assert ca.find_vendor_name("가나돼지찌개\n123-45-67891\n홍길동") == "가나돼지찌개"
+
+
+def test_toll_statement_keeps_default_city():
+    """2026-11-17 20:16 기록: 하이패스 사용내역 표의 요금소 이름(순천 등) 때문에 도시가 Suncheon으로 들어감 → 기본 도시"""
+    text = ("기간별 사용내역\n카드구분 전체 카드사 전체\n(총 3건 / 총액 13,300원)\n번호 거래일시 구분 차종 입구 출구 이용차로 거래금액\n"
+            "3 2026/09/01 16:17:55 선불 1종 광주 순천 선불Hi-pass 4,700 -\n2 2026/09/02 10:00:00 선불 1종 순천시 광주 선불Hi-pass 4,300 -")
+    cfg = ca.default_settings()
+    rec = ca.analyze_receipt(Path("IMG_9001.HEIC"), Path("IMG_9001.HEIC"), text, cfg, [], datetime(2026, 9, 30, 9))
+    assert rec.total == 13300 and rec.city == ""
+    other = ca.Receipt(original=Path("b.jpg"), ocr_file=Path("b.jpg"), ocr_text="", use=True, city="Mokpo",
+                       dates=[rec.main_date])
+    rec.use = True
+    ca.fill_same_day_cities([rec, other])
+    assert rec.city == ""                                   # 같은 날 다른 영수증의 도시도 쓰지 않음

@@ -127,7 +127,7 @@ TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for s
 def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False,
                 slow_close=False, no_choose_new=False, save_busy=False, covered_save=False, real_pane=False,
                 presave_no_add=False, modal=False, vendor_required=False, upload_resets_status=False,
-                direct_shuffle=False):
+                direct_shuffle=False, add_confirm=False):
     """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
     bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
     icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')
@@ -147,7 +147,10 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
     upload_resets_status: 실제 Concur처럼(2026-11-17 사용자 화면) 저장 전 경비 칸에서 사진을 올리면 보관함 창(Attach
            Receipt)이 열린 채 남고 Receipt Status가 'None Selected'로 비며, 그대로 저장하면 'Before you can continue, you must
            provide valid information for: • Receipt Status' 오류 창([Close])이 뜨고 저장이 안 됨
-    direct_shuffle: (real_pane과 함께) 경비 칸에서 여러 장을 한 번에 올리면 올라간 순서(두 번째 장이 먼저)로 합쳐짐"""
+    direct_shuffle: (real_pane과 함께) 경비 칸에서 여러 장을 한 번에 올리면 올라간 순서(두 번째 장이 먼저)로 합쳐짐
+    add_confirm: 실제 Concur처럼(2026-11-17 20:22 사용자 화면) 영수증 칸 [Add]를 누르면 보관함이 회색으로 열리고 화면 전체를
+           덮는 'Confirm — You are adding an image to the existing receipt image…' 창([Add Receipt]·[Cancel])이 뜸.
+           [Add Receipt]를 눌러야 보관함 사진이 보임"""
     js = lambda on: "true" if on else "false"
     html = REPORT
     if behind:
@@ -239,6 +242,20 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
         old = "show('dlg', 0);\n  closeAvail();"
         assert old in html
         html = html.replace(old, "show('dlg', 0);\n  document.getElementById('cards').innerHTML = ''; setTimeout(closeAvail, 1500);")
+    if add_confirm:
+        assert 'id="addr" onclick="openAvail()"' in html
+        html = (html.replace('id="addr" onclick="openAvail()"', 'id="addr" onclick="askAdd()"')
+                .replace('<div id="pop"', '<div id="cfm" role="dialog" style="display:none; position:fixed; inset:0; z-index:90;'
+                         ' background:rgba(0,0,0,.3)"><div style="background:#fff; margin:120px auto; width:420px"><h3>Confirm</h3>'
+                         '<p>You are adding an image to the existing receipt image. Once added, receipt images cannot be separated.</p>'
+                         '<button onclick="cfmOk()">Add Receipt</button> <button onclick="cfmNo()">Cancel</button></div></div>\n<div id="pop"')
+                .replace("function resetPane() {",
+                         "function askAdd() { shownCards = 4; show('avail', 1); if (!REAL_PANE) show('pane', 0);"
+                         " document.getElementById('cards').innerHTML = ''; show('cfm', 1); steps.push('confirm shown'); }\n"
+                         "function cfmOk() { show('cfm', 0); steps.push('confirm ok'); drawCards(); }\n"
+                         "function cfmNo() { show('cfm', 0); steps.push('confirm cancel'); closeAvail(); }\n"
+                         "function resetPane() {", 1)
+                .replace("REAL_PANE", "true" if real_pane else "false"))
     return (html.replace(" MULTIPLE>", " multiple>" if multiple else ">")
             .replace("if (EMPTY)", "if (true)" if empty else "if (false)")
             .replace("LIBRARY", "[" + ",".join(f"'{n}'" for n in library) + "]")
@@ -507,6 +524,20 @@ def test_presave_first_photo_then_rest_in_order(browser, tmp_path):
     assert steps.index("direct IMG_5648.jpg") < steps.index("save") < steps.index("edit") < steps.index("add IMG_5651.jpg")
     assert steps.index("add IMG_5651.jpg") < steps.index("add IMG_5652.jpg")
     assert rows[0]["확인 필요"] == ""
+
+
+def test_add_receipt_confirm_dialog(browser, tmp_path):
+    """2026-11-17 20:22 실행 기록·사용자 화면: 저장한 뒤 다시 열어 영수증 칸 [Add]를 누르니 'Confirm — You are adding an image
+    to the existing receipt image…' 창이 떠서 보관함 사진이 안 보였고([Add Receipt]·[Cancel]만 보임), 두 번째 사진부터 못 붙이고
+    [Save Expense]도 못 누름 → 확인 창의 [Add Receipt]를 누르고 이어서 붙임"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, real_pane=True, presave_no_add=True, add_confirm=True)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert pg.evaluate("expenses")[0]["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert steps.count("confirm ok") == 2 and "confirm cancel" not in steps
+    assert steps.index("confirm ok") < steps.index("add IMG_5651.jpg") < steps.index("add IMG_5652.jpg")
+    assert rows[0]["확인 필요"] == "" and rows[0]["오류"] == "" and steps[-1] == "save"
 
 
 def test_presave_one_photo_then_add_after_save(browser, tmp_path):

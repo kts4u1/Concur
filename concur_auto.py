@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 첫 사진 순서"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 Add Receipt 확인 창"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -390,6 +390,9 @@ def default_settings():
             "업로드 중": "Uploading|업로드 중|Processing",
             "필수 정보 빠짐": "Would you like to make corrections now|missing required information|필수 정보|지금 수정하시겠습니까",
             "입력 오류": "Before you can continue|must provide valid information|계속하기 전에|올바른 정보를 입력|유효한 정보를 입력",
+            "영수증 합치기 안내": "adding an image to the existing receipt|기존 영수증 이미지에",
+            "영수증 추가 확인": "Add Receipt|영수증 추가",
+            "취소": "Cancel|취소",
             "예": "Yes|예",
             "아니요": "No|아니요|아니오",
         },
@@ -2550,7 +2553,8 @@ def fill_same_day_cities(receipts: list) -> int:
             by_day.setdefault(r.main_date, set()).add(r.city)
     filled = 0
     for r in receipts:
-        if r.use and not r.city and "도시" not in r.edited and len(by_day.get(r.main_date, ())) == 1:
+        if (r.use and not r.city and "도시" not in r.edited and len(by_day.get(r.main_date, ())) == 1
+                and not toll_statement_info(r.ocr_text)):  # 하이패스 사용내역은 기본 도시 그대로
             r.city = next(iter(by_day[r.main_date]))
             filled += 1
     return filled
@@ -2591,6 +2595,7 @@ def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, ho
     if toll:                       # 하이패스 사용내역: 금액은 '총액'만. 못 읽으면 비워 둠(표의 한 줄 금액 8,000 등을 쓰지 않음)
         rec.total = toll["total"]
         rec.amounts = [toll["total"]] if toll["total"] else []
+        rec.city = ""              # 표의 입구·출구 요금소 이름(순천 등)은 경비 도시가 아님 → 기본 도시(2026-11-17: Suncheon으로 들어감)
     elif is_hipass_sheet(ocr_text):  # 하이패스 영수증 인쇄물: 작은 글자라 크게 읽어도 금액이 틀려 금액을 넣지 않음(사용자 2026-11-17)
         rec.total, rec.amounts = 0, []
     rec.biz_no = find_business_number(ocr_text)
@@ -4120,6 +4125,39 @@ JS_READ_VALIDATION = r"""
   return null;
 }
 """
+
+
+JS_MARK_ADD_CONFIRM = r"""
+({info, ok, cancel}) => {
+  // 영수증 칸 [Add]를 누르면 뜨는 'Confirm — You are adding an image to the existing receipt image. Once added, receipt
+  // images cannot be separated.' 창(2026-11-17 사용자 화면)의 [Add Receipt]·[Cancel]에 표시. 창이 없으면 false
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  ON_TOP_STRICT
+  document.querySelectorAll('[data-concur-auto-cfm-ok], [data-concur-auto-cfm-cancel]').forEach(e => {
+    e.removeAttribute('data-concur-auto-cfm-ok'); e.removeAttribute('data-concur-auto-cfm-cancel'); });
+  const reInfo = new RegExp(info, 'i');
+  if (!reInfo.test(document.body.innerText || '')) return false;
+  const reOk = new RegExp('^\\s*(?:' + ok + ')\\s*$', 'i'), reCancel = new RegExp('^\\s*(?:' + cancel + ')\\s*$', 'i');
+  const label = b => ((b.innerText || '').trim() || b.getAttribute('aria-label') || '').trim();
+  const lines = Array.from(document.querySelectorAll('body *')).filter(e => vis(e) && reInfo.test(e.innerText || '')
+    && !Array.from(e.children).some(c => reInfo.test(c.innerText || '')));
+  for (const line of lines) {
+    let box = line;
+    for (let k = 0; k < 7 && box.parentElement; k++) {
+      box = box.parentElement;
+      const buttons = Array.from(box.querySelectorAll('button, [role=button]')).filter(vis);
+      const yes = buttons.find(b => reOk.test(label(b)) && onTopStrict(b));
+      if (yes) {
+        yes.setAttribute('data-concur-auto-cfm-ok', '1');
+        const no = buttons.find(b => reCancel.test(label(b)));
+        if (no) no.setAttribute('data-concur-auto-cfm-cancel', '1');
+        return true;
+      }
+    }
+  }
+  return false;
+}
+""".replace("ON_TOP_STRICT", "const onTopStrict = " + JS_ON_TOP_STRICT.strip() + ";")
 
 
 JS_MARK_ROW = r"""
@@ -5866,6 +5904,7 @@ class ConcurBot:
         """맨 앞에 보이는 [key] 단추(Save Expense·Next Expense)를 누릅니다. 사진을 막 붙였으면 다 올라가고 단추가 켜질 때까지
         기다린 뒤 누릅니다(카드 경비·새 경비 모두, 2026-11-16 사용자 요청). Itemization 화면에 남아 있으면 경비 화면으로 돌아감."""
         self._wait_uploaded()
+        self._cancel_add_confirm()                        # 못 끝낸 '이미지 합치기' 확인 창이 저장 단추를 가리지 않게
         btn = self._top_button(key, 5)
         if btn is None:
             self._leave_itemization()
@@ -6109,9 +6148,55 @@ class ConcurBot:
             pass
         return None
 
-    def _open_available(self, again: bool = False) -> bool:
-        """[Choose From Available Receipts](두 번째 사진부터는 [Add])를 눌러 보관함을 엽니다."""
+    def _add_confirm_shown(self) -> bool:
+        args = {"info": "|".join(re.escape(a) for a in self._alts("영수증 합치기 안내")),
+                "ok": "|".join(re.escape(a) for a in self._alts("영수증 추가 확인")),
+                "cancel": "|".join(re.escape(a) for a in self._alts("취소"))}
+        try:
+            return bool(self.page.evaluate(JS_MARK_ADD_CONFIRM, args))
+        except Exception:
+            return False
+
+    def _confirm_add_receipt(self, wait_s: float = 0.0, file=None) -> str:
+        """영수증 칸 [Add] 뒤 'You are adding an image to the existing receipt image…' 확인 창이 뜨면 [Add Receipt]를
+        누릅니다(2026-11-17 사용자 화면: 이 창을 못 보고 멈춰 사진이 한 장씩만 붙었음). [Add Receipt]가 파일 고르기 창을
+        열면 file을 넣습니다. → 'confirmed'·'uploaded'(파일을 넣음)·''(창 없음)"""
         page = self.page
+        end = time.time() + wait_s
+        while not self._add_confirm_shown():
+            if time.time() >= end:
+                return ""
+            time.sleep(0.3)
+        ok = page.locator("[data-concur-auto-cfm-ok]").first
+        self.log("   '영수증 이미지를 합친다'는 확인 창(Confirm)이 떠서 [Add Receipt]를 누릅니다.")
+        try:
+            with page.expect_file_chooser(timeout=2500) as chooser:
+                ok.click(timeout=5000)
+            chooser.value.set_files(str(file) if file else [])
+            if file:
+                self._wait_uploaded()
+                return "uploaded"
+        except Exception:
+            pass                                          # 파일 고르기 창 없이 보관함이 열림(보통)
+        time.sleep(0.8)
+        return "confirmed"
+
+    def _cancel_add_confirm(self):
+        """남아 있는 확인 창은 [Cancel]로 닫습니다(저장 단추를 가림)."""
+        if self._add_confirm_shown():
+            try:
+                self.page.locator("[data-concur-auto-cfm-cancel]").first.click(timeout=3000)
+                self.log("   남아 있던 '영수증 이미지 합치기' 확인 창을 [Cancel]로 닫았습니다.")
+                time.sleep(0.5)
+            except Exception:
+                pass
+
+    def _open_available(self, again: bool = False, file=None) -> bool:
+        """[Choose From Available Receipts](두 번째 사진부터는 [Add])를 눌러 보관함을 엽니다.
+        [Add] 뒤 '이미지를 합친다'는 확인 창이 뜨면 [Add Receipt]를 누릅니다. 그 단추가 파일 고르기 창을 열어 file을 바로
+        올렸으면 self.added_by_confirm에 그 이름을 남깁니다."""
+        page = self.page
+        self.added_by_confirm = ""
         if not again and self._available_open():
             return True
         locs = [page.get_by_role("button", name=self._re("사용 가능한 영수증에서 선택", exact=False)),
@@ -6131,6 +6216,10 @@ class ConcurBot:
                     pass
                 end = time.time() + 10
                 while time.time() < end:
+                    got = self._confirm_add_receipt(file=file)
+                    if got == "uploaded":
+                        self.added_by_confirm = Path(file).name
+                        return True
                     if self._available_open():
                         time.sleep(0.5)
                         return True
@@ -6353,6 +6442,7 @@ class ConcurBot:
                     btn.click(timeout=5000)
                 except Exception:
                     btn.evaluate("e => e.click()")
+                self._confirm_add_receipt(2.5)            # [Add] 뒤에 '이미지를 합친다' 확인 창이 뜨면 [Add Receipt]
                 gone = time.time() + 15                   # 누른 단추(창)가 사라질 때까지
                 while time.time() < gone:
                     try:
@@ -6425,9 +6515,13 @@ class ConcurBot:
             if f.name in have or f.name in missed or f.name in attached:
                 continue
             try:
-                if (have or attached or missed) and not self._open_available(again=True):
+                if (have or attached or missed) and not self._open_available(again=True, file=f):
                     self.log(f"   [Add]를 찾지 못해 {f.name}을(를) 붙이지 못했습니다. 보이는 단추: {self._button_texts()}")
                     missed.append(f.name)
+                    continue
+                if getattr(self, "added_by_confirm", "") == f.name:   # 확인 창의 [Add Receipt]가 파일 고르기로 바로 붙임
+                    attached.append(f.name)
+                    self.log(f"   영수증 붙임: {f.name}")
                     continue
                 if resumed and not self._find_card(f.name):   # 이어서 붙일 때 보관함에 없으면 올림
                     if self._upload_to_available([f]):
