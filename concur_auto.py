@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 점선 지우고 다시 읽기·계기판 사진 날짜"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 점선 지우기 고침·계기판 분류"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -1831,8 +1831,10 @@ def make_enhanced_copy(cfg: dict, original: Path, work_dir: Path, log) -> Path:
 
 def remove_dot_leaders(image):
     """영수증의 점선(주차 요금 ......... 1,400원)만 지운 사진 → (사진, 지운 점 수).
-    OCR이 점선 끝을 4·1로 읽어 1,400원이 411,400·11,400원이 됐음(2026-11-17 사용자 화면). 작은 점이 한 줄로 4개 이상
-    고르게 이어진 것만 지우고, 사이에 글자가 끼면 거기서 끊어 쉼표(1,400의 ',')·한 개뿐인 점은 남깁니다."""
+    OCR이 점선 끝의 점을 1·4로 읽어 1,400원이 411,400·11,400원이 됐음(2026-11-17 사용자 화면).
+    점 = 작고 꽉 찬 네모꼴(가로세로 비슷)이며 같은 줄 글자 높이의 0.45배 이하. 한 줄에 4개 이상, 간격이 고르고 사이에 글자가
+    없이 이어진 것만 지웁니다(쉼표·소수점·콜론처럼 한두 개뿐인 점과 '1'처럼 가는 글자는 남김).
+    점이 사진 대부분을 차지해 전체 글자 높이를 잘못 잡던 첫 판(실제 크기 사진에서 0개)을 고쳐 줄마다 비교합니다."""
     import bisect
     cv2, np = _cv2()
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
@@ -1840,45 +1842,71 @@ def remove_dot_leaders(image):
     n, labels, stats, cents = cv2.connectedComponentsWithStats(bw, connectivity=8)
     if n <= 1:
         return image, 0
+    x0, y0 = stats[1:, cv2.CC_STAT_LEFT], stats[1:, cv2.CC_STAT_TOP]
     w, h, area = stats[1:, cv2.CC_STAT_WIDTH], stats[1:, cv2.CC_STAT_HEIGHT], stats[1:, cv2.CC_STAT_AREA]
-    tall = h[(h >= 8) & (h <= max(9, image.shape[0] // 10))]
-    text_h = float(np.median(tall)) if tall.size else 20.0
-    lim = max(3.0, text_h * 0.4)
-    small = [i for i in range(n - 1) if w[i] <= lim and h[i] <= lim and area[i] >= 2]
-    big = [i for i in range(n - 1) if h[i] >= text_h * 0.6 and h[i] <= text_h * 3]
-    band = text_h * 0.35
-    big_by_y = sorted(big, key=lambda i: cents[i + 1][1])
-    big_y = [cents[i + 1][1] for i in big_by_y]
-    lines = []                                            # 같은 높이의 작은 점들
-    for i in sorted(small, key=lambda i: cents[i + 1][1]):
-        cy = cents[i + 1][1]
-        if lines and abs(cy - lines[-1][0]) <= band:
-            lines[-1][1].append(i)
-        else:
-            lines.append([cy, [i]])
-    marked = []
-    for cy, members in lines:
-        members.sort(key=lambda i: cents[i + 1][0])
-        lo, hi = bisect.bisect_left(big_y, cy - band * 2), bisect.bisect_right(big_y, cy + band * 2)
-        big_x = sorted(cents[j + 1][0] for j in big_by_y[lo:hi])
-        run = [members[0]]
-        for a, b in zip(members, members[1:]):
-            xa, xb = cents[a + 1][0], cents[b + 1][0]
-            between = bisect.bisect_right(big_x, xa) < bisect.bisect_left(big_x, xb)
-            if xb - xa <= text_h * 1.5 and not between:
-                run.append(b)
+    cx, cy = cents[1:, 0], cents[1:, 1]
+    cap = max(6, min(image.shape[:2]) // 40)
+    size = np.maximum(w, h)
+    fill = area / np.maximum(w * h, 1)
+    dot = (area >= 4) & (size <= cap) & (w <= h * 2) & (h <= w * 2) & (fill >= 0.45)
+    order_y = np.argsort(cy)
+    ys = cy[order_y]
+
+    def near(yc, dist):                                   # 높이가 비슷한(같은 줄) 덩어리들
+        lo, hi = bisect.bisect_left(ys, yc - dist), bisect.bisect_right(ys, yc + dist)
+        return order_y[lo:hi]
+
+    cand = sorted(np.where(dot)[0], key=lambda i: cx[i])
+    xs = [cx[i] for i in cand]
+    succ, has_pred = {}, set()
+    for k, i in enumerate(cand):                          # 오른쪽 바로 옆 점(영수증이 조금 기울어도 줄을 따라감)
+        best = None
+        for j in cand[k + 1:bisect.bisect_right(xs, cx[i] + size[i] * 4)]:
+            if j in has_pred or abs(cy[j] - cy[i]) > 0.6 * max(h[i], h[j]) or not 0.6 * h[i] <= h[j] <= 1.6 * h[i]:
                 continue
+            if best is None or cx[j] - cx[i] < cx[best] - cx[i]:
+                best = j
+        if best is not None:
+            succ[i] = best
+            has_pred.add(best)
+    marked = []
+    for head in (i for i in cand if i not in has_pred and i in succ):
+        chain = [head]
+        while chain[-1] in succ:
+            chain.append(succ[chain[-1]])
+        if len(chain) < 4:
+            continue
+        dot_h = float(np.median(h[chain]))
+        mid_y = float(np.median(cy[chain]))
+        around = near(mid_y, dot_h * 4)
+        tall = h[around][(h[around] >= dot_h * 1.8) & (h[around] <= dot_h * 12)]
+        if not tall.size or dot_h > 0.45 * float(tall.max()):
+            continue                                      # 같은 줄 글자보다 충분히 작지 않음(글자일 수 있음)
+        bigs = [j for j in around if h[j] >= dot_h * 1.8]
+        run = [chain[0]]
+
+        def close(run):
             if len(run) >= 4:
-                marked += run
-            run = [b]
-        if len(run) >= 4:
-            marked += run
+                marked.extend(run)
+
+        for p_, q in zip(chain, chain[1:]):
+            gap = cx[q] - cx[p_]
+            gaps = [cx[v] - cx[u] for u, v in zip(run, run[1:])]
+            steady = not gaps or 0.6 * np.median(gaps) <= gap <= 1.6 * np.median(gaps)
+            between = any(cx[p_] < cx[j] < cx[q] and abs(cy[j] - (cy[p_] + cy[q]) / 2) <= dot_h * 4 for j in bigs)
+            if steady and not between:
+                run.append(q)
+            else:
+                close(run)
+                # 콜론(:)의 아래 점 → 첫 점처럼 간격이 달라 끊긴 것이면 앞 점부터 다시(첫 점도 지우게)
+                run = [q] if between else [p_, q]
+        close(run)
     if not marked:
         return image, 0
     mask = np.isin(labels, np.array(marked) + 1).astype("uint8")
-    mask = cv2.dilate(mask, np.ones((3, 3), "uint8"))
-    out = image.copy()
-    out[mask > 0] = 255
+    k = max(5, int(round(float(np.median(h[marked])) * 0.6)) | 1)   # 흐릿한 가장자리까지(큰 사진일수록 넓게)
+    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    out = cv2.inpaint(image, mask * 255, 3, cv2.INPAINT_TELEA)   # 흰색이 아니라 둘레 종이 색으로 메움(종이가 회색이어도)
     return out, len(marked)
 
 
@@ -2868,12 +2896,26 @@ def dashboard_month(rec) -> str:
     return ""
 
 
-def place_dashboards(receipts: list, tm):
+def mileage_category(keywords=None, priority=None) -> str:
+    """자동 입력표의 마일리지 항목 이름('마일리지', 없으면 찾을 글자에 마일리지·mileage·Car Record가 있는 항목)"""
+    cats = list(priority or (keywords or {}).keys())
+    if "마일리지" in cats:
+        return "마일리지"
+    hints = ("마일리지", "mileage", "carrecord", "차량유지비")
+    return next((c for c in cats if any(compact(w).lower() in hints for w in (keywords or {}).get(c, []))), "")
+
+
+def place_dashboards(receipts: list, tm, keywords=None, priority=None):
     """계기판 사진의 날짜를 위쪽 날짜(그 달 1일)로, 다른 달 계기판 사진은 이 달에서 뺍니다(✕).
-    9월을 처리할 때 10월 계기판 사진이 9월 신청서에 붙어 ✓로 보였음(2026-11-17)."""
+    9월을 처리할 때 10월 계기판 사진이 9월 신청서에 붙어 ✓로 보였음(2026-11-17). 분류는 마일리지로 보여 줌(사용자 요청)."""
+    cat = mileage_category(keywords, priority)
     for r in receipts:
         month = dashboard_month(r)
-        if not month or r.bundled_into:
+        if not month:
+            continue
+        if not r.category and cat:
+            r.category = cat
+        if r.bundled_into:
             continue
         first = f"{month}-01"
         r.dates = [first] + [d for d in r.dates if d != first]
@@ -2884,7 +2926,7 @@ def place_dashboards(receipts: list, tm):
 def group_mileage_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
     """이 달 마일리지 신청서마다 계기판 사진을 묶습니다. 계기판 사진 = 이 달 1일과 다음 달 1일 날짜가 함께 찍힌 사진
     (2026.10.01 / 2026.11.01), 날짜를 못 읽었으면 'km' 글자가 있고 신청서와 사흘 안에 찍은 사진. → 묶은 신청서 수"""
-    place_dashboards(receipts, tm)
+    place_dashboards(receipts, tm, keywords, priority)
     prefix = tm.prefix + "-"
     forms = [(r, i) for r, i in ((r, mileage_form_info(r.ocr_text)) for r in receipts)
              if i and any(d.startswith(prefix) for d in (r.ocr_dates or r.dates[:1]))]

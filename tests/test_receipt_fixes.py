@@ -273,21 +273,25 @@ def test_remove_dot_leaders_keeps_commas_and_digits():
     np = pytest.importorskip("numpy")
     from PIL import Image, ImageDraw, ImageFont
     font = ImageFont.load_default(size=40)
-    img = Image.new("RGB", (1400, 280), "white")
-    d = ImageDraw.Draw(img)
-    lines = ["FEE : ...................... 1,400", "CARD : ................. 1,400", "TIME 12:07:35  No. 1.5"]
-    for k, t in enumerate(lines):
-        d.text((30, 20 + k * 80), t, fill="black", font=font)
-    arr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
-    out, n = ca.remove_dot_leaders(arr)
-    assert n >= 30
-    for k in (0, 1):
-        y0, y1 = 20 + k * 80, 80 + k * 80
-        x_amount = int(30 + d.textlength(lines[k][:-5], font=font))
-        x_dots0, x_dots1 = int(30 + d.textlength(lines[k][:7], font=font)), int(30 + d.textlength(lines[k][:-6], font=font))
-        assert (out[y0:y1, x_amount:] < 128).sum() == (arr[y0:y1, x_amount:] < 128).sum()   # 1,400(쉼표 포함) 그대로
-        assert (out[y0:y1, x_dots0:x_dots1] < 128).sum() == 0                              # 점선은 지움
-    assert (out[180:240] < 128).sum() == (arr[180:240] < 128).sum()                         # 시각·소수점은 그대로
+    lines = ["FEE : ...................... 1,400", "CARD : ................. 1,400", "TIME 12:07:35  No. 1.5",
+             "- - - - - - - - - - - - - - - -"]
+    for paper, tilt in ((255, 0), (205, 1.2)):           # 흰 종이 / 회색 종이에 조금 기울어진 사진(실제 사진처럼)
+        img = Image.new("RGB", (1400, 360), (paper,) * 3)
+        d = ImageDraw.Draw(img)
+        for k, t in enumerate(lines):
+            d.text((30, 20 + k * 80), t, fill="black", font=font)
+        img = img.rotate(tilt, fillcolor=(paper,) * 3, resample=Image.BICUBIC)
+        arr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+        out, n = ca.remove_dot_leaders(arr)
+        assert n >= 35
+        dark = lambda a: int((a < 110).sum())
+        for k in (0, 1):
+            y0, y1 = 10 + k * 80, 90 + k * 80
+            x_amount = int(30 + d.textlength(lines[k][:-5], font=font))
+            x_dots0, x_dots1 = int(30 + d.textlength(lines[k][:7], font=font)), int(30 + d.textlength(lines[k][:-6], font=font))
+            assert dark(out[y0:y1, x_amount:]) >= dark(arr[y0:y1, x_amount:]) * 0.95   # 1,400(쉼표 포함)은 남김
+            assert dark(out[y0:y1, x_dots0:x_dots1]) <= dark(arr[y0:y1, x_dots0:x_dots1]) * 0.05   # 점선은 지움
+        assert dark(out[170:350]) >= dark(arr[170:350]) * 0.95                       # 시각·소수점·줄표는 그대로
     assert ca.join_spaced_amount("주차 요금 1 400원") == "주차 요금 1,400원"
 
 
@@ -370,6 +374,7 @@ def test_october_dashboard_is_not_attached_to_september_form(tmp_path, monkeypat
     assert dash.skip_reason == ca.OTHER_MONTH_NOTE.format(date="2026-10-01")
     assert ca.review_status({"사용(O/X)": "X", "확인 필요": dash.skip_reason, "붙는 영수증": ""}) .startswith("✕")
     assert form.use and form.bundle == []
+    assert dash.category == "마일리지"                                             # 분류가 비지 않게(사용자 요청)
 
 
 def test_dashboard_main_date_is_upper_date(tmp_path, monkeypatch):
