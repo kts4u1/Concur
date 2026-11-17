@@ -126,7 +126,8 @@ TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for s
 
 def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False,
                 slow_close=False, no_choose_new=False, save_busy=False, covered_save=False, real_pane=False,
-                presave_no_add=False, modal=False, vendor_required=False, upload_resets_status=False):
+                presave_no_add=False, modal=False, vendor_required=False, upload_resets_status=False,
+                direct_shuffle=False):
     """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
     bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
     icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')
@@ -143,9 +144,10 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
     modal: 실제 Concur처럼 'Add Expense to Report' 창이 화면 전체를 덮고(뒤의 리포트 목록은 가려진 채 보임), 목록 맨 위에
            'Recently Used'로 같은 항목이 한 번 더 나옴(2026-11-17 사용자 화면)
     vendor_required: Enter Vendor Name 칸이 필수(별표가 따로 그려짐)이고 칸 id·name에 vendor가 없어 칸 이름으로만 찾을 수 있음
-    upload_resets_status: 실제 Concur처럼(2026-11-17 사용자 화면) 저장 전 경비 칸에서 여러 장을 올리면 보관함 창(Attach
+    upload_resets_status: 실제 Concur처럼(2026-11-17 사용자 화면) 저장 전 경비 칸에서 사진을 올리면 보관함 창(Attach
            Receipt)이 열린 채 남고 Receipt Status가 'None Selected'로 비며, 그대로 저장하면 'Before you can continue, you must
-           provide valid information for: • Receipt Status' 오류 창([Close])이 뜨고 저장이 안 됨"""
+           provide valid information for: • Receipt Status' 오류 창([Close])이 뜨고 저장이 안 됨
+    direct_shuffle: (real_pane과 함께) 경비 칸에서 여러 장을 한 번에 올리면 올라간 순서(두 번째 장이 먼저)로 합쳐짐"""
     js = lambda on: "true" if on else "false"
     html = REPORT
     if behind:
@@ -159,7 +161,7 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
         old_lib = "function toLibrary(inp) { const names = Array.from(inp.files).map(f => f.name); library.push(...names);"
         old_save = "function save() { steps.push('save');"
         assert old_lib in html and old_save in html
-        html = (html.replace(old_lib, old_lib + " if (inp.id === 'f' && names.length > 1) { setTimeout(() => {"
+        html = (html.replace(old_lib, old_lib + " if (inp.id === 'f') { setTimeout(() => {"
                              " document.querySelector('[name=receiptType]').textContent = 'None Selected'; openAvail(); }, 300); }")
                 .replace(old_save, "function save() { if (document.querySelector('[name=receiptType]').textContent === 'None Selected') {"
                                    " steps.push('save invalid'); show('verr', 1); return; } steps.push('save');")
@@ -200,6 +202,7 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
         old = "editing = null; resetPane();"
         assert old in html
         html = html.replace(old, "editing = null; resetPane(); show('choose', 0);")
+    assert real_pane or not direct_shuffle
     if real_pane:
         old_open = "function openAvail() { shownCards = 4; show('avail', 1); show('pane', 0); drawCards(); }"
         old_up = '<button id="up" onclick="document.getElementById(\'f\').click()">Upload New Receipt</button>'
@@ -217,6 +220,11 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
                 + "<style>#form { position: relative } #avail { position: absolute; inset: 0; z-index: 20; background: #fff }"
                   " #upload-receipt-button { position: relative; z-index: 30 } #dlg { position: relative; z-index: 40; background: #fff }</style>")
         assert "'up'" not in html
+        if direct_shuffle:                                # 두 장 이상이면 두 번째 장이 먼저 올라감
+            old_direct = "function attachDirect(inp) { Array.from(inp.files).forEach(f => {"
+            assert old_direct in html
+            html = html.replace(old_direct, "function attachDirect(inp) { const fs = Array.from(inp.files);"
+                                " if (fs.length > 1) fs.unshift(fs.splice(1, 1)[0]); fs.forEach(f => {")
     if presave_no_add:
         old_btns = '<button id="addr" onclick="openAvail()">Add</button><button>Open</button>'
         assert old_btns in html and "function pickType(el) {" in html and "editing = +cb.dataset.i;" in html
@@ -293,8 +301,8 @@ def test_manual_toll_expense(page, tmp_path):
     assert saved["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]    # PDF가 아니라 사진을 차례대로
     steps = page.evaluate("steps")
     assert steps[:2] == ["manual", "type Parking & Toll"] and steps[-1] == "save"
-    one = "library IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"                         # 보관함에 한 번에 여러 장 올림
-    assert steps.index("date") < steps.index("amount") < steps.index(one) < steps.index("save")
+    first, rest = "library IMG_5648.jpg", "library IMG_5651.jpg,IMG_5652.jpg"   # 저장 전에는 첫 장만, 나머지는 한 번에
+    assert steps.index("date") < steps.index("amount") < steps.index(first) < steps.index("save") < steps.index(rest)
     assert [x for x in steps if x.startswith(("attach", "add "))] == [            # 첫 장 Attach, 다음 장은 Add
         "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
     assert "card icon" not in steps                                                # 'Receipt Image' 창의 [Attach]를 누름
@@ -486,18 +494,19 @@ def test_resume_after_a_middle_photo_was_attached_directly(browser, tmp_path):
     assert any("순서 확인" in c for c in checks) and "이미 첨부됨(IMG_5651.jpg)" in done
 
 
-def test_presave_photos_uploaded_together(browser, tmp_path):
-    """2026-11-16 23:26 실행 기록·사용자 화면: 저장 전 새 경비는 사진을 한 장 붙이면 그 아래에 [Remove]만 있고 [Add]가 없어
-    세 경비 모두 첫 사진만 붙었음 → 경비 칸의 [Upload New Receipt]로 여러 장을 한 번에 올려 차례대로 붙이고 한 번 저장"""
+def test_presave_first_photo_then_rest_in_order(browser, tmp_path):
+    """2026-11-17 사용자 화면: 톨게이트 경비 사진 세 장을 저장 전에 한 번에 올리니 Concur가 올라간 순서대로 합쳐 하이패스
+    사용내역이 '2 의 3'(두 번째 장)이 됨(사용자: '하이패스 전부가 요약해서 나온 사진을 맨 처음으로') → 저장 전에는 첫 사진
+    (사용내역)만 올리고, 저장한 뒤 다시 열어 [Add]로 나머지를 차례대로 붙임"""
     pytest.importorskip("cv2")
-    pg = open_report(browser, real_pane=True, presave_no_add=True)
+    pg = open_report(browser, real_pane=True, presave_no_add=True, direct_shuffle=True)
     rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     steps = pg.evaluate("steps")
-    assert [s for s in steps if s.startswith("direct")] == [
-        "direct IMG_5648.jpg", "direct IMG_5651.jpg", "direct IMG_5652.jpg"]          # 한 번에, 차례대로
-    assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
-    assert steps.count("save") == 1 and "edit" not in steps and steps[-1] == "save"
-    assert rows[0]["확인 필요"] == "" and "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"]
+    assert [s for s in steps if s.startswith("direct")] == ["direct IMG_5648.jpg"]   # 저장 전에는 첫 장만
+    assert pg.evaluate("expenses")[0]["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert steps.index("direct IMG_5648.jpg") < steps.index("save") < steps.index("edit") < steps.index("add IMG_5651.jpg")
+    assert steps.index("add IMG_5651.jpg") < steps.index("add IMG_5652.jpg")
+    assert rows[0]["확인 필요"] == ""
 
 
 def test_presave_one_photo_then_add_after_save(browser, tmp_path):
@@ -519,7 +528,7 @@ def test_presave_upload_goes_to_library_then_attach_after_save(browser, tmp_path
     pg = open_report(browser, presave_no_add=True)
     rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     steps = pg.evaluate("steps")
-    assert [s for s in steps if s.startswith("library")] == ["library IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"]
+    assert [s for s in steps if s.startswith("library")] == ["library IMG_5648.jpg", "library IMG_5651.jpg,IMG_5652.jpg"]
     assert [x for x in steps if x.startswith(("attach", "add "))] == [
         "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
     assert steps.index("save") < steps.index("edit") and steps.count("save") == 2

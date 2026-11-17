@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 Receipt Status 다시 고르기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 첫 사진 순서"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -6459,8 +6459,11 @@ class ConcurBot:
         가면 남은 사진을 돌려줍니다."""
         files = [Path(f) for f in files]
         sub_done, sub_checks = [], []
+        # 저장 전에는 첫 사진만 올림: 여러 장을 한 번에 올리면 Concur가 올라간 순서대로 합쳐 사용내역이 두 번째 장이
+        # 되기도 했고(2026-11-17 사용자 화면 '2 의 3'), 보관함으로만 가거나 Receipt Status가 비기도 했음. 나머지는
+        # 저장한 뒤 다시 열어 [Add]로 차례대로 붙임(첫 장 = 톨게이트 사용내역·숙박 영수증·마일리지 신청서).
         try:
-            sent = self._attach_one(files, sub_done, sub_checks)
+            sent = self._attach_one(files[:1], sub_done, sub_checks)
         except Exception as e:
             self.log(f"   저장 전에 사진을 올리지 못했습니다: {str(e).splitlines()[0][:80]}")
             return files
@@ -6486,8 +6489,10 @@ class ConcurBot:
                 shown = {receipt_stem(n).lower() for n in state.get("names", [])}
                 got = [f for f in files[:sent] if receipt_stem(f.name).lower() in shown] or files[:1]
         done.append(f"영수증 첨부({', '.join(f.name for f in got)})")
-        self.log(f"   저장 전에 영수증 {len(got)}장을 한 번에 붙였습니다: {', '.join(f.name for f in got)}")
-        return [f for f in files if f not in got]
+        rest = [f for f in files if f not in got]
+        self.log(f"   저장 전에 첫 사진을 붙였습니다: {', '.join(f.name for f in got)}"
+                 + (f" (나머지 {len(rest)}장은 저장한 뒤 차례로 붙입니다)" if rest else ""))
+        return rest
 
     def _attached_directly(self, names: list) -> list:
         """보관함에 올린 사진 중 보관함이 닫히고 경비 영수증 칸에 바로 붙은 것(이름이 영수증 칸에 보임)"""
@@ -6760,7 +6765,7 @@ class ConcurBot:
                     raise RuntimeError("새 경비를 저장하지 못했습니다(Concur 화면의 오류 안내를 확인하세요).")
                 rec.used_for = f"새 경비 {us} {rec.total:,}"
                 if left:
-                    self.log(f"   저장하기 전에는 다 붙이지 못해({', '.join(f.name for f in left)}), 저장한 뒤 다시 열어 붙입니다.")
+                    self.log(f"   저장한 뒤 다시 열어 붙입니다: {', '.join(f.name for f in left)}")
                     if self.open_expense_row(us, rec.total):
                         self.attach_from_available(uploads, done, checks)
                         self.save_expense(checks)
