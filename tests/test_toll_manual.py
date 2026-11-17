@@ -319,17 +319,17 @@ def test_manual_toll_expense(page, tmp_path):
     assert saved["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]    # PDF가 아니라 사진을 차례대로
     steps = page.evaluate("steps")
     assert steps[:2] == ["manual", "type Parking & Toll"] and steps[-1] == "save"
-    first, rest = "library IMG_5648.jpg", "library IMG_5651.jpg,IMG_5652.jpg"   # 저장 전에는 첫 장만, 나머지는 한 번에
-    assert steps.index("date") < steps.index("amount") < steps.index(first) < steps.index("save") < steps.index(rest)
+    one = "library IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"       # 저장 전에 보관함에 한 번에 올림(2026-11-17 사용자)
+    assert steps.index("date") < steps.index("amount") < steps.index(one) < steps.index("attach IMG_5648.jpg") < steps.index("save")
     assert [x for x in steps if x.startswith(("attach", "add "))] == [            # 첫 장 Attach, 다음 장은 Add
         "attach IMG_5648.jpg", "add IMG_5651.jpg", "add IMG_5652.jpg"]
     assert "card icon" not in steps                                                # 'Receipt Image' 창의 [Attach]를 누름
-    # 이 가짜 화면은 저장 전 화면에서 올린 사진이 보관함으로만 감 → 저장한 뒤 다시 열어 보관함에서 붙임(2026-11-16)
-    assert steps.count("save") == 2 and steps.index("save") < steps.index("edit") < steps.index("attach IMG_5648.jpg")
+    # 저장 전에는 첫 장만 붙이고, 저장한 뒤 다시 열어 [Add]로 나머지를 보관함에서 차례로
+    assert steps.count("save") == 2 and steps.index("save") < steps.index("edit") < steps.index("add IMG_5651.jpg")
     assert saved["vendor"] == ""                       # 영수증 글자가 없으면 비워 둠(필수 칸이 아니면 '확인 필요'도 안 남김)
     assert rows[0]["순번"] == 5 and rows[0]["Concur 날짜"] == "10/22/2026" and rows[0]["확인 필요"] == ""
-    assert "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"] and rec.used_for
-    assert page.inner_text("#count") == "Expenses (1)"
+    assert "영수증 첨부(IMG_5648.jpg)" in rows[0]["처리"] and "영수증 첨부(IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"]
+    assert rec.used_for and page.inner_text("#count") == "Expenses (1)"
 
 
 def make_bot(page, tmp_path):
@@ -355,9 +355,11 @@ def test_one_at_a_time_when_chooser_takes_one(browser, tmp_path):
     pg = open_report(browser, multiple=False)
     rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     assert pg.evaluate("saved")["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
-    assert [s for s in pg.evaluate("steps") if s.startswith("library")] == [
+    steps = pg.evaluate("steps")
+    assert [s for s in steps if s.startswith("library")] == [
         "library IMG_5648.jpg", "library IMG_5651.jpg", "library IMG_5652.jpg"]          # 한 장씩 차례로 올림
-    assert "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"]
+    assert steps.index("library IMG_5652.jpg") < steps.index("save")                    # 저장 전에 모두 보관함에
+    assert rows[0]["확인 필요"] == "" and rows[0]["오류"] == ""
 
 
 def attach_via_library(pg, tmp_path):
@@ -515,9 +517,10 @@ def test_resume_after_a_middle_photo_was_attached_directly(browser, tmp_path):
 def test_presave_first_photo_then_rest_in_order(browser, tmp_path):
     """2026-11-17 사용자 화면: 톨게이트 경비 사진 세 장을 저장 전에 한 번에 올리니 Concur가 올라간 순서대로 합쳐 하이패스
     사용내역이 '2 의 3'(두 번째 장)이 됨(사용자: '하이패스 전부가 요약해서 나온 사진을 맨 처음으로') → 저장 전에는 첫 사진
-    (사용내역)만 올리고, 저장한 뒤 다시 열어 [Add]로 나머지를 차례대로 붙임"""
+    (사용내역)만 올리고, 저장한 뒤 다시 열어 [Add]로 나머지를 차례대로 붙임
+    (보관함 [Choose …]가 없는 화면에서 쓰는 길. 있으면 보관함에 한 번에 올려 첫 장만 붙임 — 아래 테스트)"""
     pytest.importorskip("cv2")
-    pg = open_report(browser, real_pane=True, presave_no_add=True, direct_shuffle=True)
+    pg = open_report(browser, real_pane=True, presave_no_add=True, direct_shuffle=True, no_choose_new=True)
     rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     steps = pg.evaluate("steps")
     assert [s for s in steps if s.startswith("direct")] == ["direct IMG_5648.jpg"]   # 저장 전에는 첫 장만
@@ -560,7 +563,7 @@ def test_all_photos_to_library_before_save_then_add_in_order(browser, tmp_path):
 def test_presave_one_photo_then_add_after_save(browser, tmp_path):
     """파일 고르기 창이 한 장만 받으면 저장 전에는 첫 장만 붙이고, 저장한 뒤 다시 열어 [Add]로 나머지를 차례대로 붙임"""
     pytest.importorskip("cv2")
-    pg = open_report(browser, real_pane=True, presave_no_add=True, multiple=False)
+    pg = open_report(browser, real_pane=True, presave_no_add=True, multiple=False, no_choose_new=True)
     rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     steps = pg.evaluate("steps")
     assert pg.evaluate("expenses")[0]["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
@@ -573,7 +576,7 @@ def test_presave_upload_goes_to_library_then_attach_after_save(browser, tmp_path
     """저장 전 화면에서 올린 사진이 경비에 안 붙고 보관함으로만 가면(2026-11-15 네 번째 실제 확인) 저장한 뒤 다시 열어
     보관함에서 차례대로 붙임(다시 올리지 않음)"""
     pytest.importorskip("cv2")
-    pg = open_report(browser, presave_no_add=True)
+    pg = open_report(browser, presave_no_add=True, no_choose_new=True)
     rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     steps = pg.evaluate("steps")
     assert [s for s in steps if s.startswith("library")] == ["library IMG_5648.jpg", "library IMG_5651.jpg,IMG_5652.jpg"]
@@ -660,7 +663,7 @@ def test_receipt_status_reset_after_upload_is_fixed_before_save(browser, tmp_pat
     비어, [Save Expense]에 'Before you can continue … Receipt Status' 오류 창이 뜨고 저장이 안 됐음(그런데도 '저장'으로 기록).
     → 보관함 창을 닫고, 저장 전에 Receipt Status를 다시 고르고, 저장한 뒤 다시 열어 보관함에서 붙임."""
     pytest.importorskip("cv2")
-    pg = open_report(browser, upload_resets_status=True)
+    pg = open_report(browser, upload_resets_status=True, no_choose_new=True)
     logs = []
     bot = make_bot(pg, tmp_path)
     bot.log = logs.append
@@ -675,13 +678,13 @@ def test_receipt_status_reset_after_upload_is_fixed_before_save(browser, tmp_pat
 def test_validation_error_dialog_fixed_and_saved_again(browser, tmp_path):
     """오류 창이 그래도 뜨면 닫고 빠졌다는 칸(Receipt Status)을 다시 넣은 뒤 다시 저장. 저장을 못 하면 '저장'으로 기록하지 않음."""
     pytest.importorskip("cv2")
-    pg = open_report(browser, upload_resets_status=True)
+    pg = open_report(browser, upload_resets_status=True, no_choose_new=True)
     bot = make_bot(pg, tmp_path)
     bot.ensure_selects = lambda checks: None                  # 저장 전 확인을 건너뛰어 오류 창이 뜨게
     rows = bot.create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     steps = pg.evaluate("steps")
     assert "save invalid" in steps and pg.evaluate("saved")["receipt"] == "Receipt" and rows[0]["오류"] == ""
-    pg2 = open_report(browser, upload_resets_status=True)
+    pg2 = open_report(browser, upload_resets_status=True, no_choose_new=True)
     bot2 = make_bot(pg2, tmp_path)
     bot2.ensure_selects = lambda checks: None
     bot2.fix_invalid_fields = lambda fields, checks: False   # 고치지 못하면
