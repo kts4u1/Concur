@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 보관함에 한 번에 올리기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 올릴 사진 이름 새로"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -3840,17 +3840,17 @@ def texts_for(rec: Receipt, cfg: dict) -> dict:
     return out
 
 
-def upload_files_for(rec: Receipt, cfg: dict, work_dir: Path) -> list:
+def upload_files_for(rec: Receipt, cfg: dict, work_dir: Path, tag: str = "") -> list:
     """Concur에 올릴 파일들: 사용내역 → 함께 첨부할 영수증 인쇄물 차례(사진마다 HEIC는 JPEG, 5MB 넘으면 줄임).
     사용자 요청(2026-11-15): PDF로 묶지 말고 사진을 차례차례 올림."""
-    first = prepare_upload_file(rec, cfg, work_dir)
-    return [first] + [prepare_upload_path(Path(p), cfg, work_dir) for p in rec.bundle]
+    first = prepare_upload_file(rec, cfg, work_dir, tag)
+    return [first] + [prepare_upload_path(Path(p), cfg, work_dir, tag) for p in rec.bundle]
 
 
-def prepare_upload_file(rec: Receipt, cfg: dict, work_dir: Path) -> Path:
+def prepare_upload_file(rec: Receipt, cfg: dict, work_dir: Path, tag: str = "") -> Path:
     """원본(기본) 또는 보정본을 고르고, 5MB를 넘거나 HEIC면 JPEG 사본을 만듭니다."""
     src = rec.ocr_file if str(cfg.get("업로드_이미지", "원본")).strip() == "보정본" else rec.original
-    return prepare_upload_path(src, cfg, work_dir)
+    return prepare_upload_path(src, cfg, work_dir, tag)
 
 
 def receipt_stem(name: str) -> str:
@@ -3858,20 +3858,29 @@ def receipt_stem(name: str) -> str:
     return re.sub(r"_업로드용$", "", Path(str(name)).stem)
 
 
-def prepare_upload_path(src: Path, cfg: dict, work_dir: Path) -> Path:
-    """사진 한 장을 Concur에 올릴 수 있게: 5MB를 넘거나 HEIC면 JPEG 사본을 만듭니다."""
+def prepare_upload_path(src: Path, cfg: dict, work_dir: Path, tag: str = "") -> Path:
+    """사진 한 장을 Concur에 올릴 수 있게: 5MB를 넘거나 HEIC면 JPEG 사본을 만듭니다.
+    tag(실행마다 다른 글자)를 주면 이름에 넣은 사본을 올립니다(IMG_5650_11172240_업로드용.jpg). 지난 실행에서 만든 경비를
+    지우면 거기 붙어 있던 사진들이 한 묶음(여러 장)으로 보관함에 'IMG_5650_업로드용.jpg' 이름 그대로 돌아오는데, 그 묶음을
+    같은 사진 한 장으로 알고 다시 골라 Car mileage에 같은 사진이 두 번·순서가 바뀌어 붙었음(2026-11-17 22:40 실행)."""
     cv2, _ = _cv2()
     limit = float(cfg.get("업로드_최대_MB", 5)) * 1024 * 1024
     must_convert = src.suffix.lower() in HEIC_EXTENSIONS     # Concur가 HEIC를 못 받을 수 있음
+    stem = f"{src.stem}_{tag}_업로드용" if tag else f"{src.stem}_업로드용"
     if not must_convert and src.stat().st_size <= limit:
-        return src
+        if not tag:
+            return src
+        work_dir.mkdir(parents=True, exist_ok=True)
+        out = work_dir / f"{stem}{src.suffix.lower()}"
+        shutil.copy2(src, out)
+        return out
     img = imread_unicode(src)
     if img is None:
         if must_convert:
             raise RuntimeError(f"HEIC 사진을 JPEG로 바꾸지 못했습니다: {src.name}")
         return src
     work_dir.mkdir(parents=True, exist_ok=True)
-    out = work_dir / f"{src.stem}_업로드용.jpg"
+    out = work_dir / f"{stem}.jpg"
     scale, quality = 1.0, 90
     for _ in range(20):
         im = img if scale == 1.0 else cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
@@ -4839,6 +4848,7 @@ class ConcurBot:
         self.login_stable_s = 3.0       # 로그인된 화면이 이만큼 그대로여야 로그인으로 봄(잠깐 보였다 로그인 화면으로 가는 일)
         self.save_dialog_wait_s = 12.0   # [Save Expense] 뒤 '필수 정보 빠짐' 창을 기다리는 시간
         self.save_retry_s = 15.0         # 그 뒤로도 화면이 그대로면 다시 누르기까지 기다리는 시간
+        self.upload_tag = ""             # 올릴 사진 이름에 넣는 실행마다 다른 글자(run_job이 정함, 테스트는 빈칸)
         self.confirm_added = []          # 보관함에서 올렸는데 '이미지를 합친다' 확인 창으로 바로 붙은 사진
         self.added_by_confirm = ""
         self.login_timeout_s = 600
@@ -6910,7 +6920,7 @@ class ConcurBot:
                 done += self.fill_expense(rec, None, checks)          # 칸을 채우고(Vendor Name도)
                 # 사진은 저장하기 전에 붙임(사용자 요청 2026-11-16). 저장 전 화면에는 [Add]가 없어(사진 아래 [Remove]만)
                 # 경비 칸의 [Upload New Receipt]로 여러 장을 한 번에 올리고, 못 붙인 사진은 저장한 뒤 다시 열어 [Add]로 붙임
-                uploads = upload_files_for(rec, self.cfg, work_dir)
+                uploads = upload_files_for(rec, self.cfg, work_dir, self.upload_tag)
                 left = self.attach_before_save(uploads, done, checks)
                 if not self.save_expense(checks, rec.total if stay else None):
                     self.screenshot("manual_not_saved")
@@ -7227,7 +7237,8 @@ class ConcurBot:
                         checks.append("분류 없음(영수증만 첨부)")
                     if duplicate_count(rec, receipts) > 1:
                         checks.append("같은 날짜·금액 영수증 여러 장")
-                    upload = upload_files_for(rec, self.cfg, work_dir) if rec.bundle else prepare_upload_file(rec, self.cfg, work_dir)
+                    upload = (upload_files_for(rec, self.cfg, work_dir, self.upload_tag) if rec.bundle
+                              else prepare_upload_file(rec, self.cfg, work_dir, self.upload_tag))
                     if rec.bundle:
                         self.log(f"   하이패스 사용내역과 영수증 인쇄물 {len(rec.bundle)}장을 차례로 올립니다.")
                 done = self.fill_expense(rec, upload, checks)
@@ -7418,6 +7429,7 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
 
         bot = ConcurBot(cfg, log, ui, stop_flag)
         bot.hospitals = hospitals
+        bot.upload_tag = f"{datetime.now():%m%d%H%M}"   # 보관함의 지난 실행 사진(묶음)과 헷갈리지 않게
         bot.start()
         keep_open = bool(cfg.get("작업_후_Edge_열어두기", True))
         again, found = False, None

@@ -560,6 +560,31 @@ def test_all_photos_to_library_before_save_then_add_in_order(browser, tmp_path):
     assert rows[0]["확인 필요"] == "" and rows[0]["오류"] == ""
 
 
+def test_old_library_card_with_same_name_is_not_reused(browser, tmp_path):
+    """2026-11-17 22:40 실행: 지난 실행에서 만든 경비를 지우면 거기 붙어 있던 사진 묶음(신청서+계기판)이 보관함에
+    'IMG_5650_업로드용.jpg' 이름 그대로 돌아오는데, 그것을 신청서 한 장으로 알고 골라 Car mileage에 계기판 사진이 두 번,
+    순서도 바뀌어 붙었음 → 올릴 사진 이름에 실행마다 다른 글자를 넣어 새로 올린 사진만 고름"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, library=("IMG_5648.jpg",))            # 지난 실행의 묶음(같은 이름)
+    bot = make_bot(pg, tmp_path)
+    bot.upload_tag = "11172240"
+    rows = bot.create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    names = ["IMG_5648_11172240_업로드용.jpg", "IMG_5651_11172240_업로드용.jpg", "IMG_5652_11172240_업로드용.jpg"]
+    assert pg.evaluate("expenses")[0]["uploads"] == names            # 지난 실행의 IMG_5648.jpg는 고르지 않음
+    assert [s for s in pg.evaluate("steps") if s.startswith("library")] == ["library " + ",".join(names)]
+    assert rows[0]["확인 필요"] == "" and rows[0]["오류"] == ""
+
+
+def test_upload_names_carry_run_tag(tmp_path):
+    from PIL import Image
+    src = tmp_path / "IMG_9001.jpg"
+    Image.new("RGB", (40, 40), (200, 200, 200)).save(src)
+    out = ca.prepare_upload_path(src, ca.default_settings(), tmp_path / "w", "11172240")
+    assert out.name == "IMG_9001_11172240_업로드용.jpg" and out.exists() and src.exists()
+    assert ca.receipt_stem(out.name) == "IMG_9001_11172240"
+    assert ca.prepare_upload_path(src, ca.default_settings(), tmp_path / "w") == src     # 글자가 없으면 원본 그대로
+
+
 def test_presave_one_photo_then_add_after_save(browser, tmp_path):
     """파일 고르기 창이 한 장만 받으면 저장 전에는 첫 장만 붙이고, 저장한 뒤 다시 열어 [Add]로 나머지를 차례대로 붙임"""
     pytest.importorskip("cv2")
