@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 주차 금액 확인"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 점선 지우고 다시 읽기·계기판 사진 날짜"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -1829,6 +1829,78 @@ def make_enhanced_copy(cfg: dict, original: Path, work_dir: Path, log) -> Path:
     return out if ok else None
 
 
+def remove_dot_leaders(image):
+    """영수증의 점선(주차 요금 ......... 1,400원)만 지운 사진 → (사진, 지운 점 수).
+    OCR이 점선 끝을 4·1로 읽어 1,400원이 411,400·11,400원이 됐음(2026-11-17 사용자 화면). 작은 점이 한 줄로 4개 이상
+    고르게 이어진 것만 지우고, 사이에 글자가 끼면 거기서 끊어 쉼표(1,400의 ',')·한 개뿐인 점은 남깁니다."""
+    import bisect
+    cv2, np = _cv2()
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 35, 15)
+    n, labels, stats, cents = cv2.connectedComponentsWithStats(bw, connectivity=8)
+    if n <= 1:
+        return image, 0
+    w, h, area = stats[1:, cv2.CC_STAT_WIDTH], stats[1:, cv2.CC_STAT_HEIGHT], stats[1:, cv2.CC_STAT_AREA]
+    tall = h[(h >= 8) & (h <= max(9, image.shape[0] // 10))]
+    text_h = float(np.median(tall)) if tall.size else 20.0
+    lim = max(3.0, text_h * 0.4)
+    small = [i for i in range(n - 1) if w[i] <= lim and h[i] <= lim and area[i] >= 2]
+    big = [i for i in range(n - 1) if h[i] >= text_h * 0.6 and h[i] <= text_h * 3]
+    band = text_h * 0.35
+    big_by_y = sorted(big, key=lambda i: cents[i + 1][1])
+    big_y = [cents[i + 1][1] for i in big_by_y]
+    lines = []                                            # 같은 높이의 작은 점들
+    for i in sorted(small, key=lambda i: cents[i + 1][1]):
+        cy = cents[i + 1][1]
+        if lines and abs(cy - lines[-1][0]) <= band:
+            lines[-1][1].append(i)
+        else:
+            lines.append([cy, [i]])
+    marked = []
+    for cy, members in lines:
+        members.sort(key=lambda i: cents[i + 1][0])
+        lo, hi = bisect.bisect_left(big_y, cy - band * 2), bisect.bisect_right(big_y, cy + band * 2)
+        big_x = sorted(cents[j + 1][0] for j in big_by_y[lo:hi])
+        run = [members[0]]
+        for a, b in zip(members, members[1:]):
+            xa, xb = cents[a + 1][0], cents[b + 1][0]
+            between = bisect.bisect_right(big_x, xa) < bisect.bisect_left(big_x, xb)
+            if xb - xa <= text_h * 1.5 and not between:
+                run.append(b)
+                continue
+            if len(run) >= 4:
+                marked += run
+            run = [b]
+        if len(run) >= 4:
+            marked += run
+    if not marked:
+        return image, 0
+    mask = np.isin(labels, np.array(marked) + 1).astype("uint8")
+    mask = cv2.dilate(mask, np.ones((3, 3), "uint8"))
+    out = image.copy()
+    out[mask > 0] = 255
+    return out, len(marked)
+
+
+def make_dotless_copy(original: Path, work_dir: Path, log=None):
+    """점선을 지운 임시 사본(jpg). 점선이 없거나 읽지 못하면 None"""
+    cv2, _ = _cv2()
+    img = imread_unicode(original)
+    if img is None:
+        return None
+    out_img, count = remove_dot_leaders(img)
+    if not count:
+        return None
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out = work_dir / f"dotless_{original.stem}.jpg"
+    return out if imwrite_unicode(out, out_img, ".jpg", [cv2.IMWRITE_JPEG_QUALITY, 95]) else None
+
+
+def join_spaced_amount(text: str) -> str:
+    """점선을 지운 사진에서 쉼표가 같이 지워져 '1 400원'으로 읽힌 금액을 '1,400원'으로"""
+    return re.sub(r"(?<![\d,])(\d{1,3}) (\d{3})(?=\s*원)", r"\1,\2", text or "")
+
+
 def info_score(rec) -> int:
     """읽어 낸 정보가 얼마나 되는지(날짜·금액·분류·병원)"""
     # 금액은 읽어 낸 금액이 있는지로(하이패스 인쇄물·총액 못 읽은 사용내역은 금액을 일부러 비워 두므로)
@@ -2227,7 +2299,8 @@ def amount_suspect(rec, cfg: dict) -> bool:
     """금액을 잘못 읽었을 수 있어 크게 다시 읽어 확인할 영수증"""
     if amount_too_big(rec, cfg):
         return True
-    return rec.total >= 100000 and bool(dotted_core(rec.total)) and bool(re.search(r"[.·•…]{3,}", rec.ocr_text or ""))
+    dotted = bool(dotted_core(rec.total)) and bool(re.search(r"[.·•…]{3,}", rec.ocr_text or ""))
+    return dotted and (rec.total >= 100000 or rec.category == "주차")
 
 
 def recheck_amount(rec, others: list, cfg: dict) -> bool:
@@ -2241,6 +2314,7 @@ def recheck_amount(rec, others: list, cfg: dict) -> bool:
     cap = int(cfg.get("주차_최대_금액") or 0)
     cands = [w for w in dotted_core(rec.total) if values.count(w) and (not big or w <= cap)
              and (big or values.count(w) >= values.count(rec.total))]
+    cands += [x for w in list(cands) for x in dotted_core(w) if values.count(x) > values.count(w)]   # 11,400 → 1,400
     if cands:
         best = max(cands, key=lambda w: (values.count(w), -w))
         rec.amounts = [best] + [a for a in rec.amounts if a not in (best, rec.total)]
@@ -2782,9 +2856,35 @@ def mileage_form_info(text: str):
             "km": last(r"drivendistance(?:\(km\))?[:：]?(\d[\d,]*)")}
 
 
+def dashboard_month(rec) -> str:
+    """계기판 사진(그 달 1일·다음 달 1일 사진 두 장을 인쇄, 날짜 글자 2026.10.01 / 2026.11.01)이면 그 달 'YYYY-MM'.
+    위쪽(이른) 날짜가 그 달(사용자 2026-11-17: "윗쪽의 날짜를 인식해서 그 달로", 10월 01일 → 10월)."""
+    days = sorted(d for d in set(rec.ocr_dates) if d.endswith("-01"))
+    for d in days:
+        y, m = int(d[:4]), int(d[5:7])
+        nxt = f"{y + 1}-01-01" if m == 12 else f"{y}-{m + 1:02d}-01"
+        if nxt in days:
+            return d[:7]
+    return ""
+
+
+def place_dashboards(receipts: list, tm):
+    """계기판 사진의 날짜를 위쪽 날짜(그 달 1일)로, 다른 달 계기판 사진은 이 달에서 뺍니다(✕).
+    9월을 처리할 때 10월 계기판 사진이 9월 신청서에 붙어 ✓로 보였음(2026-11-17)."""
+    for r in receipts:
+        month = dashboard_month(r)
+        if not month or r.bundled_into:
+            continue
+        first = f"{month}-01"
+        r.dates = [first] + [d for d in r.dates if d != first]
+        if month != tm.prefix:
+            r.use, r.skip_reason = False, OTHER_MONTH_NOTE.format(date=first)
+
+
 def group_mileage_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
     """이 달 마일리지 신청서마다 계기판 사진을 묶습니다. 계기판 사진 = 이 달 1일과 다음 달 1일 날짜가 함께 찍힌 사진
     (2026.10.01 / 2026.11.01), 날짜를 못 읽었으면 'km' 글자가 있고 신청서와 사흘 안에 찍은 사진. → 묶은 신청서 수"""
+    place_dashboards(receipts, tm)
     prefix = tm.prefix + "-"
     forms = [(r, i) for r, i in ((r, mileage_form_info(r.ocr_text)) for r in receipts)
              if i and any(d.startswith(prefix) for d in (r.ocr_dates or r.dates[:1]))]
@@ -2798,7 +2898,9 @@ def group_mileage_bundles(receipts: list, tm, keywords=None, priority=None) -> i
         if id(r) in form_ids or r.bundled_into or r.new_kind or r.pay_dates:
             continue
         strong = first in r.ocr_dates and nxt in r.ocr_dates
-        weak = "km" in compact(r.ocr_text).lower() and not r.category and any(gap(r, f) <= 3 * 86400 for f, _ in forms)
+        # 날짜를 못 읽은 사진만(다른 달 계기판 사진이 같은 날 찍혔다고 붙지 않게)
+        weak = (not r.ocr_dates and "km" in compact(r.ocr_text).lower() and not r.category
+                and any(gap(r, f) <= 3 * 86400 for f, _ in forms))
         if strong or weak:
             r.bundled_into = min(forms, key=lambda x: gap(r, x[0]))[0].original.name
     end = f"{tm.prefix}-{calendar.monthrange(tm.year, tm.month)[1]:02d}"
@@ -3336,6 +3438,33 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         cache[key] = {"size": st.st_size, "mtime": int(st.st_mtime), "text": text}
         return text
 
+    def dotless_text(orig: Path, st) -> str:
+        """점선을 지운 사본으로 다시 읽은 글자(결과는 '파일이름#점선'으로 기억, 사본은 바로 지움)"""
+        key = orig.name + "#점선"
+        c = cache.get(key)
+        if c and c.get("size") == st.st_size and c.get("mtime") == int(st.st_mtime) and "text" in c:
+            return c["text"]
+        try:
+            copy = make_dotless_copy(orig, work_dir, log)
+        except Exception as e:
+            log(f"   점선 지우기 실패: {orig.name} ({e})")
+            copy = None
+        if copy is None:
+            cache[key] = {"size": st.st_size, "mtime": int(st.st_mtime), "text": ""}
+            return ""
+        try:
+            text = join_spaced_amount(ocr_engine().read(copy))
+        except Exception as e:
+            log(f"   점선 지운 사진 읽기 실패: {orig.name} ({e})")
+            text = ""
+        finally:
+            try:
+                copy.unlink()
+            except OSError:
+                pass
+        cache[key] = {"size": st.st_size, "mtime": int(st.st_mtime), "text": text}
+        return text
+
     def enhanced_text(orig: Path, st) -> str:
         """보정 사본으로 다시 읽은 글자(결과는 기억해 두고, 보정 사본은 바로 지움)"""
         key = orig.name + "#보정"
@@ -3384,10 +3513,10 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
                     else:
                         others.append(big)
             elif first_is_receipt and amount_suspect(first, cfg) and orig.name not in early_names:
-                counts["금액 확인"] += 1                 # 주차 411,400원처럼 잘못 읽은 듯한 금액은 크게 다시 읽어 맞춰 봄
-                big = zoomed_text(orig, st)
-                if big.strip():
-                    others.append(big)
+                counts["금액 확인"] += 1                 # 주차 411,400원처럼 잘못 읽은 듯한 금액은 다시 읽어 맞춰 봄
+                for again_text in (dotless_text(orig, st), zoomed_text(orig, st)):   # 점선을 지운 사진 → 크게
+                    if again_text.strip():
+                        others.append(again_text)
             # 그래도 금액이나 날짜를 못 읽었으면 보정(대비·선명하게)해서 한 번 더 읽음
             if use_pre and first_is_receipt and missing:
                 counts["보정"] += 1

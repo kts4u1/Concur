@@ -263,3 +263,117 @@ def test_normal_amounts_are_not_read_again(tmp_path, monkeypatch):
     assert calls == [] and rec.total == 1400
     meal = analyze("한식 식당 2026-10-15 합계 412,000원")                        # 식대 큰 금액은 의심하지 않음
     assert not ca.amount_suspect(meal, ca.default_settings())
+
+
+# ---------- 점선 지우고 다시 읽기 (2026-11-17: 크게 읽어도 11,400원) ----------
+
+def test_remove_dot_leaders_keeps_commas_and_digits():
+    import pytest
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    from PIL import Image, ImageDraw, ImageFont
+    font = ImageFont.load_default(size=40)
+    img = Image.new("RGB", (1400, 280), "white")
+    d = ImageDraw.Draw(img)
+    lines = ["FEE : ...................... 1,400", "CARD : ................. 1,400", "TIME 12:07:35  No. 1.5"]
+    for k, t in enumerate(lines):
+        d.text((30, 20 + k * 80), t, fill="black", font=font)
+    arr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+    out, n = ca.remove_dot_leaders(arr)
+    assert n >= 30
+    for k in (0, 1):
+        y0, y1 = 20 + k * 80, 80 + k * 80
+        x_amount = int(30 + d.textlength(lines[k][:-5], font=font))
+        x_dots0, x_dots1 = int(30 + d.textlength(lines[k][:7], font=font)), int(30 + d.textlength(lines[k][:-6], font=font))
+        assert (out[y0:y1, x_amount:] < 128).sum() == (arr[y0:y1, x_amount:] < 128).sum()   # 1,400(쉼표 포함) 그대로
+        assert (out[y0:y1, x_dots0:x_dots1] < 128).sum() == 0                              # 점선은 지움
+    assert (out[180:240] < 128).sum() == (arr[180:240] < 128).sum()                         # 시각·소수점은 그대로
+    assert ca.join_spaced_amount("주차 요금 1 400원") == "주차 요금 1,400원"
+
+
+def test_parking_amount_fixed_by_dotless_read(tmp_path, monkeypatch):
+    """크게 읽기는 11,400(점 하나를 1로), 점선을 지운 사진은 1,400 두 번 → 1,400"""
+    zoomed = PARK_411.replace("411,400원", "11,400원")
+    dotless = PARK_411.replace("411,400원", "1,400원")
+    fake = tmp_path / "dotless_IMG_5657.jpg"
+    fake.write_bytes(b"x")
+    monkeypatch.setattr(ca, "make_dotless_copy", lambda original, work_dir, log=None: fake)
+    import os
+    from datetime import datetime
+    src = tmp_path / "src"
+    src.mkdir()
+    p = src / "IMG_5657.JPG"
+    p.write_bytes(b"\xff\xd8\xff\xd9")
+    t = datetime(2026, 11, 15, 10, 0).timestamp()
+    os.utime(p, (t, t))
+
+    class FakeOcr:
+        def __init__(self, work_dir):
+            pass
+
+        def read(self, path):
+            return dotless if "dotless" in Path(path).name else PARK_411
+
+        def read_zoomed(self, path):
+            return zoomed
+
+    monkeypatch.setattr(ca, "WindowsOcr", FakeOcr)
+    cfg = ca.default_settings()
+    cfg.update({"영수증_원본_폴더": str(src), "영수증_보정_사용": False})
+    results = tmp_path / "결과"
+    results.mkdir()
+    rec = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), [], results, tmp_path / "w", lambda s: None)[0]
+    assert rec.total == 1400 and rec.amount_issue == ""
+    assert not fake.exists()                                                       # 임시 사본은 지움
+
+
+# ---------- 계기판 사진은 위쪽 날짜의 달 (2026-11-17 사용자: "윗쪽의 날짜를 인식해서 그 달로") ----------
+
+def mileage_pair(tmp_path, monkeypatch, month):
+    import os
+    from datetime import datetime
+    src = tmp_path / "src"
+    src.mkdir()
+    texts = {"IMG_5649.JPG": "2026.10.01 0 km 0.8 2026.11.01 0 km 0.9",                      # 10월 계기판 사진
+             "IMG_5660.JPG": "Car Record Entry [차량 유지비 보조금 신청서]\n2026-09-01 Tue service 250 108,250\n"
+                             "2026-09-30 Wed service 20 8,660\nTotal Driven Distance (km) 2,494\n"
+                             "Total Km Amount (Won) 1,079,730"}                              # 9월 신청서
+    for name in texts:
+        p = src / name
+        p.write_bytes(b"\xff\xd8\xff\xd9" + name.encode())
+        t = datetime(2026, 11, 15, 10, 0).timestamp()                              # 같은 날 찍음
+        os.utime(p, (t, t))
+
+    class FakeOcr:
+        def __init__(self, work_dir):
+            pass
+
+        def read(self, path):
+            return texts[Path(path).name]
+
+        def read_zoomed(self, path):
+            return ""
+
+    monkeypatch.setattr(ca, "WindowsOcr", FakeOcr)
+    cfg = ca.default_settings()
+    cfg.update({"영수증_원본_폴더": str(src), "영수증_보정_사용": False})
+    results = tmp_path / "결과"
+    results.mkdir()
+    recs = ca.build_receipts(cfg, ca.TargetMonth(2026, month), [], results, tmp_path / "w", lambda s: None)
+    return {r.original.name: r for r in recs}
+
+
+def test_october_dashboard_is_not_attached_to_september_form(tmp_path, monkeypatch):
+    got = mileage_pair(tmp_path, monkeypatch, 9)
+    dash, form = got["IMG_5649.JPG"], got["IMG_5660.JPG"]
+    assert dash.bundled_into == "" and not dash.use and dash.main_date == "2026-10-01"      # 예전: 9월 신청서에 붙어 ✓
+    assert dash.skip_reason == ca.OTHER_MONTH_NOTE.format(date="2026-10-01")
+    assert ca.review_status({"사용(O/X)": "X", "확인 필요": dash.skip_reason, "붙는 영수증": ""}) .startswith("✕")
+    assert form.use and form.bundle == []
+
+
+def test_dashboard_main_date_is_upper_date(tmp_path, monkeypatch):
+    rec = analyze("2026.10.01 0 km 0.8 2026.11.01 0 km 0.9")
+    assert ca.dashboard_month(rec) == "2026-10"
+    ca.place_dashboards([rec], ca.TargetMonth(2026, 11))
+    assert rec.main_date == "2026-10-01" and not rec.use                           # 11월에는 10월 사진
