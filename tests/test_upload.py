@@ -128,6 +128,7 @@ def test_old_default_rows_are_removed_and_only_confirmed_hospitals_stay(tmp_path
     rows = ca.load_hospital_rows(p)
     assert [r[:2] for r in rows] == [
         ["목포한국", "Mokpo Hankook Hospital"],
+        ["전주수병원", "Jeonju Soo Hospital"],
         ["원광대", "Wonkwang University Hospital"],        # 자동 영문명 → 확인한 공식 영문명
         ["조선대", "Chosun Univ. Hospital"],               # 사용자가 넣은 줄은 그대로
     ]
@@ -138,7 +139,8 @@ def test_new_hospital_file_has_only_confirmed_hospitals(tmp_path):
     p = tmp_path / ca.HOSPITAL_FILE_NAME
     rows = ca.load_hospital_rows(p)
     assert rows == [["원광대", "Wonkwang University Hospital", "영수증에서 확인"],
-                    ["목포한국", "Mokpo Hankook Hospital", "영수증에서 확인"]]
+                    ["목포한국", "Mokpo Hankook Hospital", "영수증에서 확인"],
+                    ["전주수병원", "Jeonju Soo Hospital", "영수증에서 확인"]]
 
 
 # ---------- 서울(본사 주소)은 뒤로 ----------
