@@ -476,3 +476,11 @@ def test_generic_vendor_when_name_unread():
     assert ca.generic_vendor("", "Other Staff Expenses") == "Restaurant"
     assert ca.generic_vendor("주차", "Parking & Toll") == "Parking"
     assert ca.generic_vendor("마일리지", "Car mileage") == ""
+
+
+def test_garbled_shop_name_is_not_used():
+    """2026-11-17 18:13 실행 기록: 식대 영수증의 가게 이름이 'OO돼시Ⅱ|기|'로, 사업자번호도 '…-2/-…'로 깨져 읽힘 → 깨진 글자를
+    가게 이름으로 쓰지 않고 일반 이름(Restaurant)을 씀"""
+    text = "[ 영 수 증]-재발행\n가나돼시Ⅱ|기|\n123-4/-67891\n홍길동\n전남 목포시 가나로 1 가나돼시Ⅱ|기|\n2026-09-07 13:34:21"
+    assert ca.find_vendor_name(text) == ""
+    assert ca.find_vendor_name("가나돼지찌개\n123-45-67891\n홍길동") == "가나돼지찌개"

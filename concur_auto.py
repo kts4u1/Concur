@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 두 번째 Parking & Toll·Vendor Name"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 Receipt Status 다시 고르기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -389,6 +389,7 @@ def default_settings():
             "직접 경비 만들기": "Manually Create Expense|수동으로 경비 만들기|직접 경비 만들기|새 경비 만들기",
             "업로드 중": "Uploading|업로드 중|Processing",
             "필수 정보 빠짐": "Would you like to make corrections now|missing required information|필수 정보|지금 수정하시겠습니까",
+            "입력 오류": "Before you can continue|must provide valid information|계속하기 전에|올바른 정보를 입력|유효한 정보를 입력",
             "예": "Yes|예",
             "아니요": "No|아니요|아니오",
         },
@@ -2720,7 +2721,8 @@ def _vendor_candidate(text: str) -> str:
     if (not name or not _plausible_name(name) or not re.search(r"[가-힣A-Za-z]{2}", re.sub(r"\s+", "", name))
             or _looks_like_person(re.sub(r"\s+", "", name))
             or VENDOR_NOTICE.search(text) or VENDOR_NOT_NAME.search(name) or ADDRESS_LINE.search(name)
-            or name in VENDOR_LABEL_WORDS or len(name) > 40):
+            or name in VENDOR_LABEL_WORDS or len(name) > 40
+            or re.search(r"[^가-힣A-Za-z0-9\s&().,'·\-]", name)):   # 'OO돼시Ⅱ|기|'처럼 깨진 글자는 쓰지 않음(일반 이름으로)
         return ""
     return name
 
@@ -4085,6 +4087,39 @@ JS_MARK_TYPE_ITEM = r"""
   return norm(pick.innerText);
 }
 """.replace("ON_TOP_STRICT", "const onTopStrict = " + JS_ON_TOP_STRICT.strip() + ";")
+
+
+JS_READ_VALIDATION = r"""
+(pattern) => {
+  // 저장할 때 뜨는 'Error / Before you can continue, you must provide valid information for: • Receipt Status' 창
+  // (2026-11-17 사용자 화면) → {fields: [빠진 칸 이름…]}, 창의 [Close]에 표시. 창이 없으면 null
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  const re = new RegExp(pattern, 'i');
+  document.querySelectorAll('[data-concur-auto-vclose]').forEach(e => e.removeAttribute('data-concur-auto-vclose'));
+  if (!re.test(document.body.innerText || '')) return null;          // 자주 부르므로 먼저 화면 글자 전체로 확인
+  const lines = Array.from(document.querySelectorAll('body *')).filter(e => vis(e) && re.test(e.innerText || '')
+    && !Array.from(e.children).some(c => re.test(c.innerText || '')));
+  for (const line of lines) {
+    let box = line;
+    for (let k = 0; k < 7 && box.parentElement; k++) {
+      box = box.parentElement;
+      if (box.querySelector('button, [role=button]')) break;
+    }
+    let fields = Array.from(box.querySelectorAll('li')).filter(vis).map(e => (e.innerText || '').trim()).filter(Boolean);
+    if (!fields.length) {
+      const text = (box.innerText || '');
+      const after = text.split(/for\s*:|:\s*\n/i).slice(1).join('\n');
+      fields = after.split('\n').map(t => t.replace(/^[\s•·\-*]+/, '').trim())
+        .filter(t => t && t.length < 60 && !/^(close|닫기|ok|확인|error|오류)$/i.test(t));
+    }
+    const close = Array.from(box.querySelectorAll('button, [role=button]')).filter(vis)
+      .find(b => /^\s*(close|닫기|ok|확인)\s*$/i.test(b.innerText || b.getAttribute('aria-label') || ''));
+    if (close) close.setAttribute('data-concur-auto-vclose', '1');
+    return {fields: fields, close: !!close};
+  }
+  return null;
+}
+"""
 
 
 JS_MARK_ROW = r"""
@@ -5884,8 +5919,20 @@ class ConcurBot:
         def moved():
             return i < total and self.progress()[0] != i
 
+        def moved_or_invalid():
+            return moved() or self.validation_error() is not None
+
+        self.ensure_selects(checks)                           # 사진을 붙이는 동안 Receipt Status가 비었으면 다시 고름
         press()
-        box = self.missing_info_dialog(8.0, moved)            # 다음 경비로 넘어가면 바로 끝
+        for _ in range(3):
+            box = self.missing_info_dialog(8.0, moved_or_invalid)   # 다음 경비로 넘어가면 바로 끝
+            invalid = self.validation_error() if box is None else None
+            if invalid is None:
+                break
+            if not self.fix_invalid_fields(invalid, checks):   # '계속하기 전에 … 넣으라'는 오류 창 → 다시 넣고 다시 누름
+                checks.append(f"필수 칸 직접 넣기({', '.join(invalid)})")
+                return
+            press()
         if box is None:
             return
         self.log("   '필수 정보가 빠졌다'는 창이 떠서 [Yes]를 눌렀습니다.")
@@ -5916,6 +5963,9 @@ class ConcurBot:
         # 숙박 Itemizations 수정 화면에 다시 넣을 값
         self.last_values = {"Business Purpose": texts.get("Business Purpose", ""), "Comment": texts.get("Comment", ""),
                             "LCRT": extra.get("LCRT") or t["NA"]}
+        if rec:                                          # 저장 전에 다시 확인할 값(사진을 올리면 Receipt Status가 비기도 함)
+            self.last_values["Receipt Status"] = extra.get("Receipt Status") or t["Receipt"]
+        self.last_rec = rec
 
         def safely(step: str, action) -> bool:
             """칸 하나를 못 채워도 다음 칸과 영수증 첨부는 계속합니다(결과 파일 '확인 필요'에 남김)."""
@@ -6416,6 +6466,12 @@ class ConcurBot:
             return files
         if not sent:
             return files
+        time.sleep(1.0)
+        if self._available_open():                        # 여러 장을 올리면 경비에 안 붙고 보관함 창(Attach Receipt)이
+            self.log(f"   저장 전에 올린 사진 {sent}장이 보관함(Available Receipts)으로 들어가, 저장한 뒤 보관함에서 붙입니다.")
+            self._close_available()                       # 열린 채 남음(2026-11-17 사용자 화면) → 닫고 저장 뒤 보관함에서
+            self._wait_available_closed(3.0)
+            return files
         empty = self._first_shown([self.page.get_by_text(self._re("영수증 끌어 놓기", exact=False))]) is not None
         if empty or self._upload_control() is not None:   # 경비에 안 붙고 보관함으로만 감 → 저장한 뒤 보관함에서
             self.log(f"   저장 전 화면에서 올린 사진이 경비에 붙지 않았습니다: {', '.join(f.name for f in files[:sent])}")
@@ -6699,7 +6755,9 @@ class ConcurBot:
                 # 경비 칸의 [Upload New Receipt]로 여러 장을 한 번에 올리고, 못 붙인 사진은 저장한 뒤 다시 열어 [Add]로 붙임
                 uploads = upload_files_for(rec, self.cfg, work_dir)
                 left = self.attach_before_save(uploads, done, checks)
-                self.save_expense(checks, rec.total if stay else None)
+                if not self.save_expense(checks, rec.total if stay else None):
+                    self.screenshot("manual_not_saved")
+                    raise RuntimeError("새 경비를 저장하지 못했습니다(Concur 화면의 오류 안내를 확인하세요).")
                 rec.used_for = f"새 경비 {us} {rec.total:,}"
                 if left:
                     self.log(f"   저장하기 전에는 다 붙이지 못해({', '.join(f.name for f in left)}), 저장한 뒤 다시 열어 붙입니다.")
@@ -6720,6 +6778,80 @@ class ConcurBot:
             results.append(row)
         return results
 
+    def ensure_selects(self, checks: list):
+        """저장하기 전에 Receipt Status·LCRT가 넣은 값 그대로인지 보고, 비었거나 바뀌었으면 다시 고릅니다.
+        2026-11-17 실행: 톨게이트 새 경비에 사진 네 장을 올린 뒤 Receipt Status가 'None Selected'로 비어, 저장하니
+        'Before you can continue, you must provide valid information for: Receipt Status' 오류 창이 뜨고 저장이 안 됐음."""
+        want = getattr(self, "last_values", {}) or {}
+        for key in ("Receipt Status", "LCRT"):
+            value = want.get(key)
+            if not value:
+                continue
+            try:
+                trigger, now = self.find_select(self.sel(key))
+            except Exception:
+                trigger, now = None, ""
+            if trigger is None or now == value:
+                continue
+            self.log(f"   {key}이(가) '{now or '빈칸'}'(으)로 바뀌어 있어 '{value}'(으)로 다시 고릅니다.")
+            try:
+                self.choose_option(trigger, value)
+            except Exception as e:
+                self.log(f"   {key}을(를) 다시 고르지 못했습니다: {str(e).splitlines()[0][:80]}")
+                checks.append(f"{key} 확인")
+
+    def validation_error(self):
+        """저장할 때 뜨는 '계속하기 전에 올바른 정보를 넣으라'는 오류 창 → 빠진 칸 이름 목록(창이 없으면 None)"""
+        body = "|".join(re.escape(a) for a in self._alts("입력 오류"))
+        try:
+            found = self.page.evaluate(JS_READ_VALIDATION, body)
+        except Exception:
+            return None
+        return None if not found else [f for f in (found.get("fields") or []) if f] or ["(알 수 없음)"]
+
+    def fix_invalid_fields(self, fields: list, checks: list) -> bool:
+        """오류 창을 닫고 빠졌다는 칸을 다시 넣습니다 → 하나라도 고쳤으면 True"""
+        page = self.page
+        self.log(f"   저장하려니 '{', '.join(fields)}' 칸을 넣으라는 오류 창이 떠서 닫고 다시 넣습니다.")
+        try:
+            close = page.locator("[data-concur-auto-vclose]")
+            if close.count():
+                close.first.click(timeout=3000)
+            else:
+                page.keyboard.press("Escape")
+        except Exception:
+            pass
+        time.sleep(0.5)
+        want = getattr(self, "last_values", {}) or {}
+        fixed = False
+        for name in fields:
+            low = name.lower()
+            try:
+                if "receipt status" in low or "영수증 상태" in name:
+                    trigger, _ = self.find_select(self.sel("Receipt Status"))
+                    self.choose_option(trigger, want.get("Receipt Status") or self.t["Receipt"])
+                elif "lcrt" in low or "legal compliance" in low:
+                    trigger, _ = self.find_select(self.sel("LCRT"))
+                    self.choose_option(trigger, want.get("LCRT") or self.t["NA"])
+                elif "city" in low or "도시" in name or "location" in low:
+                    trigger, _ = self.find_select(self.sel("도시"))
+                    if not self._try_choose_city(trigger, self.cfg["기본_도시"]):
+                        raise RuntimeError("도시를 고르지 못함")
+                elif "vendor" in low or "가맹점" in name:
+                    if getattr(self, "last_rec", None) is None:
+                        raise RuntimeError("영수증 없음")
+                    self.fill_vendor(self.last_rec, [], checks)
+                elif "business purpose" in low or "comment" in low:
+                    key = "Business Purpose" if "business" in low else "Comment"
+                    self.type_text(self.field(key), want.get(key) or "-")
+                else:
+                    raise RuntimeError("모르는 칸")
+                fixed = True
+            except Exception as e:
+                self.log(f"   '{name}' 칸을 다시 넣지 못했습니다: {str(e).splitlines()[0][:80]}")
+                checks.append(f"{name} 직접 넣기")
+        return fixed
+
     def save_expense(self, checks: list, stay_amount=None):
         """[Save Expense]를 누르고 리포트 화면으로 돌아올 때까지 기다립니다. '필수 정보가 빠졌다'는 창이 뜨면
         숙박(stay_amount)은 [Yes] → Itemizations 넣기 → 다시 저장, 그 밖은 [No]('확인 필요').
@@ -6730,14 +6862,31 @@ class ConcurBot:
         def press():                                      # 맨 앞에 보이는 [Save Expense](가려진 것을 누르다 60초 멈췄음)
             self._press_top("경비 저장")
 
-        itemized_tried = False
-        for attempt in range(3):
-            if attempt:
+        def invalid_or_back():                            # 오류 창이 뜨거나 리포트로 돌아가면 기다리기를 멈춤
+            return back() or self.validation_error() is not None
+
+        itemized_tried, fixes = False, 0
+        self.ensure_selects(checks)
+        for attempt in range(5):
+            invalid = self.validation_error()
+            if invalid is not None:                       # 'Receipt Status를 넣으라'는 오류 창: 닫고 다시 넣고 다시 누름
+                if fixes >= 2 or not self.fix_invalid_fields(invalid, checks):
+                    checks.append(f"필수 칸 직접 넣기({', '.join(invalid)})")
+                    self.screenshot("save_invalid")
+                    try:
+                        self.page.locator("[data-concur-auto-vclose]").first.click(timeout=2000)
+                    except Exception:
+                        pass
+                    break
+                fixes += 1
+            elif attempt:
                 if back() or self._top_button("경비 저장") is None:
                     break
                 self.log("   [Save Expense]를 눌렀는데 화면이 그대로라 다시 누릅니다.")
             press()
-            box = self.missing_info_dialog(self.save_dialog_wait_s, back)   # 저장이 느리면 창이 늦게 뜸
+            box = self.missing_info_dialog(self.save_dialog_wait_s, invalid_or_back)   # 저장이 느리면 창이 늦게 뜸
+            if box is None and self.validation_error() is not None:
+                continue
             if box is not None and stay_amount and not itemized_tried:
                 itemized_tried = True
                 self.answer_dialog(box, "예")
@@ -6752,15 +6901,17 @@ class ConcurBot:
             if box is not None:
                 self.answer_dialog(box, "아니요")
             end = time.time() + self.save_retry_s
-            while not back() and time.time() < end:
+            while not invalid_or_back() and time.time() < end:
                 time.sleep(0.3)
             if back():
-                return
+                return True
         deadline = time.time() + self.timeout_ms / 1000
-        while not back() and time.time() < deadline:
+        while not back() and time.time() < deadline and self.validation_error() is None:
             time.sleep(0.3)
-        if not back():
-            checks.append("경비가 저장됐는지 확인")
+        if back():
+            return True
+        checks.append("경비가 저장됐는지 확인")
+        return False
 
     def open_expense_row(self, date_us: str, amount: int) -> bool:
         """리포트 경비 목록에서 날짜·금액이 같은 경비를 체크하고 [Edit]로 엽니다(open_first_expense와 같은 방법)."""

@@ -126,7 +126,7 @@ TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for s
 
 def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False,
                 slow_close=False, no_choose_new=False, save_busy=False, covered_save=False, real_pane=False,
-                presave_no_add=False, modal=False, vendor_required=False):
+                presave_no_add=False, modal=False, vendor_required=False, upload_resets_status=False):
     """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
     bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
     icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')
@@ -142,7 +142,10 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
                (저장한 뒤 다시 열면 생김, 2026-11-16 23:26 사용자 화면)
     modal: 실제 Concur처럼 'Add Expense to Report' 창이 화면 전체를 덮고(뒤의 리포트 목록은 가려진 채 보임), 목록 맨 위에
            'Recently Used'로 같은 항목이 한 번 더 나옴(2026-11-17 사용자 화면)
-    vendor_required: Enter Vendor Name 칸이 필수(별표가 따로 그려짐)이고 칸 id·name에 vendor가 없어 칸 이름으로만 찾을 수 있음"""
+    vendor_required: Enter Vendor Name 칸이 필수(별표가 따로 그려짐)이고 칸 id·name에 vendor가 없어 칸 이름으로만 찾을 수 있음
+    upload_resets_status: 실제 Concur처럼(2026-11-17 사용자 화면) 저장 전 경비 칸에서 여러 장을 올리면 보관함 창(Attach
+           Receipt)이 열린 채 남고 Receipt Status가 'None Selected'로 비며, 그대로 저장하면 'Before you can continue, you must
+           provide valid information for: • Receipt Status' 오류 창([Close])이 뜨고 저장이 안 됨"""
     js = lambda on: "true" if on else "false"
     html = REPORT
     if behind:
@@ -152,6 +155,18 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
                 + "<style>#form { position:fixed; inset:0; z-index:10; background:#fff; overflow:auto }"
                   " #dialog, #pop { position:fixed; top:0; left:0; z-index:30; background:#fff }</style>")
         assert html.count("show('report', 0)") == 0 and "mi" in html
+    if upload_resets_status:
+        old_lib = "function toLibrary(inp) { const names = Array.from(inp.files).map(f => f.name); library.push(...names);"
+        old_save = "function save() { steps.push('save');"
+        assert old_lib in html and old_save in html
+        html = (html.replace(old_lib, old_lib + " if (inp.id === 'f' && names.length > 1) { setTimeout(() => {"
+                             " document.querySelector('[name=receiptType]').textContent = 'None Selected'; openAvail(); }, 300); }")
+                .replace(old_save, "function save() { if (document.querySelector('[name=receiptType]').textContent === 'None Selected') {"
+                                   " steps.push('save invalid'); show('verr', 1); return; } steps.push('save');")
+                .replace('<div id="pop"', '<div id="verr" role="dialog" style="display:none; position:fixed; top:80px; left:80px;'
+                         ' z-index:60; background:#fff; border:1px solid red"><h3>Error</h3><p>Before you can continue, you must'
+                         ' provide valid information for:</p><ul><li>Receipt Status</li></ul>'
+                         '<button onclick="show(\'verr\', 0)">Close</button></div>\n<div id="pop"'))
     if vendor_required:
         old_v = '<label for="vendor">Enter Vendor Name</label><input id="vendor" name="vendorName" oninput="note(\'vendor\')">'
         assert old_v in html and "(document.getElementById('vendor') || {}).value" in html
@@ -581,6 +596,42 @@ def test_required_vendor_found_by_label_and_filled(browser, tmp_path):
     assert pg2.evaluate("saved")["vendor"] == "Toll"
     assert "Vendor Name 확인(영수증에서 가게 이름을 못 읽어 'Toll'로 넣음)" in rows[0]["확인 필요"]
     assert any("읽은 글자 앞부분: 2026/09/28 / 합계 50,000" in m for m in logs)    # 다음에 고칠 수 있게 기록
+
+
+def test_receipt_status_reset_after_upload_is_fixed_before_save(browser, tmp_path):
+    """2026-11-17 18:15 실행: 톨게이트 새 경비에 사진 네 장을 올리니 보관함 창이 열린 채 남고 Receipt Status가 'None Selected'로
+    비어, [Save Expense]에 'Before you can continue … Receipt Status' 오류 창이 뜨고 저장이 안 됐음(그런데도 '저장'으로 기록).
+    → 보관함 창을 닫고, 저장 전에 Receipt Status를 다시 고르고, 저장한 뒤 다시 열어 보관함에서 붙임."""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, upload_resets_status=True)
+    logs = []
+    bot = make_bot(pg, tmp_path)
+    bot.log = logs.append
+    rows = bot.create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    saved = pg.evaluate("saved")
+    assert saved and saved["receipt"] == "Receipt" and rows[0]["오류"] == ""
+    assert saved["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert "save invalid" not in pg.evaluate("steps")
+    assert any("Receipt Status이(가) 'None Selected'" in m for m in logs)
+
+
+def test_validation_error_dialog_fixed_and_saved_again(browser, tmp_path):
+    """오류 창이 그래도 뜨면 닫고 빠졌다는 칸(Receipt Status)을 다시 넣은 뒤 다시 저장. 저장을 못 하면 '저장'으로 기록하지 않음."""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, upload_resets_status=True)
+    bot = make_bot(pg, tmp_path)
+    bot.ensure_selects = lambda checks: None                  # 저장 전 확인을 건너뛰어 오류 창이 뜨게
+    rows = bot.create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert "save invalid" in steps and pg.evaluate("saved")["receipt"] == "Receipt" and rows[0]["오류"] == ""
+    pg2 = open_report(browser, upload_resets_status=True)
+    bot2 = make_bot(pg2, tmp_path)
+    bot2.ensure_selects = lambda checks: None
+    bot2.fix_invalid_fields = lambda fields, checks: False   # 고치지 못하면
+    bot2.save_dialog_wait_s = bot2.save_retry_s = 1.0
+    rows = bot2.create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w2")
+    assert "저장하지 못했습니다" in rows[0]["오류"] and "필수 칸 직접 넣기(Receipt Status)" in rows[0]["확인 필요"]
+    assert pg2.evaluate("saved") is None
 
 
 def test_receipt_stem():
