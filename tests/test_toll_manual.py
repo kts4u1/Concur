@@ -148,9 +148,9 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
            Receipt)이 열린 채 남고 Receipt Status가 'None Selected'로 비며, 그대로 저장하면 'Before you can continue, you must
            provide valid information for: • Receipt Status' 오류 창([Close])이 뜨고 저장이 안 됨
     direct_shuffle: (real_pane과 함께) 경비 칸에서 여러 장을 한 번에 올리면 올라간 순서(두 번째 장이 먼저)로 합쳐짐
-    add_confirm: 실제 Concur처럼(2026-11-17 20:22 사용자 화면) 영수증 칸 [Add]를 누르면 보관함이 회색으로 열리고 화면 전체를
-           덮는 'Confirm — You are adding an image to the existing receipt image…' 창([Add Receipt]·[Cancel])이 뜸.
-           [Add Receipt]를 눌러야 보관함 사진이 보임"""
+    add_confirm: 실제 Concur처럼(2026-11-17 20:22·21:23 기록·사용자 화면) 이미 사진이 붙은 경비에서 [Add]로 연 보관함의
+           [Upload New Receipt]로 사진을 올리면 보관함에 들어가지 않고 화면 전체를 덮는 'Confirm — You are adding an image to
+           the existing receipt image…' 창([Add Receipt]·[Cancel])이 뜨고, [Add Receipt]를 누르면 그 사진이 경비에 바로 붙음"""
     js = lambda on: "true" if on else "false"
     html = REPORT
     if behind:
@@ -243,19 +243,20 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
         assert old in html
         html = html.replace(old, "show('dlg', 0);\n  document.getElementById('cards').innerHTML = ''; setTimeout(closeAvail, 1500);")
     if add_confirm:
-        assert 'id="addr" onclick="openAvail()"' in html
-        html = (html.replace('id="addr" onclick="openAvail()"', 'id="addr" onclick="askAdd()"')
+        old_lib = "function toLibrary(inp) { const names = Array.from(inp.files).map(f => f.name);"
+        assert old_lib in html
+        html = (html.replace(old_lib, old_lib + " if (inp.id === 'f2' && (uploads.length || window.had)) {"
+                             " pending = names; inp.value = ''; show('cfm', 1); steps.push('confirm shown'); return; }")
                 .replace('<div id="pop"', '<div id="cfm" role="dialog" style="display:none; position:fixed; inset:0; z-index:90;'
                          ' background:rgba(0,0,0,.3)"><div style="background:#fff; margin:120px auto; width:420px"><h3>Confirm</h3>'
                          '<p>You are adding an image to the existing receipt image. Once added, receipt images cannot be separated.</p>'
                          '<button onclick="cfmOk()">Add Receipt</button> <button onclick="cfmNo()">Cancel</button></div></div>\n<div id="pop"')
                 .replace("function resetPane() {",
-                         "function askAdd() { shownCards = 4; show('avail', 1); if (!REAL_PANE) show('pane', 0);"
-                         " document.getElementById('cards').innerHTML = ''; show('cfm', 1); steps.push('confirm shown'); }\n"
-                         "function cfmOk() { show('cfm', 0); steps.push('confirm ok'); drawCards(); }\n"
-                         "function cfmNo() { show('cfm', 0); steps.push('confirm cancel'); closeAvail(); }\n"
-                         "function resetPane() {", 1)
-                .replace("REAL_PANE", "true" if real_pane else "false"))
+                         "let pending = [];\n"
+                         "function cfmOk() { show('cfm', 0); pending.forEach(n => { uploads.push(n); steps.push('confirm add ' + n); });"
+                         " pending = []; closeAvail(); show('viewer', 1); show('pdf', uploads.length + (window.had || 0) > 1); }\n"
+                         "function cfmNo() { show('cfm', 0); pending = []; steps.push('confirm cancel'); }\n"
+                         "function resetPane() {", 1))
     return (html.replace(" MULTIPLE>", " multiple>" if multiple else ">")
             .replace("if (EMPTY)", "if (true)" if empty else "if (false)")
             .replace("LIBRARY", "[" + ",".join(f"'{n}'" for n in library) + "]")
@@ -527,17 +528,33 @@ def test_presave_first_photo_then_rest_in_order(browser, tmp_path):
 
 
 def test_add_receipt_confirm_dialog(browser, tmp_path):
-    """2026-11-17 20:22 실행 기록·사용자 화면: 저장한 뒤 다시 열어 영수증 칸 [Add]를 누르니 'Confirm — You are adding an image
-    to the existing receipt image…' 창이 떠서 보관함 사진이 안 보였고([Add Receipt]·[Cancel]만 보임), 두 번째 사진부터 못 붙이고
-    [Save Expense]도 못 누름 → 확인 창의 [Add Receipt]를 누르고 이어서 붙임"""
+    """2026-11-17 21:23 실행 기록: 저장 전에 첫 사진만 붙인 뒤 다시 열어 [Add] → 보관함에 나머지 사진이 없어 보관함에서 새로
+    올리니 'Confirm — You are adding an image to the existing receipt image…' 창이 떠서 기다리다 '보관함에 보이지 않습니다'로
+    넘어감(톨게이트는 다음 사진 때 그 창을 눌러 네 장 중 세 장만, Car mileage는 한 장만) → 그 창의 [Add Receipt]를 바로 누르고
+    붙은 것으로 봄"""
     pytest.importorskip("cv2")
-    pg = open_report(browser, real_pane=True, presave_no_add=True, add_confirm=True)
+    pg = open_report(browser, real_pane=True, presave_no_add=True, no_choose_new=True, add_confirm=True)
     rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
     steps = pg.evaluate("steps")
     assert pg.evaluate("expenses")[0]["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
-    assert steps.count("confirm ok") == 2 and "confirm cancel" not in steps
-    assert steps.index("confirm ok") < steps.index("add IMG_5651.jpg") < steps.index("add IMG_5652.jpg")
+    assert [x for x in steps if x.startswith("confirm")] == [
+        "confirm shown", "confirm add IMG_5651.jpg", "confirm shown", "confirm add IMG_5652.jpg"]
     assert rows[0]["확인 필요"] == "" and rows[0]["오류"] == "" and steps[-1] == "save"
+
+
+def test_all_photos_to_library_before_save_then_add_in_order(browser, tmp_path):
+    """2026-11-17 사용자: '예전에는 사진을 한 번에 올려 1장 고르고 나머지는 Add로 붙였다' → 저장 전에 보관함을 열어 모든 사진을
+    한 번에 올리고 첫 장만 [Attach], 저장한 뒤 다시 열어 [Add]로 보관함에서 차례대로 고름(확인 창 없이, 순서 그대로)"""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, real_pane=True, presave_no_add=True, direct_shuffle=True, add_confirm=True)
+    rows = make_bot(pg, tmp_path).create_manual_expenses([toll_rec(tmp_path)], tmp_path / "w")
+    steps = pg.evaluate("steps")
+    assert [x for x in steps if x.startswith("library")] == ["library IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg"]
+    assert not [x for x in steps if x.startswith(("direct", "confirm"))]
+    assert steps.index("library IMG_5648.jpg,IMG_5651.jpg,IMG_5652.jpg") < steps.index("attach IMG_5648.jpg") \
+        < steps.index("save") < steps.index("edit") < steps.index("add IMG_5651.jpg") < steps.index("add IMG_5652.jpg")
+    assert pg.evaluate("expenses")[0]["uploads"] == ["IMG_5648.jpg", "IMG_5651.jpg", "IMG_5652.jpg"]
+    assert rows[0]["확인 필요"] == "" and rows[0]["오류"] == ""
 
 
 def test_presave_one_photo_then_add_after_save(browser, tmp_path):

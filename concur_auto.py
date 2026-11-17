@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 Add Receipt 확인 창"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 보관함에 한 번에 올리기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -4839,6 +4839,8 @@ class ConcurBot:
         self.login_stable_s = 3.0       # 로그인된 화면이 이만큼 그대로여야 로그인으로 봄(잠깐 보였다 로그인 화면으로 가는 일)
         self.save_dialog_wait_s = 12.0   # [Save Expense] 뒤 '필수 정보 빠짐' 창을 기다리는 시간
         self.save_retry_s = 15.0         # 그 뒤로도 화면이 그대로면 다시 누르기까지 기다리는 시간
+        self.confirm_added = []          # 보관함에서 올렸는데 '이미지를 합친다' 확인 창으로 바로 붙은 사진
+        self.added_by_confirm = ""
         self.login_timeout_s = 600
         self.diagnose_after_s = 15
         self.last_expense_types = []     # [화면 조사]에서 읽은 Expense Type 목록
@@ -6283,6 +6285,13 @@ class ConcurBot:
             return [f.name for f in files]
         end, scroll_at = time.time() + self.upload_done_s, time.time() + 6
         while time.time() < end and any(not self._card_shown(f.name) for f in sent):
+            if self._confirm_add_receipt():                # 이미 사진이 붙은 경비면 보관함이 아니라 '이미지를 합친다'는
+                self.confirm_added += [f.name for f in sent]   # 확인 창이 뜨고 [Add Receipt]로 바로 붙음(2026-11-17 기록)
+                self._wait_uploaded()
+                time.sleep(1.0)
+                self.log(f"   확인 창의 [Add Receipt]로 바로 붙였습니다: {', '.join(f.name for f in sent)}")
+                rest = [f for f in files if f not in sent]
+                return self._upload_to_available(rest) if rest else []
             if time.time() > scroll_at:                    # 목록 아래쪽에 들어가 내려야 보이는 카드
                 if all(self._find_card(f.name, settle=False) for f in sent if not self._card_shown(f.name)):
                     break
@@ -6480,6 +6489,7 @@ class ConcurBot:
     def attach_from_available(self, files: list, done: list, checks: list):
         page = self.page
         attached, missed, have = [], [], []
+        self.confirm_added = []
         empty = self._first_shown([page.get_by_text(self._re("영수증 끌어 놓기", exact=False))]) is not None
         if not empty and (self._receipt_add_button() is not None
                           or self._first_shown([page.get_by_role("button", name=self._re("영수증 더하기"))]) is not None):
@@ -6508,6 +6518,7 @@ class ConcurBot:
             if need:
                 self.log(f"   보관함에 없는 사진을 올립니다: {', '.join(f.name for f in need)}")
                 failed = set(self._upload_to_available(need))
+                attached += [n for n in self.confirm_added if n not in attached]
                 direct = self._attached_directly([n for n in (f.name for f in need) if n in failed])
                 if direct:                                # 보관함이 아니라 경비에 바로 붙음 → 다시 붙이지 않음
                     attached += direct
@@ -6527,7 +6538,12 @@ class ConcurBot:
                     self.log(f"   영수증 붙임: {f.name}")
                     continue
                 if resumed and not self._find_card(f.name):   # 이어서 붙일 때 보관함에 없으면 올림
-                    if self._upload_to_available([f]):
+                    failed = self._upload_to_available([f])
+                    if f.name in self.confirm_added:          # 확인 창의 [Add Receipt]로 바로 붙음
+                        attached.append(f.name)
+                        self.log(f"   영수증 붙임: {f.name}")
+                        continue
+                    if failed:
                         missed.append(f.name)
                         continue
                 if self._attach_card(f.name):
@@ -6548,6 +6564,41 @@ class ConcurBot:
             self.screenshot("attach_receipt")
         return not missed
 
+    def _attach_first_from_library(self, files: list, done: list, checks: list):
+        """사진이 여러 장인 새 경비(저장 전): [Choose From Available Receipts]로 보관함을 열어 **모든 사진을 한 번에** 보관함에
+        올리고 첫 사진만 [Attach]로 붙임 → 남은 사진(저장한 뒤 다시 열어 [Add]로 보관함에서 차례대로 고름). 못 하면 None.
+        2026-11-17 사용자: 예전에는 사진을 한 번에 올려 첫 장을 고르고 나머지는 [Add]로 붙였는데, 첫 장만 올리게 바꾸자
+        나머지가 보관함에 없어 [Add] 뒤에 고를 사진이 없었음(보관함에서 새로 올리면 '이미지를 합친다' 확인 창이 뜸)."""
+        page = self.page
+        if not self._open_available():
+            return None
+        self.confirm_added = []
+        need = [f for i, f in enumerate(files) if not self._find_card(f.name, settle=i == 0)]
+        if need:
+            self.log(f"   보관함에 사진 {len(need)}장을 한 번에 올립니다: {', '.join(f.name for f in need)}")
+            failed = set(self._upload_to_available(need))
+            direct = self._attached_directly([f.name for f in need if f.name in failed])
+            if direct:                                    # 보관함이 아니라 경비에 바로 붙었으면
+                checks.append(f"영수증 순서 확인(올린 사진이 경비에 바로 붙음: {', '.join(direct)})")
+                done.append(f"영수증 첨부({', '.join(direct)})")
+                return [f for f in files if f.name not in direct]
+            if files[0].name in failed:
+                if self._available_open():
+                    self._close_available()
+                return None
+        if self._attach_card(files[0].name):
+            done.append(f"영수증 첨부({files[0].name})")
+            self.log(f"   저장 전에 보관함에서 첫 사진을 붙였습니다: {files[0].name} "
+                     f"(나머지 {len(files) - 1}장은 저장한 뒤 [Add]로 차례로 붙입니다)")
+            if self._available_open():
+                self._close_available()
+                self._wait_available_closed(3.0)
+            return files[1:]
+        if self._available_open():
+            self._close_available()
+            self._wait_available_closed(3.0)
+        return None
+
     def attach_before_save(self, files: list, done: list, checks: list) -> list:
         """저장하기 전의 새 경비에 사진을 붙입니다 → 못 붙인 사진(저장한 뒤 다시 열어 [Add]로 붙일 것).
         저장 전 화면은 사진을 한 장 붙이면 그 아래에 [Remove]만 있고 [Add]가 없어서(2026-11-16 23:26 사용자 화면·실행 기록),
@@ -6555,6 +6606,10 @@ class ConcurBot:
         차례대로 합쳐져 붙음('1 의 3', 2026-11-16 사용자 화면). 파일 고르기 창이 한 장만 받거나, 올린 사진이 보관함으로만
         가면 남은 사진을 돌려줍니다."""
         files = [Path(f) for f in files]
+        if len(files) > 1:
+            rest = self._attach_first_from_library(files, done, checks)
+            if rest is not None:
+                return rest
         sub_done, sub_checks = [], []
         # 저장 전에는 첫 사진만 올림: 여러 장을 한 번에 올리면 Concur가 올라간 순서대로 합쳐 사용내역이 두 번째 장이
         # 되기도 했고(2026-11-17 사용자 화면 '2 의 3'), 보관함으로만 가거나 Receipt Status가 비기도 했음. 나머지는
