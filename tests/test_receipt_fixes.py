@@ -195,3 +195,71 @@ def test_hipass_receipt_sheet_has_no_amount_but_single_toll_receipt_does():
     assert rec.total == 0 and rec.amounts == [] and rec.main_date == "2026-10-01"
     single = analyze("하이패스 영수증 한국도로공사 광주영업소 2026년10월02일 08시05분 통행료 4,300원(카드)")
     assert single.total == 4300                          # 톨게이트에서 받은 영수증 한 장은 금액을 씀
+
+
+# ---------- 주차 금액이 너무 큼 (2026-11-17 사용자: 주차비 411,400원은 나올 리 없음) ----------
+
+PARK_411 = """[ 영 수 증 ]
+상 호 : 일곡공영주차장
+주 소 : 광주 북구 설죽로 495-6
+입차 일시 : 2026-10-15 12:07:35
+출차 일시 : 2026-10-15 13:58:25
+주차 시간 : 1시간 50분
+주차 요금 : 411,400원
+할인 요금 : 0원
+카드 결제 : 411,400원"""
+
+
+def build_with_zoom(tmp_path, monkeypatch, main, zoomed):
+    import os
+    from datetime import datetime
+    src = tmp_path / "src"
+    src.mkdir()
+    p = src / "IMG_5657.JPG"
+    p.write_bytes(b"\xff\xd8\xff\xd9")
+    t = datetime(2026, 11, 15, 10, 0).timestamp()
+    os.utime(p, (t, t))
+    calls = []
+
+    class FakeOcr:
+        def __init__(self, work_dir):
+            pass
+
+        def read(self, path):
+            return main
+
+        def read_zoomed(self, path):
+            calls.append(path)
+            return zoomed
+
+    monkeypatch.setattr(ca, "WindowsOcr", FakeOcr)
+    cfg = ca.default_settings()
+    cfg.update({"영수증_원본_폴더": str(src), "영수증_보정_사용": False})
+    results = tmp_path / "결과"
+    results.mkdir()
+    lines = []
+    recs = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), [], results, tmp_path / "w", lines.append)
+    return recs[0], calls, lines
+
+
+def test_too_big_parking_amount_fixed_by_zoomed_read(tmp_path, monkeypatch):
+    zoomed = PARK_411.replace("411,400원", "1,400원")
+    rec, calls, lines = build_with_zoom(tmp_path, monkeypatch, PARK_411, zoomed)
+    assert len(calls) == 1 and rec.category == "주차"
+    assert rec.total == 1400 and rec.amount_issue == "" and ca.receipt_issues(rec, [rec]) == []
+    assert any("바로잡은 사진 1장" in line for line in lines)
+
+
+def test_too_big_parking_amount_flagged_when_still_unclear(tmp_path, monkeypatch):
+    rec, calls, _ = build_with_zoom(tmp_path, monkeypatch, PARK_411, PARK_411)    # 크게 읽어도 411,400
+    assert len(calls) == 1 and rec.total == 411400
+    assert any("주차 금액이 너무 큼(411,400원)" in i for i in ca.receipt_issues(rec, [rec]))
+    rec.edited.append("금액")                                                     # 영수증 확인 창에서 고치면 사라짐
+    assert not any("너무 큼" in i for i in ca.receipt_issues(rec, [rec]))
+
+
+def test_normal_amounts_are_not_read_again(tmp_path, monkeypatch):
+    rec, calls, _ = build_with_zoom(tmp_path, monkeypatch, PARK_411.replace("411,400원", "1,400원"), "")
+    assert calls == [] and rec.total == 1400
+    meal = analyze("한식 식당 2026-10-15 합계 412,000원")                        # 식대 큰 금액은 의심하지 않음
+    assert not ca.amount_suspect(meal, ca.default_settings())

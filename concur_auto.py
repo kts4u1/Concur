@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 하이패스 금액 비우기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 주차 금액 확인"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -299,6 +299,7 @@ def default_settings():
         "도시_목록": dict(DEFAULT_CITIES),
         "_도시_낮은_우선순위_설명": "주차 회사·카드사 본사 주소처럼 영수증에 자주 찍히지만 실제 장소가 아닌 도시. 다른 도시가 없을 때만 씁니다.",
         "도시_낮은_우선순위": ["서울"],
+        "주차_최대_금액": 300000,          # 이보다 큰 주차 금액은 잘못 읽은 것으로 보고 크게 다시 읽어 확인(2026-11-17)
         "_영수증_병원_설명": "병원 목록에 없어도 영수증에 'OO병원'이 보이면 그 이름을 쓰고 병원 목록에 더합니다(영문 이름은 자동 변환).",
         "영수증에서_병원_찾기": True,
         "_리포트_설명": ("리포트 만들기 화면에 넣는 값. {month_abbr}=Nov처럼 달 영어 줄임말, {month_name}=November, "
@@ -2018,6 +2019,7 @@ class Receipt:
     bundle: list = field(default_factory=list)      # 함께 첨부할 사진(하이패스 사용내역 + 영수증 인쇄물)
     bundle_note: str = ""                           # 묶음 설명(건수·총액·영수증 합계 비교)
     bundle_issue: str = ""                          # 묶음 확인할 것(합계가 다를 때)
+    amount_issue: str = ""                          # 금액 확인할 것(주차 금액이 너무 큼 등)
     period: tuple = ()                              # 사용내역 기간(시작, 끝) — 이 안의 Concur 경비와 맞춤
     bundled_into: str = ""                          # 이 사진이 함께 붙는 사용내역 사진 이름
     last_use: str = ""                              # 새 경비의 Transaction Date(ISO): 하이패스 마지막 이용일, 마일리지는 그 달 말일
@@ -2197,11 +2199,60 @@ def _fix_amount_text(text: str) -> str:
     return re.sub(r"(\d)\s*([,.])\s*(\d{3})(?!\d)", r"\1\2\3", t)
 
 
-def find_amounts(ocr_text: str) -> list:
+def amount_values(ocr_text: str) -> list:
+    """글자에서 읽은 금액들(같은 금액이 여러 번 나오면 여러 번)"""
     ocr_text = _fix_amount_text(ocr_text)
     values = [int(re.sub(r"\D", "", m.group(0))) for m in AMOUNT_WITH_SEP.finditer(ocr_text)]
     values += [int(m.group(1)) for m in AMOUNT_WON.finditer(ocr_text)]
     values += [int(m.group(1)) for m in AMOUNT_NEAR_WORD.finditer(ocr_text)]
+    return [v for v in values if v > 0]
+
+
+DOTTED_PREFIXES = ("4", "41", "44", "14", "11")       # 점선(......) 끝을 OCR이 숫자로 읽어 금액 앞에 붙은 글자
+
+
+def dotted_core(v: int) -> list:
+    """411,400 → [11,400, 1,400]: 앞에 붙었을 수 있는 숫자를 떼어 낸 금액들(100원 이상만)"""
+    s = str(v)
+    return [int(s[len(p):]) for p in DOTTED_PREFIXES if s.startswith(p) and len(s) > len(p) and int(s[len(p):]) >= 100]
+
+
+def amount_too_big(rec, cfg: dict) -> bool:
+    """주차 영수증인데 금액이 '주차_최대_금액'(기본 30만 원)보다 큼 → 잘못 읽은 것(사용자: 주차비 411,400원은 나올 리 없음)"""
+    cap = int(cfg.get("주차_최대_금액") or 0)
+    return bool(cap) and rec.category == "주차" and rec.total > cap
+
+
+def amount_suspect(rec, cfg: dict) -> bool:
+    """금액을 잘못 읽었을 수 있어 크게 다시 읽어 확인할 영수증"""
+    if amount_too_big(rec, cfg):
+        return True
+    return rec.total >= 100000 and bool(dotted_core(rec.total)) and bool(re.search(r"[.·•…]{3,}", rec.ocr_text or ""))
+
+
+def recheck_amount(rec, others: list, cfg: dict) -> bool:
+    """다른 읽기(크게 읽기)까지 모아 점선 때문에 앞에 숫자가 붙은 금액(411,400)을 바로잡습니다.
+    떼어 낸 금액(1,400)이 어느 읽기에든 그만큼 이상 나오면 그 금액, 주차 금액이 너무 크면 한 번만 나와도 그 금액.
+    그래도 너무 크면 '확인 필요'. → 고쳤으면 True"""
+    if not rec.total or "금액" in rec.edited:
+        return False
+    values = amount_values(rec.ocr_text) + [v for t in others for v in amount_values(t)]
+    big = amount_too_big(rec, cfg)
+    cap = int(cfg.get("주차_최대_금액") or 0)
+    cands = [w for w in dotted_core(rec.total) if values.count(w) and (not big or w <= cap)
+             and (big or values.count(w) >= values.count(rec.total))]
+    if cands:
+        best = max(cands, key=lambda w: (values.count(w), -w))
+        rec.amounts = [best] + [a for a in rec.amounts if a not in (best, rec.total)]
+        rec.total, rec.amount_issue = best, ""
+        return True
+    if big:
+        rec.amount_issue = f"주차 금액이 너무 큼({rec.total:,}원): 금액을 확인해 주세요"
+    return False
+
+
+def find_amounts(ocr_text: str) -> list:
+    values = amount_values(ocr_text)
     uniq = []
     for v in values:
         if v > 0 and v not in uniq:
@@ -2974,6 +3025,8 @@ def receipt_issues(rec: Receipt, receipts: list) -> list:
         issues.append("같은 날짜·금액 영수증 있음")
     if rec.bundle_issue and not (rec.bundle_issue == TOLL_TOTAL_UNREAD and "금액" in rec.edited):
         issues.append(rec.bundle_issue)
+    if rec.amount_issue and "금액" not in rec.edited:
+        issues.append(rec.amount_issue)
     return issues
 
 
@@ -3243,7 +3296,8 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             pass
     memory = load_store_memory(memory_path)
     engine = []
-    counts = {"보정": 0, "나아짐": 0, "크게": 0, "크게 나아짐": 0}
+    counts = {"보정": 0, "나아짐": 0, "크게": 0, "크게 나아짐": 0, "금액 확인": 0}
+    fixed_amounts = set()
     note = old_processed_note(cfg)
     if note:
         log("   " + note)
@@ -3329,6 +3383,11 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
                         counts["크게 나아짐"] += 1
                     else:
                         others.append(big)
+            elif first_is_receipt and amount_suspect(first, cfg) and orig.name not in early_names:
+                counts["금액 확인"] += 1                 # 주차 411,400원처럼 잘못 읽은 듯한 금액은 크게 다시 읽어 맞춰 봄
+                big = zoomed_text(orig, st)
+                if big.strip():
+                    others.append(big)
             # 그래도 금액이나 날짜를 못 읽었으면 보정(대비·선명하게)해서 한 번 더 읽음
             if use_pre and first_is_receipt and missing:
                 counts["보정"] += 1
@@ -3345,6 +3404,8 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
                 if first_is_receipt and not r.is_receipt:
                     r.is_receipt = True
                 fill_from_other_reads(r, others, cfg, hospitals)
+                if recheck_amount(r, others, cfg):
+                    fixed_amounts.add(orig.name)
                 apply_store_memory(r, memory, cfg)
                 place_in_month(r, tm)
                 return r
@@ -3355,6 +3416,9 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         _save_json(cache_path, cache)       # 중간에 멈춰도 읽은 결과는 남김
     if counts["크게"]:
         log(f"   금액·날짜를 못 읽어 작은 글자를 크게 다시 읽은 사진 {counts['크게']}장, 그중 더 잘 읽힌 것 {counts['크게 나아짐']}장")
+    if counts["금액 확인"] or fixed_amounts:
+        log(f"   금액이 이상해(주차 금액이 너무 큼 등) 크게 다시 읽어 맞춰 본 사진 {counts['금액 확인']}장, "
+            f"점선을 숫자로 읽은 금액을 바로잡은 사진 {len(fixed_amounts)}장")
     if counts["보정"]:
         log(f"   금액·날짜를 못 읽어 보정해서 다시 읽은 영수증 {counts['보정']}장, 그중 더 잘 읽힌 것 {counts['나아짐']}장")
     remembered = sum(1 for r in receipts if r.remembered)
