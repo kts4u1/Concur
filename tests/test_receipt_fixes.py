@@ -21,8 +21,8 @@ PARKING_AT_HOSPITAL = """주차영수증
 상 호 : 원광대병원
 주 차 장 명 : 원광대학교병원
 주 소 : 전북 익산시 무왕로 985
-사 업 자 : 403-82-02289
-주차권 번호 : 4743051
+사 업 자 : 123-45-67891
+주차권 번호 : 1234567
 입 차 시 간 : 2026-10-01 16:36:31
 출 차 시 간 : 2026-10-01 19:21:52
 주 차 시 간 : 2시간 45분 21초
@@ -54,7 +54,7 @@ def test_store_memory_does_not_turn_clear_parking_into_meal():
         ca.apply_store_memory(rec, {rec.biz_no: {"분류": "식대"}}, cfg)
         assert rec.category == "주차"
 
-    cafe = analyze("카페 한빛\n사업자 : 403-82-02289\n아이스티 4,500\n2026-10-03")
+    cafe = analyze("카페 한빛\n사업자 : 123-45-67891\n아이스티 4,500\n2026-10-03")
     ca.apply_store_memory(cafe, {cafe.biz_no: {"분류": "식대"}}, cfg)
     assert cafe.category == "식대"                      # 글자가 뚜렷하지 않으면 사용자가 고른 분류를 씀
 
@@ -106,7 +106,7 @@ def test_pass_receipt_does_not_borrow_same_day_hospital(tmp_path, monkeypatch):
 # ---------- 3. 짧은 병원 이름 ----------
 
 SOO = """매출전표
-No.0510129276
+No.0000000001
 SK쉴더스 전주 수병원 주차장
 전북특별자치도 전주시 완산구 서원로 63
 2026-10-07 15:03:11
@@ -156,7 +156,7 @@ def test_dotted_leader_misread_amount_dropped():
     text = """[ 영 수 증 ]
 상 호 : 일곡공영주차장
 주 소 : 광주 북구 설죽로 495-6
-사업자번호 : 409-83-02514
+사업자번호 : 234-56-78901
 입차 일시 : ...............2026-10-15 12:07:35
 출차 일시 : ...............2026-10-15 13:58:25
 주차 요금 : ................411,400원
