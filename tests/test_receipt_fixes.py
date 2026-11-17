@@ -451,3 +451,28 @@ def test_vendor_name_without_label():
     assert ca.vendor_english("가나호텔 전주중앙점") == "Gana Hotel Jeonju Jungang"
     assert ca.find_vendor_name("가맹점명 : 주_놀유니버스") == "놀유니버스"
     assert ca.vendor_near_business_number("홍길동 234-56-78901") == ""              # 대표자 이름만 있으면 안 씀
+
+
+def test_vendor_name_when_ocr_splits_lines():
+    """2026-11-17 두 번째 실행: 숙박·식대 Vendor Name이 또 비었음. Windows OCR은 같은 줄의 떨어진 글자(가게 이름·TID·
+    대표자·사업자번호)를 따로 줄로 내고 순서도 섞일 수 있음 → 번호 앞뒤 몇 줄 중 가게 글자가 든 줄."""
+    split_hotel = ("KOCES\n가맹점명, 가맹점주소가 실제와 다른경우\n신고안내(포상금 10만원 지급) 우편접수\n신용매출\n02:20:52(L)\n"
+                   "가나호텔 전주중앙점\nTID:***1234567\n홍길동\n234-56-78901\nTel:0630000000\n"
+                   "전북특별자치도 전주시 완산구 가나로 1\n거래일시: 2026/09/28 02:20:52\n합 계: 50,000원")
+    assert ca.find_vendor_name(split_hotel) == "가나호텔 전주중앙점"
+    mixed = "신용매출\n가나호텔 전주중앙점\n홍길동 234-56-78901\n02:20:52(L)\nTID:***1234567\nTel:0630000000"
+    assert ca.find_vendor_name(mixed) == "가나호텔 전주중앙점"
+    split_meal = "[영수증]-재발행\n가나돼지찌개\n123-45-67891\n홍길동\n전남 목포시 가나로 1\n2026-09-07 13:34:21\n생김치찌개\n9,000"
+    assert ca.find_vendor_name(split_meal) == "가나돼지찌개"
+    no_number = "[영수증]\n가 나 돼 지 찌 개\n전남 목포시 가나로 1\n2026-09-07 13:34:21\n생김치찌개 9,000"
+    assert ca.find_vendor_name(no_number) == "가 나 돼 지 찌 개"               # 사업자번호가 없으면 윗부분의 가게 글자
+    assert ca.vendor_english("가 나 돼 지 찌 개").replace(" ", "").lower() == "ganadwaejijjigae"
+    assert ca.find_vendor_name("2026-09-07\n생김치찌개 9,000\n합계 18,000") == ""     # 메뉴 줄은 가게 이름이 아님
+
+
+def test_generic_vendor_when_name_unread():
+    assert ca.generic_vendor("숙박", "Accommodation") == "Hotel"
+    assert ca.generic_vendor("식대", "Other Staff Expenses") == "Restaurant"
+    assert ca.generic_vendor("", "Other Staff Expenses") == "Restaurant"
+    assert ca.generic_vendor("주차", "Parking & Toll") == "Parking"
+    assert ca.generic_vendor("마일리지", "Car mileage") == ""

@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 Vendor Name 채우기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 두 번째 Parking & Toll·Vendor Name"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -2678,7 +2678,7 @@ def find_vendor_name(ocr_text: str) -> str:
         name = re.sub(r"\(주\)|㈜|주식회사|^\s*주_|\(유\)|\(재\)", "", name).strip(" .,_-*|[]")
         if _plausible_name(name) and name not in VENDOR_LABEL_WORDS:
             return name
-    return vendor_near_business_number(ocr_text)
+    return vendor_near_business_number(ocr_text) or vendor_from_header(ocr_text)
 
 
 VENDOR_NOTICE = re.compile(r"실제와|다른\s*경우|신고|포상금|안내|여신금융")
@@ -2703,22 +2703,87 @@ def _looks_like_person(name: str) -> bool:
     return bool(re.fullmatch(r"[가-힣]{2,4}", name)) and not any(w in name for w in SHOP_WORDS)
 
 
+VENDOR_NOT_NAME = re.compile(r"카드|승인|매출|거래|일시|금액|합계|부가세|과세|면세|할부|일시불|단말|전표|영수증|재발행|발행|"
+                             r"고객|서명|번호|주소|전화|사업자|대표|TID|TEL|POS|CAT|ON\s*LINE|KOCES|KICC|KIS|NICE|SMARTRO|"
+                             r"VAN|결제|신용|체크|현금|품명|수량|단가|메뉴|테이블|주문|직원|담당|포인트|적립|잔액|감사|"
+                             r"WO\s*-|^\d|\d{3,}", re.I)
+STRONG_SHOP_WORDS = ("호텔", "모텔", "식당", "찌개", "국밥", "카페", "커피", "주차장", "파킹", "마트", "반점", "치킨", "베이커리",
+                     "리조트", "펜션", "여관", "횟집", "갈비", "분식", "가든", "회관", "주유소", "편의점", "타워", "레스토랑",
+                     "HOTEL", "MOTEL", "CAFE", "COFFEE", "PARKING")
+ADDRESS_LINE = re.compile(r"(?:특별자치도|광역시|특별시|[가-힣]+(?:시|군|구|읍|면|동|로|길)\s*\d)|^\s*(?:서울|부산|대구|인천|광주|대전|울산|"
+                          r"세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)(?:\s|특|도|시)")
+
+
+def _vendor_candidate(text: str) -> str:
+    """가게 이름으로 쓸 만한 글자(대표자 이름·안내 글·카드 글자·주소·숫자 줄은 뺌) → 다듬은 글자 또는 ''"""
+    name = _clean_vendor(text)
+    if (not name or not _plausible_name(name) or not re.search(r"[가-힣A-Za-z]{2}", re.sub(r"\s+", "", name))
+            or _looks_like_person(re.sub(r"\s+", "", name))
+            or VENDOR_NOTICE.search(text) or VENDOR_NOT_NAME.search(name) or ADDRESS_LINE.search(name)
+            or name in VENDOR_LABEL_WORDS or len(name) > 40):
+        return ""
+    return name
+
+
+def _shop_score(name: str) -> int:
+    """가게 글자 점수: 호텔·식당·찌개처럼 뚜렷한 글자 20, '…점'·'…집' 같은 글자 10 (OCR이 글자 사이를 띄워도 봄)"""
+    c = re.sub(r"\s+", "", name).lower()
+    if any(w.lower() in c for w in STRONG_SHOP_WORDS):
+        return 20
+    return 10 if any(w in c for w in SHOP_WORDS) else 0
+
+
 def vendor_near_business_number(ocr_text: str) -> str:
     """'상호' 글자가 없는 영수증(2026-11-17 사용자 화면):
     '가나돼지찌개 / 123-45-67891 / 대표자' → 사업자번호 앞 글자, 'OO호텔 OO점 TID:…' 다음 줄 '대표자 234-56-78901 Tel:…'
-    → 앞 글자가 대표자 이름이면 바로 윗줄."""
+    → 앞 글자가 대표자 이름이면 윗줄. Windows OCR은 같은 줄이라도 떨어진 글자(TID·대표자·번호)를 따로 줄로 내어 주고
+    순서도 섞일 수 있어, 번호 앞뒤 몇 줄 중 가게 글자(호텔·식당·…점)가 든 것을 먼저 고릅니다."""
     lines = [l.strip() for l in (ocr_text or "").splitlines() if l.strip()]
+    best, best_score = "", -1
     for k, line in enumerate(lines):
-        m = BIZ_NO_DASHED.search(line)
+        m = BIZ_NO_DASHED.search(line) or BIZ_NO_LABELED.search(line)
         if not m:
             continue
-        before = _clean_vendor(line[:m.start()])
-        prev = _clean_vendor(lines[k - 1]) if k and not VENDOR_NOTICE.search(lines[k - 1]) else ""
-        if before and _plausible_name(before) and not _looks_like_person(before) and re.search(r"[가-힣A-Za-z]{2}", before):
-            return before
-        if prev and _plausible_name(prev) and re.search(r"[가-힣A-Za-z]{2}", prev) and not re.search(r"\d{3,}", prev):
-            return prev
+        near = [(line[:m.start()], 0), (line[m.end():], 1)]
+        near += [(lines[j], abs(j - k)) for j in (k - 1, k - 2, k - 3, k + 1) if 0 <= j < len(lines)]
+        for text, dist in near:
+            name = _vendor_candidate(text)
+            if not name:
+                continue
+            score = _shop_score(name) - dist * 2
+            if dist == 3 and score < 10:                   # 세 줄 위는 가게 글자가 있을 때만
+                continue
+            if score > best_score:
+                best, best_score = name, score
+    return best
+
+
+def vendor_from_header(ocr_text: str) -> str:
+    """사업자번호로도 못 찾을 때: 영수증 윗부분(첫 날짜·금액 줄 전)에서 가게 글자(호텔·모텔·식당·찌개·주차장…)가 든 줄"""
+    for line in (l.strip() for l in (ocr_text or "").splitlines()):
+        if not line:
+            continue
+        if re.search(r"20\d{2}\s*[-./년]\s*\d{1,2}|\d{1,3},\d{3}", line):
+            break                                          # 날짜·금액부터는 메뉴·결제 내용
+        name = _vendor_candidate(line)
+        if name and _shop_score(name) >= 20:
+            return name
     return ""
+
+
+VENDOR_GENERIC = [(r"숙박|accommodation|hotel|lodging|motel", "Hotel"), (r"식대|식사|meal|restaurant", "Restaurant"),
+                  (r"카페|cafe|coffee", "Cafe"), (r"주차|parking", "Parking"), (r"톨게이트|통행|toll", "Toll"),
+                  (r"staff", "Restaurant")]
+
+
+def generic_vendor(category: str, expense_type: str = "") -> str:
+    """가게 이름을 영수증에서 못 읽었을 때 넣을 일반 이름(숙박 → Hotel, 식대 → Restaurant …). 모르면 ''"""
+    for text in (category or "", expense_type or ""):
+        for pattern, name in VENDOR_GENERIC:
+            if text and re.search(pattern, text, re.I):
+                return name
+    return ""
+
 
 # ---------- 가게 기억: 영수증의 사업자등록번호로 같은 가게를 알아봄 ----------
 BIZ_NO_LABELED = re.compile(r"사업자(?:등록)?\s*(?:번호|No\.?)?\s*[:：]?\s*(\d{3})\s*-?\s*(\d{2})\s*-?\s*(\d{5})(?!\d)")
@@ -3993,6 +4058,35 @@ JS_MARK_DROPDOWN_ARROW = r"""
 """.replace("ON_TOP", JS_ON_TOP_FN)
 
 
+JS_MARK_TYPE_ITEM = r"""
+(text) => {
+  // 'Add Expense to Report' 창의 Expense Type 목록에서 글자가 똑같은 항목(예: Parking & Toll).
+  // 같은 리포트에 Parking & Toll 경비를 하나 만들고 나면 창 뒤에 깔린 리포트 목록에도 'Parking & Toll' 글자가 생겨,
+  // 예전에는 그 가려진 글자를 누르려다 60초 동안 멈췄음(2026-11-17 실행 기록: 두 번째 Parking & Toll부터 모두 실패).
+  // → 그 자리의 맨 앞에 보이는 것만(창 안의 항목). 창 안 목록이 길어 화면 밖이면 창(role=dialog) 안의 것을 보이게 내림.
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  ON_TOP_STRICT
+  document.querySelectorAll('[data-concur-auto-type]').forEach(e => e.removeAttribute('data-concur-auto-type'));
+  const norm = t => (t || '').replace(/\s+/g, ' ').trim();
+  const want = norm(text);
+  const cands = Array.from(document.querySelectorAll('body *')).filter(e => vis(e)
+    && !/^(input|textarea|select|option|script|style)$/i.test(e.tagName)
+    && norm(e.innerText) === want && !Array.from(e.children).some(c => norm(c.innerText) === want));
+  let pick = cands.find(onTopStrict);
+  if (!pick) {
+    const dialogs = Array.from(document.querySelectorAll('[role=dialog], [aria-modal=true], dialog')).filter(vis);
+    const top = dialogs[dialogs.length - 1];
+    pick = top && cands.find(e => top.contains(e));
+    if (pick) pick.scrollIntoView({block: 'center'});
+    if (pick && !onTopStrict(pick)) return '';
+  }
+  if (!pick) return '';
+  (pick.closest('[role=option], [role=button], button, a, li') || pick).setAttribute('data-concur-auto-type', '1');
+  return norm(pick.innerText);
+}
+""".replace("ON_TOP_STRICT", "const onTopStrict = " + JS_ON_TOP_STRICT.strip() + ";")
+
+
 JS_MARK_ROW = r"""
 ({sel, date, amount}) => {
   // 리포트 경비 목록에서 날짜(MM/DD/YYYY)와 금액이 같은 줄의 체크박스에 표시합니다(저장한 새 경비를 다시 열 때).
@@ -4299,6 +4393,29 @@ JS_LABELED_SELECT = r"""
       .filter(([f, b]) => b.top >= r.top - 2 && b.top - r.bottom < 80 && b.left < r.right + 40 && b.right > r.left - 40);
     fields.sort((a, b) => a[1].top - b[1].top);
     if (fields.length) { fields[0][0].setAttribute('data-concur-auto-select', '1'); return true; }
+  }
+  return false;
+}
+"""
+
+
+JS_LABELED_INPUT = r"""
+(pattern) => {
+  // 칸 이름(예: 'Enter Vendor Name *') 바로 아래의 글자 입력칸(위치·라벨 연결로 못 찾을 때)에 표시. 없으면 false
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  document.querySelectorAll('[data-concur-auto-input]').forEach(e => e.removeAttribute('data-concur-auto-input'));
+  const re = new RegExp(pattern, 'i');
+  const labels = Array.from(document.querySelectorAll('label, span, div, p')).filter(e =>
+    vis(e) && re.test(e.innerText || '') && (e.innerText || '').length < 60 && !e.querySelector('input, textarea'));
+  labels.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+  const inputs = Array.from(document.querySelectorAll('input:not([type]), input[type=text], input[type=search], textarea'))
+    .filter(e => vis(e) && !e.disabled && !e.readOnly);
+  for (const lab of labels) {
+    const r = lab.getBoundingClientRect();
+    const near = inputs.map(f => [f, f.getBoundingClientRect()])
+      .filter(([f, b]) => b.top >= r.top - 2 && b.top - r.bottom < 80 && b.left < r.right + 40 && b.right > r.left - 40);
+    near.sort((a, b) => a[1].top - b[1].top);
+    if (near.length) { near[0][0].setAttribute('data-concur-auto-input', '1'); return true; }
   }
   return false;
 }
@@ -6525,16 +6642,22 @@ class ConcurBot:
                 time.sleep(0.8)
             except Exception:
                 pass
-        pick = page.get_by_text(self._exact(expense_type))            # 'M card parking & toll'과 헷갈리지 않게 글자 그대로
+        # 'M card parking & toll'과 헷갈리지 않게 글자 그대로, 창 뒤에 가려진 리포트 목록의 같은 글자는 빼고 맨 앞의 것만
         deadline = time.time() + 10
-        while time.time() < deadline:
-            el = self._first_shown([pick])
-            if el is not None:
-                el.click()
-                break
-            time.sleep(0.3)
-        else:
-            raise RuntimeError(f"새 경비 목록에서 '{expense_type}'를 찾지 못했습니다.")
+        while True:
+            try:
+                found = page.evaluate(JS_MARK_TYPE_ITEM, expense_type)
+            except Exception:
+                found = ""
+            if found:
+                try:
+                    page.locator("[data-concur-auto-type]").first.click(timeout=5000)
+                    break
+                except Exception:
+                    pass
+            if time.time() >= deadline:
+                raise RuntimeError(f"새 경비 목록(Add Expense to Report 창)에서 '{expense_type}'를 누르지 못했습니다.")
+            time.sleep(0.4)
         self.field("경비 금액", timeout_s=self.timeout_ms / 1000)
 
     def create_manual_expenses(self, recs: list, work_dir: Path, start_no: int = 1) -> list:
@@ -6678,14 +6801,44 @@ class ConcurBot:
         except Exception:
             return False
 
+    def _vendor_required(self, box) -> bool:
+        """Enter Vendor Name이 필수 칸인지: required·aria-required·빨간 오류 표시(aria-invalid), 또는 칸을 감싼 상자의 글자가
+        'Enter Vendor Name *'(별표가 따로 그려져도)"""
+        if self._is_required(box):
+            return True
+        try:
+            return bool(box.evaluate(r"""e => {
+                if (e.getAttribute('aria-invalid') === 'true') return true;
+                for (let b = e.parentElement, k = 0; b && k < 4; b = b.parentElement, k++) {
+                    const t = (b.innerText || '').replace(/\s+/g, ' ').trim();
+                    if (t.length > 80) break;
+                    if (/vendor|가맹점|공급업체/i.test(t) && /\*/.test(t)) return true;
+                }
+                return false;
+            }"""))
+        except Exception:
+            return False
+
     def fill_vendor(self, rec, done: list, checks: list):
         """Enter Vendor Name(필수) 칸이 있고 비어 있으면 영수증·인보이스의 가게 이름을 영어로 넣습니다
         (숙박만 하다가 2026-11-17부터 모든 경비 — 식대·숙박 카드 경비도 비어 있어 저장이 안 됐음)."""
         page = self.page
-        box = self._first_shown([page.locator(self.sel("가게 이름 입력")),
-                                 page.get_by_label(self._re("가게 이름 입력", exact=False))])
-        if box is None:
-            return
+        words = [w.strip() for w in str((self.cfg.get("화면_요소_라벨") or {}).get("가게 이름 입력")
+                                         or DEFAULT_ELEMENT_LABELS.get("가게 이름 입력", "")).split("|") if w.strip()]
+        label_re = re.compile(r"^\s*(?:" + "|".join(map(re.escape, words)) + r")\s*\*?\s*$", re.I) if words else None
+        box = self._first_shown([page.locator(self.sel("가게 이름 입력"))]
+                                + ([page.get_by_label(label_re)] if label_re else []))
+        if box is None and label_re is not None:
+            try:
+                box = page.locator("[data-concur-auto-input]").first if page.evaluate(JS_LABELED_INPUT, label_re.pattern) else None
+            except Exception:
+                box = None
+            if box is None:
+                if self._first_shown([page.get_by_text(label_re)]) is not None:
+                    self.log("   'Enter Vendor Name' 칸은 보이는데 입력칸을 찾지 못했습니다.")
+                    checks.append("Vendor Name 직접 넣기(칸을 찾지 못함)")
+                    self.screenshot("vendor_name")
+                return
         try:
             if box.input_value().strip():
                 return
@@ -6694,9 +6847,18 @@ class ConcurBot:
         vendor = rec.vendor or find_vendor_name(rec.ocr_text)
         name = vendor_english(vendor)                        # Vendor Name은 영어로(사용자 요청)
         if not name:
-            if self._is_required(box):                       # 필수 칸(Enter Vendor Name *)일 때만 알림
+            # 영수증에서 가게 이름을 못 읽으면: 비워 두면 필수 칸이라 저장이 안 되므로(2026-11-17 사용자 화면) 분류에 맞는
+            # 일반 이름(숙박 → Hotel, 식대 → Restaurant …)을 넣고 '확인 필요'. 다음에 고칠 수 있게 읽은 글자 앞부분을 기록
+            if not self._vendor_required(box):
+                return                                       # 필수 칸이 아니면 비워 둠
+            expense_type = (self.cfg.get("Undefined일_때_선택할_유형") or {}).get(rec.category, "") if rec.category else ""
+            name = generic_vendor(rec.category, expense_type)
+            head = " / ".join(l.strip() for l in (rec.ocr_text or "").splitlines() if l.strip())[:160]
+            self.log(f"   Vendor Name: 영수증에서 가게 이름을 못 읽었습니다({rec.original.name}). 읽은 글자 앞부분: {head or '(없음)'}")
+            if not name:
                 checks.append("Vendor Name 직접 넣기(영수증에서 가게 이름을 못 읽음)")
-            return
+                return
+            checks.append(f"Vendor Name 확인(영수증에서 가게 이름을 못 읽어 '{name}'로 넣음)")
         try:
             self.type_text(box, name)
             page.keyboard.press("Escape")                     # 가게 이름 추천 목록이 뜨면 닫음

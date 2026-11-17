@@ -126,7 +126,7 @@ TOLL = ["톨게이트", "통행료, 하이패스, 사용내역", "Toll fee for s
 
 def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, noname=False, icons=False, behind=False,
                 slow_close=False, no_choose_new=False, save_busy=False, covered_save=False, real_pane=False,
-                presave_no_add=False):
+                presave_no_add=False, modal=False, vendor_required=False):
     """slow: 막 올린 사진은 1.5초 동안 'Processing...'(사진 없음, 눌러도 안 열림)
     bg: 막 올린 사진의 미리보기가 img가 아니라 배경 그림(div) / noname: 'Receipt Image' 창에 파일 이름이 없음
     icons: 카드마다 사진 앞에 작은 아이콘 그림(누르면 'delete icon')
@@ -139,7 +139,10 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
                [Upload New Receipt](#upload-receipt-button)는 보관함 밖에 보여 누를 수 있으며, 그것으로 올리면 사진이
                보관함이 아니라 경비에 바로 붙고('direct …') 보관함이 닫힘(2026-11-16 실행 기록)
     presave_no_add: 실제 Concur처럼 저장하기 전의 새 경비는 사진을 붙여도 그 아래에 [Remove]만 있고 [Add]·[Open]이 없음
-               (저장한 뒤 다시 열면 생김, 2026-11-16 23:26 사용자 화면)"""
+               (저장한 뒤 다시 열면 생김, 2026-11-16 23:26 사용자 화면)
+    modal: 실제 Concur처럼 'Add Expense to Report' 창이 화면 전체를 덮고(뒤의 리포트 목록은 가려진 채 보임), 목록 맨 위에
+           'Recently Used'로 같은 항목이 한 번 더 나옴(2026-11-17 사용자 화면)
+    vendor_required: Enter Vendor Name 칸이 필수(별표가 따로 그려짐)이고 칸 id·name에 vendor가 없어 칸 이름으로만 찾을 수 있음"""
     js = lambda on: "true" if on else "false"
     html = REPORT
     if behind:
@@ -149,6 +152,25 @@ def report_html(multiple=True, empty=False, library=(), slow=False, bg=False, no
                 + "<style>#form { position:fixed; inset:0; z-index:10; background:#fff; overflow:auto }"
                   " #dialog, #pop { position:fixed; top:0; left:0; z-index:30; background:#fff }</style>")
         assert html.count("show('report', 0)") == 0 and "mi" in html
+    if vendor_required:
+        old_v = '<label for="vendor">Enter Vendor Name</label><input id="vendor" name="vendorName" oninput="note(\'vendor\')">'
+        assert old_v in html and "(document.getElementById('vendor') || {}).value" in html
+        html = (html.replace(old_v, '<div class="fld"><span>Enter Vendor Name</span> <span class="req">*</span><br>'
+                                    '<input id="vx" oninput="note(\'vendor\')"></div>')
+                .replace("(document.getElementById('vendor') || {}).value", "(document.getElementById('vx') || {}).value"))
+    if modal:
+        old_draw = "function openDialog() { steps.push('manual'); show('menu', 0); show('dialog', 1); drawTypes(TYPES); }"
+        old_filter = "function filter(q) { drawTypes(TYPES.filter(t => t.toLowerCase().includes(q.toLowerCase()))); }"
+        assert old_draw in html and old_filter in html
+        html = (html.replace(old_draw, "function openDialog() { steps.push('manual'); show('menu', 0); show('dialog', 1); drawTypes(['Parking & Toll'].concat(TYPES)); }")
+                .replace(old_filter, "function filter(q) { drawTypes(['Parking & Toll'].concat(TYPES).filter(t => t.toLowerCase().includes(q.toLowerCase()))); }")
+                + "<style>#dialog { position:fixed; inset:0; z-index:30; background:rgba(0,0,0,.3); padding:40px 60px }"
+                  " #dialog > * { background:#fff }</style>"
+                  # 리포트로 돌아갈 때 화면을 다시 읽어도(goto) 만든 경비는 남음
+                  "<script>window.expenses = JSON.parse(sessionStorage.getItem('exp') || '[]');"
+                  " if (expenses.length) { drawRows(); show('empty', 0); show('addbtn', 1); }"
+                  " const firstSave = save; save = function () { firstSave(); sessionStorage.setItem('exp', JSON.stringify(expenses)); };"
+                  "</script>")
     if covered_save:
         assert "uploads.push(current);" in html
         html = ('<div id="appbar" style="position:fixed; top:0; left:0; right:0; height:60px; background:#fff; z-index:50">LOGO</div>'
@@ -524,6 +546,41 @@ def test_vendor_name_filled_from_receipt_for_any_expense(browser, tmp_path):
     rows = make_bot(pg, tmp_path).create_manual_expenses([rec], tmp_path / "w")
     assert pg.evaluate("saved")["vendor"] == "Ganadwaejijjigae"
     assert "Vendor Name=Ganadwaejijjigae" in rows[0]["처리"]
+
+
+def test_second_parking_expense_picks_item_in_dialog_not_report_row(browser, tmp_path):
+    """2026-11-17 실행 기록: 같은 리포트에 Parking & Toll 경비를 하나 만들고 나면 창 뒤의 리포트 목록에도 'Parking & Toll'
+    글자가 생겨, 두 번째부터는 그 가려진 글자를 누르려다 멈췄음('Locator.click: Timeout 60000ms exceeded')."""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, modal=True)
+    first, second = toll_rec(tmp_path), toll_rec(tmp_path)
+    second.total, second.dates, second.last_use = 2900, ["2026-10-02"], "2026-10-02"
+    rows = make_bot(pg, tmp_path).create_manual_expenses([first, second], tmp_path / "w")
+    assert [r["오류"] for r in rows] == ["", ""]
+    assert [e["type"] for e in pg.evaluate("expenses")] == ["Parking & Toll", "Parking & Toll"]
+    assert [e["amount"].replace(",", "") for e in pg.evaluate("expenses")] == ["61500", "2900"]
+    assert pg.inner_text("#count") == "Expenses (2)"
+
+
+def test_required_vendor_found_by_label_and_filled(browser, tmp_path):
+    """2026-11-17 두 번째 실행: Enter Vendor Name(필수)이 또 비었음 → 칸 이름 바로 아래 입력칸도 찾고, 영수증에서 가게
+    이름을 읽으면 영어로, 못 읽으면 분류에 맞는 일반 이름 + '확인 필요'(비워 두면 저장이 안 됨)."""
+    pytest.importorskip("cv2")
+    pg = open_report(browser, vendor_required=True)
+    rec = toll_rec(tmp_path)
+    rec.ocr_text = "신용매출\n가나호텔 전주중앙점\nTID:***1234567\n홍길동\n234-56-78901\n거래일시: 2026/09/28"
+    rows = make_bot(pg, tmp_path).create_manual_expenses([rec], tmp_path / "w")
+    assert pg.evaluate("saved")["vendor"] == "Gana Hotel Jeonju Jungang" and rows[0]["확인 필요"] == ""
+    pg2 = open_report(browser, vendor_required=True)
+    logs = []
+    bot = make_bot(pg2, tmp_path)
+    bot.log = logs.append
+    rec2 = toll_rec(tmp_path)
+    rec2.ocr_text = "2026/09/28\n합계 50,000"
+    rows = bot.create_manual_expenses([rec2], tmp_path / "w2")
+    assert pg2.evaluate("saved")["vendor"] == "Toll"
+    assert "Vendor Name 확인(영수증에서 가게 이름을 못 읽어 'Toll'로 넣음)" in rows[0]["확인 필요"]
+    assert any("읽은 글자 앞부분: 2026/09/28 / 합계 50,000" in m for m in logs)    # 다음에 고칠 수 있게 기록
 
 
 def test_receipt_stem():
