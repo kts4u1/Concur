@@ -6197,6 +6197,7 @@ class ConcurBot:
         올렸으면 self.added_by_confirm에 그 이름을 남깁니다."""
         page = self.page
         self.added_by_confirm = ""
+        self._confirm_add_receipt()                       # 앞 사진에서 늦게 뜬 확인 창이 남아 있으면 먼저
         if not again and self._available_open():
             return True
         locs = [page.get_by_role("button", name=self._re("사용 가능한 영수증에서 선택", exact=False)),
@@ -6442,9 +6443,10 @@ class ConcurBot:
                     btn.click(timeout=5000)
                 except Exception:
                     btn.evaluate("e => e.click()")
-                self._confirm_add_receipt(2.5)            # [Add] 뒤에 '이미지를 합친다' 확인 창이 뜨면 [Add Receipt]
                 gone = time.time() + 15                   # 누른 단추(창)가 사라질 때까지
                 while time.time() < gone:
+                    if self._confirm_add_receipt():       # [Add] 뒤에 '이미지를 합친다' 확인 창이 뜨면 [Add Receipt]
+                        continue
                     try:
                         if not btn.is_visible():
                             break
@@ -6452,6 +6454,7 @@ class ConcurBot:
                         break
                     time.sleep(0.3)
                 time.sleep(1.0)
+                self._confirm_add_receipt()
                 self._wait_available_closed()             # 보관함이 닫히는 동안 다음 사진을 찾지 않게
                 return True
             self.log(f"   {name} 사진을 눌렀지만 [Attach]/[Add]가 보이지 않습니다({attempt + 1}/3, 카드 {state}). "
