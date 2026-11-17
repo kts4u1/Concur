@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 점선 지우기 고침·계기판 분류"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 점선 지우기 다시 읽기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -1910,6 +1910,10 @@ def remove_dot_leaders(image):
     return out, len(marked)
 
 
+# 점선 지우기 판: 첫 판은 실제 크기 사진에서 점을 하나도 못 지워 빈 글자를 기억했음 → 판을 바꾸면 다시 읽음(2026-11-17)
+DOTLESS_VERSION = 2
+
+
 def make_dotless_copy(original: Path, work_dir: Path, log=None):
     """점선을 지운 임시 사본(jpg). 점선이 없거나 읽지 못하면 None"""
     cv2, _ = _cv2()
@@ -2961,7 +2965,8 @@ def group_mileage_bundles(receipts: list, tm, keywords=None, priority=None) -> i
         for r in members:                                 # 계기판 사진도 분류는 마일리지로 보여 줌
             r.use, r.skip_reason = False, f"마일리지 신청서({f.original.name})에 함께 첨부"
             r.category = r.category or f.category
-        f.bundle_issue = "" if members else "함께 올릴 계기판(주행거리) 사진을 못 찾음"
+        f.bundle_issue = "" if members else (f"함께 올릴 계기판(주행거리) 사진을 못 찾음 — 날짜 {first[5:7]}월 01일·"
+                                             f"{nxt[5:7]}월 01일이 찍힌 사진이 있으면 영수증 폴더에 넣어 주세요")
         f.bundle_note = ("마일리지 신청서" + (f" {info['km']:,}km" if info["km"] else "") + f" {total:,}원, "
                          + (f"계기판 사진 {len(members)}장 함께 첨부" if members else "계기판 사진을 못 찾음"))
     return len(forms)
@@ -3482,7 +3487,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
 
     def dotless_text(orig: Path, st) -> str:
         """점선을 지운 사본으로 다시 읽은 글자(결과는 '파일이름#점선'으로 기억, 사본은 바로 지움)"""
-        key = orig.name + "#점선"
+        key = orig.name + f"#점선{DOTLESS_VERSION}"     # 점선 지우는 방법을 고치면 판을 올려 예전 결과(빈 글자)를 다시 읽음
         c = cache.get(key)
         if c and c.get("size") == st.st_size and c.get("mtime") == int(st.st_mtime) and "text" in c:
             return c["text"]

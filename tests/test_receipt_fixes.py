@@ -375,6 +375,7 @@ def test_october_dashboard_is_not_attached_to_september_form(tmp_path, monkeypat
     assert ca.review_status({"사용(O/X)": "X", "확인 필요": dash.skip_reason, "붙는 영수증": ""}) .startswith("✕")
     assert form.use and form.bundle == []
     assert dash.category == "마일리지"                                             # 분류가 비지 않게(사용자 요청)
+    assert "09월 01일·10월 01일" in form.bundle_issue                              # 9월 계기판 사진이 없어서 ⚠
 
 
 def test_dashboard_main_date_is_upper_date(tmp_path, monkeypatch):
@@ -382,3 +383,44 @@ def test_dashboard_main_date_is_upper_date(tmp_path, monkeypatch):
     assert ca.dashboard_month(rec) == "2026-10"
     ca.place_dashboards([rec], ca.TargetMonth(2026, 11))
     assert rec.main_date == "2026-10-01" and not rec.use                           # 11월에는 10월 사진
+
+
+def test_old_empty_dotless_result_is_read_again(tmp_path, monkeypatch):
+    """첫 판 점선 지우기가 점을 못 찾아 빈 글자를 기억했어도(키 '#점선') 새 판은 다시 읽음(2026-11-17 여전히 11,400)"""
+    import json
+    import os
+    from datetime import datetime
+    zoomed = PARK_411.replace("411,400원", "11,400원")
+    dotless = PARK_411.replace("411,400원", "1,400원")
+    fake = tmp_path / "dotless_IMG_5657.jpg"
+    monkeypatch.setattr(ca, "make_dotless_copy",
+                        lambda original, work_dir, log=None: (fake.write_bytes(b"x"), fake)[1])
+    src = tmp_path / "src"
+    src.mkdir()
+    p = src / "IMG_5657.JPG"
+    p.write_bytes(b"\xff\xd8\xff\xd9")
+    t = datetime(2026, 11, 15, 10, 0).timestamp()
+    os.utime(p, (t, t))
+    st = p.stat()
+    results = tmp_path / "결과"
+    results.mkdir()
+    old = {"size": st.st_size, "mtime": int(st.st_mtime)}
+    (results / "ocr_cache.json").write_text(json.dumps({
+        "IMG_5657.JPG": dict(old, text=PARK_411), "IMG_5657.JPG#크게": dict(old, text=zoomed),
+        "IMG_5657.JPG#점선": dict(old, text="")}, ensure_ascii=False), encoding="utf-8")
+
+    class FakeOcr:
+        def __init__(self, work_dir):
+            pass
+
+        def read(self, path):
+            return dotless if "dotless" in Path(path).name else PARK_411
+
+        def read_zoomed(self, path):
+            return zoomed
+
+    monkeypatch.setattr(ca, "WindowsOcr", FakeOcr)
+    cfg = ca.default_settings()
+    cfg.update({"영수증_원본_폴더": str(src), "영수증_보정_사용": False})
+    rec = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), [], results, tmp_path / "w", lambda s: None)[0]
+    assert rec.total == 1400

@@ -125,7 +125,7 @@ def test_missing_odometer_photo_is_flagged():
     ca.group_mileage_bundles(rs, OCT, WORDS, ORDER)
     form = rs[0]
     assert form.bundle == [] and form.new_kind == "마일리지" and form.use
-    assert ca.receipt_issues(form, rs) == ["함께 올릴 계기판(주행거리) 사진을 못 찾음"]
+    assert len(ca.receipt_issues(form, rs)) == 1 and ca.receipt_issues(form, rs)[0].startswith("함께 올릴 계기판(주행거리) 사진을 못 찾음")
 
 
 def test_mileage_item_gets_default_words(tmp_path):
