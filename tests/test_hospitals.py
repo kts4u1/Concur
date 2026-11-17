@@ -153,41 +153,6 @@ def rec(name, date, category, hospital="", src=""):
     return r
 
 
-def test_same_day_parking_hospital_fills_cafe_and_meal():
-    parking = rec("p.jpg", "2026-11-03", "주차", "Wongwang University Hospital", "영수증 글자")
-    cafe = rec("c.jpg", "2026-11-03", "카페")
-    meal = rec("m.jpg", "2026-11-03", "식대")
-    other_day = rec("o.jpg", "2026-11-04", "카페")
-    assert ca.fill_same_day_hospitals([parking, cafe, meal, other_day]) == 2
-    assert (cafe.hospital_en, cafe.hospital_src) == ("Wongwang University Hospital", "같은 날 영수증")
-    assert meal.hospital_en == "Wongwang University Hospital"
-    assert other_day.hospital_en == ""
-
-
-def test_same_day_with_two_hospitals_prefers_parking_or_gives_up():
-    a = rec("a.jpg", "2026-11-03", "주차", "Hospital A", "영수증 글자")
-    b = rec("b.jpg", "2026-11-03", "카페", "Hospital B", "영수증 글자")
-    meal = rec("m.jpg", "2026-11-03", "식대")
-    ca.fill_same_day_hospitals([a, b, meal])
-    assert meal.hospital_en == "Hospital A"
-
-    a2 = rec("a2.jpg", "2026-11-05", "주차", "Hospital A", "영수증 글자")
-    c2 = rec("c2.jpg", "2026-11-05", "주차", "Hospital C", "영수증 글자")
-    meal2 = rec("m2.jpg", "2026-11-05", "식대")
-    ca.fill_same_day_hospitals([a2, c2, meal2])
-    assert meal2.hospital_en == ""                    # 어느 병원인지 모름 → '병원 없음'으로 남김
-
-
-def test_same_day_does_not_fill_when_user_cleared_or_excluded():
-    parking = rec("p.jpg", "2026-11-03", "주차", "Hospital A", "영수증 글자")
-    cleared = rec("c.jpg", "2026-11-03", "카페")
-    cleared.edited = ["병원"]
-    excluded = rec("x.jpg", "2026-11-03", "카페")
-    excluded.use = False
-    ca.fill_same_day_hospitals([parking, cleared, excluded])
-    assert cleared.hospital_en == "" and excluded.hospital_en == ""
-
-
 def test_receipt_list_shows_hospital_source(tmp_path, monkeypatch):
     src = tmp_path / "src"
     src.mkdir()
@@ -213,11 +178,12 @@ def test_receipt_list_shows_hospital_source(tmp_path, monkeypatch):
         recs = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), ca.OLD_DEFAULT_HOSPITALS, results, tmp_path / "w", log)
     finally:
         log.close()
-    assert [(r.hospital_en, r.hospital_src) for r in recs] == [("KYUH", "영수증 글자"), ("KYUH", "같은 날 영수증")]
+    # 같은 날 다른 영수증의 병원은 빌려 오지 않음(2026-11-17 사용자: 병원 이름이 없는 영수증에 원광대병원이 들어감)
+    assert [(r.hospital_en, r.hospital_src) for r in recs] == [("KYUH", "영수증 글자"), ("", "")]
     rows = ca.read_csv_dicts(ca.list_csv_path(results, ca.TargetMonth(2026, 10)))
     assert [(r["병원 영문"], r["병원 근거"], r["확인 필요"]) for r in rows] == \
-        [("KYUH", "영수증 글자", ""), ("KYUH", "같은 날 영수증", "")]
-    assert ca.texts_for(recs[1], cfg)["Comment"] == "Cafe for wifi in KYUH"
+        [("KYUH", "영수증 글자", ""), ("", "", "")]
+    assert ca.texts_for(recs[1], cfg)["Comment"] == "Cafe for wifi"
 
 
 # ---------- Concur 가게 이름 ----------

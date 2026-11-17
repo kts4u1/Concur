@@ -108,7 +108,7 @@ def test_hospital_not_in_list_is_found_and_added(tmp_path, monkeypatch):
         recs = ca.build_receipts(cfg, tm, ca.load_hospitals(csv_path), results, tmp_path / "w", log, csv_path)
         assert [(r.hospital_en, r.hospital_src, ca.city_name(r.city)) for r in recs] == [
             ("Mokpo Hanguk Hospital", "영수증 글자", "Mokpo"),
-            ("Mokpo Hanguk Hospital", "같은 날 영수증", "Mokpo"),        # 카페 영수증: 같은 날 주차 영수증의 병원·도시
+            ("", "", "Mokpo"),        # 카페 영수증: 같은 날 주차 영수증의 도시만(병원은 영수증에 없으면 비움, 2026-11-17)
             ("Wongwang University Hospital", "영수증 글자", "Iksan"),
         ]
         assert recs[0].total == 6000

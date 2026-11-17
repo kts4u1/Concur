@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-16 저장 전 사진 한 번에 올리기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 분류·병원·금액 읽기 보강"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -59,7 +59,11 @@ CATEGORIES = ("주차", "카페", "식대")
 DEFAULT_HOSPITALS = [
     ["원광대", "Wonkwang University Hospital"],
     ["목포한국", "Mokpo Hankook Hospital"],
+    ["전주수병원", "Jeonju Soo Hospital"],          # 2026-11-17 영수증 'SK쉴더스 전주 수병원 주차장', 영문은 사용자 운행 기록의 이름
 ]
+# 예전 병원목록.csv에 판마다 한 번씩만 더할 기본 병원(사용자가 지운 줄은 다시 넣지 않음)
+DEFAULT_HOSPITALS_BY_VERSION = {2: [["전주수병원", "Jeonju Soo Hospital"]]}
+DEFAULT_HOSPITALS_VERSION = 2
 
 # 예전 기본 목록(동료분 흐름의 대전·충청권). 예전 병원목록.csv에서 지울 줄을 알아보는 데 씁니다.
 OLD_DEFAULT_HOSPITALS = [
@@ -850,6 +854,31 @@ def load_hospital_rows(path: Path) -> list:
     return rows
 
 
+def add_new_default_hospitals(path: Path, settings_path: Path, log=None) -> int:
+    """예전 병원목록.csv에 새로 확인한 기본 병원을 한 번만 더합니다(이미 같은 찾을 글자·영문명이 있으면 건너뜀). → 더한 줄 수"""
+    cfg, _ = load_settings(settings_path)
+    done = int(cfg.get("_기본_병원_판") or 1)
+    if done >= DEFAULT_HOSPITALS_VERSION:
+        return 0
+    added = []
+    if path.exists():
+        rows = load_hospital_rows(path)
+        keys = {compact(r[0]) for r in rows}
+        names = {r[1].strip().lower() for r in rows}
+        for version in range(done + 1, DEFAULT_HOSPITALS_VERSION + 1):
+            for key, en in DEFAULT_HOSPITALS_BY_VERSION.get(version, []):
+                if compact(key) not in keys and en.lower() not in names:
+                    rows.append([key, en, DEFAULT_HOSPITAL_NOTE])
+                    added.append(key)
+        if added:
+            write_csv(path, HOSPITAL_HEADER, rows)
+            if log:
+                log(f"병원 목록에 영수증에서 확인한 병원을 더했습니다: {', '.join(added)}")
+    cfg["_기본_병원_판"] = DEFAULT_HOSPITALS_VERSION
+    save_settings(settings_path, cfg)
+    return len(added)
+
+
 def load_hospitals(path: Path) -> list:
     if not path.exists():
         load_hospital_rows(path)
@@ -924,6 +953,8 @@ def hospital_key(name) -> str:
     """영수증에서 찾을 글자: '원광대학교병원' → '원광대', 너무 짧으면(지역 이름 등) 전체 이름"""
     n = compact(clean_hospital_name(name))
     short = re.sub(r"(학교)?" + HOSPITAL_SUFFIX_RE + "$", "", n)
+    if any(short.startswith(c) and len(short) - len(c) <= 1 for c in DEFAULT_CITIES):
+        return n                                          # '전주수병원' → '전주수'는 '전주수산'에도 걸려서 전체 이름
     return short if len(short) >= 3 else n
 
 
@@ -941,7 +972,7 @@ def hospital_english_name(name) -> str:
             break
     words = [head] if head else []
     city = next((c for c in sorted(DEFAULT_CITIES, key=len, reverse=True)
-                 if n.startswith(c) and len(n) > len(c) + 1), "")
+                 if n.startswith(c) and len(n) > len(c)), "")
     parts = ([city] if city else []) + re.split(r"(대학교|대학)", n[len(city):])
     for part in parts:
         if part in ("대학교", "대학"):
@@ -1803,15 +1834,23 @@ def info_score(rec) -> int:
             + (1 if rec.hospital_en else 0) + (2 if (toll_statement_info(rec.ocr_text) or {}).get("total") else 0))
 
 
-def fill_from_other_reads(rec, texts: list, cfg: dict):
-    """고르지 않은 다른 읽기(크게 읽기·보정)에서 도시·사업자번호만 채웁니다. 숙박 인보이스의 주소처럼 작은 글자는
-    크게 읽어야 보이는데, 날짜·금액은 원래 읽기가 나아서 크게 읽은 글자를 버리면 도시가 빠졌음(2026-11-16 숙박 도시가 Seoul)."""
+def fill_from_other_reads(rec, texts: list, cfg: dict, hospitals=None):
+    """고르지 않은 다른 읽기(크게 읽기·보정)에서 병원·도시·사업자번호만 채웁니다. 숙박 인보이스의 주소처럼 작은 글자는
+    크게 읽어야 보이는데, 날짜·금액은 원래 읽기가 나아서 크게 읽은 글자를 버리면 도시가 빠졌음(2026-11-16 숙박 도시가 Seoul).
+    병원 이름도 같음(2026-11-17 'SK쉴더스 전주 수병원 주차장' 줄이 원래 읽기에서는 깨짐)."""
     cities = cfg.get("도시_목록") or DEFAULT_CITIES
     low_names = cfg.get("도시_낮은_우선순위", ["서울"])
     low = {cities[n] for n in low_names if n in cities}
     for t in texts:
         if not (t or "").strip():
             continue
+        if not rec.hospital_en:
+            key, en = detect_hospital(compact(t), hospitals or [])
+            name = "" if en or not cfg.get("영수증에서_병원_찾기", True) else find_hospital_name_in_text(t)
+            if name:
+                key, en, rec.hospital_new = hospital_key(name), hospital_english_name(name), name
+            if en:
+                rec.hospital_key, rec.hospital_en, rec.hospital_src = key, en, HOSP_FROM_OCR
         if not rec.city or rec.city in low:
             city = detect_city(compact(t), cities, rec.hospital_key, low_names)
             if city and (not rec.city or city not in low):
@@ -1993,8 +2032,9 @@ class Receipt:
 # 날짜 바로 뒤에 시각이 붙어 읽혀도(2026-11-0210:51) 날짜로 봄
 DATE_IN_TEXT = re.compile(r"(?<!\d)(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})(?:(?!\d)|(?=\d{1,2}:\d{2}))")
 DATE_IN_NAME = re.compile(r"(20\d{2})-(\d{2})-(\d{2})")
-AMOUNT_WITH_SEP = re.compile(r"(?<![\d.,])\d{1,3}(?:[,.]\d{3})+(?![\d,]|\.\d)")
-AMOUNT_WON = re.compile(r"(?<![\d,.])(\d{3,7})\s*원")
+# 앞이 숫자·쉼표·'숫자.'(소수점)이면 금액이 아님. '……1,400원'처럼 점선 바로 뒤는 금액(2026-11-17)
+AMOUNT_WITH_SEP = re.compile(r"(?<![\d,])(?<!\d\.)\d{1,3}(?:[,.]\d{3})+(?![\d,]|\.\d)")
+AMOUNT_WON = re.compile(r"(?<![\d,])(?<!\d\.)(\d{3,7})\s*원")
 # 쉼표 없이 찍힌 금액(예: 주차요금 6000)은 금액 글자 바로 뒤에 있을 때만
 AMOUNT_NEAR_WORD = re.compile(r"(?:합계|총액|금액|요금|결제|받을|청구|판매|주차료|이용료)[^\d\n]{0,8}(\d{3,7})(?![\d,.\-/:년월])")
 # 연도 두 자리(26.11.03), 날짜 글자 뒤 8자리(거래일시 20261103)
@@ -2165,19 +2205,44 @@ def find_amounts(ocr_text: str) -> list:
     for v in values:
         if v > 0 and v not in uniq:
             uniq.append(v)
-    return uniq
+    return drop_dotted_misreads(uniq, values)
+
+
+def drop_dotted_misreads(uniq: list, values: list) -> list:
+    """'주차 요금 ......1,400원'의 점선 끝을 OCR이 4·1로 읽어 411,400처럼 앞에 숫자가 붙은 금액을 뺍니다
+    (2026-11-17 사용자 화면: 1,400원 주차 영수증이 411,400원). 같은 영수증에 붙지 않은 금액(1,400)이 그만큼 이상
+    나올 때만, 붙은 숫자가 4나 두 자리(41·44·14·11)일 때만: 진짜 합계(예: 11,400)는 빼지 않음."""
+    keep = []
+    for v in uniq:
+        s = str(v)
+        fake = any(s.endswith(str(w)) and s[:len(s) - len(str(w))] in ("4", "41", "44", "14", "11")
+                   and w >= 100 and values.count(w) >= values.count(v) for w in uniq if w != v)
+        if not fake:
+            keep.append(v)
+    return keep or uniq
 
 
 def compact(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
 
 
-def detect_category(text_compact: str, keywords: dict, priority=None) -> str:
-    text = (text_compact or "").lower()                   # 영어 글자는 대소문자 상관없이(HOTEL·Hotel·hotel)
+def category_scores(text_compact: str, keywords: dict, priority=None) -> dict:
+    """항목마다 찾을 글자가 영수증에 몇 번 나오는지(영어는 대소문자 상관없이, 'Car Record'처럼 띄어 적어도)"""
+    text = (text_compact or "").lower()
+    scores = {}
     for cat in (priority or ["식대", "카페", "주차"]):
-        if any(k and compact(k).lower() in text for k in keywords.get(cat, [])):   # 'Car Record'처럼 띄어 적어도
-            return cat
-    return ""
+        words = {compact(k).lower() for k in keywords.get(cat, []) if k and compact(k)}
+        scores[cat] = sum(text.count(w) for w in words)
+    return scores
+
+
+def detect_category(text_compact: str, keywords: dict, priority=None) -> str:
+    """찾을 글자가 가장 많이 나온 항목. 같으면 자동 입력표 위쪽 항목.
+    예전에는 위쪽 항목의 글자가 하나만 있어도 그 항목이라, '주차장명·주차권·주차시간·주차요금'이 다 있는 주차 영수증이
+    식대로 분류됐음(2026-11-17 사용자 화면)."""
+    scores = category_scores(text_compact, keywords, priority)
+    best = max(scores.values(), default=0)
+    return next((cat for cat, n in scores.items() if n == best), "") if best else ""
 
 
 _ORG_WORDS = ("사회복지법인", "의료법인", "의료재단", "재단법인", "학교법인", "법인", "재단")
@@ -2198,7 +2263,14 @@ def find_hospital_name_in_text(ocr_text: str) -> str:
             for org in _ORG_WORDS:
                 if org in name:
                     name = name.split(org)[-1]
-            if len(name) >= 4 and not name.endswith("동물병원"):
+            if len(name) <= 3 and i > 0:                  # '전주 수병원'처럼 도시를 띄어 쓴 짧은 이름
+                prev = re.sub(r"[^가-힣]", "", tokens[i - 1])
+                if prev in DEFAULT_CITIES:
+                    name = prev + name
+            cut = [name.find(c) for c in DEFAULT_CITIES if 0 < name.find(c) < len(name) - 2]
+            if cut and len(name) - min(cut) <= 6:          # 'SK쉴더스전주수병원'처럼 앞 글자가 붙어 읽힘 → 도시부터
+                name = name[min(cut):]
+            if len(name) >= 3 and not name.endswith("동물병원"):
                 return name
     return ""
 
@@ -2308,26 +2380,6 @@ def looks_like_receipt(text_compact: str, amounts: list, has_ocr_date: bool, cat
 
 HOSP_FROM_OCR, HOSP_FROM_DAY, HOSP_FROM_VENDOR, HOSP_FROM_USER = "영수증 글자", "같은 날 영수증", "Concur 가게 이름", "직접 고침"
 HOSP_FROM_MEMORY = "가게 기억"
-
-
-def fill_same_day_hospitals(receipts: list) -> int:
-    """병원을 못 찾은 영수증에 같은 날 다른 영수증(주차 등)의 병원을 채웁니다. 같은 날 병원이 여러 곳이면 주차 영수증 것만."""
-    by_day = {}
-    for r in receipts:
-        if r.use and r.hospital_en and r.hospital_src in (HOSP_FROM_OCR, HOSP_FROM_USER, HOSP_FROM_MEMORY):
-            by_day.setdefault(r.main_date, []).append(r)
-    filled = 0
-    for r in receipts:
-        if not r.use or r.hospital_en or not r.main_date or "병원" in r.edited:
-            continue
-        cands = by_day.get(r.main_date, [])
-        names = {c.hospital_en for c in cands}
-        if len(names) > 1:
-            names = {c.hospital_en for c in cands if c.category == "주차"}
-        if len(names) == 1:
-            r.hospital_en, r.hospital_src = names.pop(), HOSP_FROM_DAY
-            filled += 1
-    return filled
 
 
 def fill_same_day_cities(receipts: list) -> int:
@@ -2516,7 +2568,13 @@ def apply_store_memory(rec: Receipt, memory: dict, cfg: dict) -> bool:
     applied = False
     category = entry.get("분류") or ""
     if category and category in (cfg.get("분류_우선순위") or CATEGORIES):
-        rec.category, applied = category, True
+        # 병원처럼 한 사업자번호로 주차장·식당을 함께 하는 곳: 영수증 글자가 다른 항목을 뚜렷하게 가리키면(3번 이상,
+        # 기억한 항목 글자보다 세 배 이상) 글자를 따름(2026-11-17 원광대병원 주차 영수증이 식대로 보임)
+        scores = category_scores(compact(rec.ocr_text), cfg.get("키워드") or {}, cfg.get("분류_우선순위"))
+        mine = scores.get(rec.category, 0) if rec.category and rec.category != category else 0
+        clear = mine >= 3 and mine >= 3 * scores.get(category, 0)
+        if not clear:
+            rec.category, applied = category, True
     text = compact(rec.ocr_text).lower()
     if any(w.lower().replace(" ", "") in text for w in ACCOM_PLATFORM_WORDS + ["야놀자", "여기어때", "에어비앤비"]):
         return applied and _remembered(rec)                # 예약 회사 전표는 사업자번호가 같아도 숙소(병원·도시)가 매번 다름
@@ -3268,7 +3326,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
                 r = analyze_receipt(orig, ocr_file, text, cfg, hospitals, taken)
                 if first_is_receipt and not r.is_receipt:
                     r.is_receipt = True
-                fill_from_other_reads(r, others, cfg)
+                fill_from_other_reads(r, others, cfg, hospitals)
                 apply_store_memory(r, memory, cfg)
                 place_in_month(r, tm)
                 return r
@@ -3292,7 +3350,6 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         if (toll or mileage or stay) and group is receipts:
             for s in (r for r in receipts if r.bundle_note):
                 log(f"   {s.new_kind or '숙박'}: {s.original.name} {s.bundle_note}")
-        fill_same_day_hospitals(group)
         fill_same_day_cities(group)
     if early_names:                                       # 어느 숙박 영수증에도 안 붙은 그 전 메일은 목록에 넣지 않음
         receipts = [r for r in receipts if r.original.name not in early_names or r.bundled_into]
@@ -3306,7 +3363,6 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         for rec in receipts:
             if rec.original.name in rows:
                 apply_user_edits(rec, rows[rec.original.name], tm, cfg.get("도시_목록"), cfg.get("분류_우선순위"))
-        fill_same_day_hospitals(receipts)
         fill_same_day_cities(receipts)
     if hospital_csv is not None:
         try:
@@ -6497,6 +6553,10 @@ def run_job(mode: str, month_text, ui, base: Path, stop_flag=None):
             raise Cancelled()
         except Exception as e:
             log(f"자동 입력표를 읽지 못해 설정 파일의 값으로 진행합니다: {e}")
+        try:
+            add_new_default_hospitals(base / HOSPITAL_FILE_NAME, base / SETTINGS_FILE_NAME, log)
+        except Exception as e:
+            log(f"병원 목록에 새 기본 병원을 더하지 못했습니다: {e}")
         try:
             import_hospitals_from_excel(cfg, base / HOSPITAL_FILE_NAME, log)
         except Exception as e:
