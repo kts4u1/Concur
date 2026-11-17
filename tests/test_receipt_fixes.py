@@ -424,3 +424,30 @@ def test_old_empty_dotless_result_is_read_again(tmp_path, monkeypatch):
     cfg.update({"영수증_원본_폴더": str(src), "영수증_보정_사용": False})
     rec = ca.build_receipts(cfg, ca.TargetMonth(2026, 10), [], results, tmp_path / "w", lambda s: None)[0]
     assert rec.total == 1400
+
+
+# ---------- Enter Vendor Name (2026-11-17: 숙박·식대 경비가 Vendor Name이 비어 저장 오류) ----------
+
+MEAL_NO_LABEL = """[영수증]-재발행
+가나돼지찌개 / 123-45-67891 / 대표자
+전남 목포시 가나로 1 가나돼지찌개
+2026-09-07 13:34:21
+생김치찌개 9,000 2 18,000
+합계 금액 18,000"""
+
+HOTEL_SLIP = """KOCES 가맹점명,가맹점주소가 실제와 다른경우
+신고안내(포상금 10만원 지급) 우편접수
+신용매출 02:20:52(L)
+가나호텔 전주중앙점 TID:***2504031
+대표자 234-56-78901 Tel:0630000000
+전북특별자치도 전주시 완산구 가나로 1
+거래일시: 2026/09/28 02:20:52
+합계: 50,000원"""
+
+
+def test_vendor_name_without_label():
+    assert ca.find_vendor_name(MEAL_NO_LABEL) == "가나돼지찌개"                       # 사업자번호 앞 글자
+    assert ca.find_vendor_name(HOTEL_SLIP) == "가나호텔 전주중앙점"           # 대표자 이름이면 윗줄(안내 글은 뺌)
+    assert ca.vendor_english("가나호텔 전주중앙점") == "Gana Hotel Jeonju Jungang"
+    assert ca.find_vendor_name("가맹점명 : 주_놀유니버스") == "놀유니버스"
+    assert ca.vendor_near_business_number("홍길동 234-56-78901") == ""              # 대표자 이름만 있으면 안 씀

@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 점선 지우기 다시 읽기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 Vendor Name 채우기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -379,6 +379,7 @@ def default_settings():
             "LCRT 칸 이름": "LCRT|Legal compliance registration tool",
             "영수증 끌어 놓기": "Upload or drag-and-drop your receipts here|영수증을 업로드하거나 여기에 끌어",
             "영수증 더하기": "Add|추가",
+            "저장 안 하고 나가기": "Leave|Leave Page|Discard|Discard Changes|Don't Save|Leave without saving|나가기|저장하지 않음|변경 내용 버리기",
             "영수증 빼기": "Remove|제거|삭제",               # 영수증 칸 사진 아래 Remove · Add · Open
             "영수증 열기": "Open|열기",
             "Alerts": "Alerts|알림",
@@ -2602,6 +2603,13 @@ VENDOR_BRANDS = {"놀유니버스": "NOL Universe", "야놀자": "Yanolja", "여
                  "리조트": "Resort", "게스트하우스": "Guesthouse", "펜션": "Pension"}
 
 
+def _roman_word(ko: str) -> str:
+    if ko in VENDOR_BRANDS:
+        return VENDOR_BRANDS[ko]
+    r = romanize_korean(ko)
+    return r[:1].upper() + r[1:]
+
+
 def vendor_english(name: str) -> str:
     """Concur Vendor Name은 영어로(사용자 요청 2026-11-15): '가나 쉼터 1호점' → 'Gana Swimteo No.1',
     '놀유니버스' → 'NOL Universe'. 한글이 없으면 그대로."""
@@ -2619,12 +2627,14 @@ def vendor_english(name: str) -> str:
             continue
         for ko, en in VENDOR_BRANDS.items():               # 'OO호텔' → 'Oo Hotel'
             if len(w) > len(ko) and w.endswith(ko):
-                w = romanize_korean(w[:-len(ko)]).capitalize() + " " + en
+                head = w[:-len(ko)]
+                w = (VENDOR_BRANDS.get(head) or _roman_word(head)) + " " + en
                 break
         else:
             w = re.sub(r"(?<=[가-힣]{2})점$", "", w)            # '광주점' → 광주(지점 표시는 뺌)
-            w = romanize_korean(w)
-            w = w[:1].upper() + w[1:]
+            city = next((c for c in sorted(DEFAULT_CITIES, key=len, reverse=True)
+                         if w.startswith(c) and len(w) > len(c) + 1), "")
+            w = " ".join(_roman_word(x) for x in ([city, w[len(city):]] if city else [w]))   # 전주중앙 → Jeonju Jungang
         words.append(w)
     return " ".join(x for x in words if x)
 
@@ -2659,12 +2669,55 @@ def invoice_title(ocr_text: str) -> str:
 
 
 def find_vendor_name(ocr_text: str) -> str:
-    """영수증의 가게 이름(상호·가맹점명): '가맹점명 주_놀유니버스' → 놀유니버스, '상 호: (주)가나파킹' → 가나파킹"""
+    """영수증의 가게 이름(상호·가맹점명): '가맹점명 주_놀유니버스' → 놀유니버스, '상 호: (주)가나파킹' → 가나파킹.
+    '상호' 글자가 없으면 사업자번호가 찍힌 줄로 찾습니다(vendor_near_business_number)."""
     for m in VENDOR_LABEL.finditer(ocr_text or ""):
+        if VENDOR_NOTICE.search(m.group(0) + (ocr_text or "")[m.end():m.end() + 30]):
+            continue                                       # 카드전표 위 안내 글('가맹점명, 가맹점주소가 실제와 다른 경우 신고…')
         name = VENDOR_STOP.sub("", m.group(1))
         name = re.sub(r"\(주\)|㈜|주식회사|^\s*주_|\(유\)|\(재\)", "", name).strip(" .,_-*|[]")
-        if _plausible_name(name):
+        if _plausible_name(name) and name not in VENDOR_LABEL_WORDS:
             return name
+    return vendor_near_business_number(ocr_text)
+
+
+VENDOR_NOTICE = re.compile(r"실제와|다른\s*경우|신고|포상금|안내|여신금융")
+VENDOR_LABEL_WORDS = {"가맹점", "가맹점명", "상호", "상호명", "매장", "매장명", "업소", "업소명"}
+
+
+SHOP_WORDS = ("점", "호텔", "모텔", "식당", "카페", "커피", "주차", "파킹", "마트", "병원", "약국", "상회", "센터", "회관",
+              "가든", "찌개", "국밥", "분식", "반점", "치킨", "베이커리", "타워", "리조트", "펜션", "식육", "갈비", "횟집",
+              "주유소", "편의점", "여관", "하우스", "프라자", "플라자", "스토어", "나라", "집")
+
+
+def _clean_vendor(text: str) -> str:
+    t = re.sub(r"\b(?:TID|CAT|No\.?|NO|POS)\b.*$", "", text or "", flags=re.I)        # 'TID:***2504031' 뒤는 버림
+    t = re.sub(r"\d{1,2}:\d{2}(?::\d{2})?\s*(?:\([A-Z]\))?", "", t)                 # 시각
+    t = re.sub(r"(사업자(?:등록)?(?:번호)?|대표자?|TEL|Tel|전화|주소|[/|:：])", " ", t)
+    t = re.sub(r"\(주\)|㈜|주식회사|\(유\)|\(재\)", "", t)
+    return re.sub(r"\s+", " ", t).strip(" .,_-*[]")
+
+
+def _looks_like_person(name: str) -> bool:
+    """'홍길동'처럼 대표자 이름(한글 2~4자, 가게 글자 없음)"""
+    return bool(re.fullmatch(r"[가-힣]{2,4}", name)) and not any(w in name for w in SHOP_WORDS)
+
+
+def vendor_near_business_number(ocr_text: str) -> str:
+    """'상호' 글자가 없는 영수증(2026-11-17 사용자 화면):
+    '가나돼지찌개 / 123-45-67891 / 대표자' → 사업자번호 앞 글자, 'OO호텔 OO점 TID:…' 다음 줄 '대표자 234-56-78901 Tel:…'
+    → 앞 글자가 대표자 이름이면 바로 윗줄."""
+    lines = [l.strip() for l in (ocr_text or "").splitlines() if l.strip()]
+    for k, line in enumerate(lines):
+        m = BIZ_NO_DASHED.search(line)
+        if not m:
+            continue
+        before = _clean_vendor(line[:m.start()])
+        prev = _clean_vendor(lines[k - 1]) if k and not VENDOR_NOTICE.search(lines[k - 1]) else ""
+        if before and _plausible_name(before) and not _looks_like_person(before) and re.search(r"[가-힣A-Za-z]{2}", before):
+            return before
+        if prev and _plausible_name(prev) and re.search(r"[가-힣A-Za-z]{2}", prev) and not re.search(r"\d{3,}", prev):
+            return prev
     return ""
 
 # ---------- 가게 기억: 영수증의 사업자등록번호로 같은 가게를 알아봄 ----------
@@ -4620,6 +4673,8 @@ class ConcurBot:
         self.ctx = self.pw.chromium.launch_persistent_context(str(profile), **self.launch_options())
         self.ctx.set_default_timeout(self.timeout_ms)
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+        # '이 페이지에서 나가시겠습니까?'(저장 안 된 경비) 같은 브라우저 확인 창은 나가기로 — 기본은 '머무르기'라 다음 경비로 못 넘어갔음
+        self.page.on("dialog", lambda d: d.accept() if d.type == "beforeunload" else d.dismiss())
 
     def launch_options(self) -> dict:
         return dict(
@@ -5797,6 +5852,10 @@ class ConcurBot:
                 else:
                     checks.append("도시 확인")
 
+        # 3-1. Enter Vendor Name: 비어 있으면 영수증의 가게 이름(카드 경비도, 사용자 요청 2026-11-17 — 비어 있어 저장 오류)
+        if rec is not None:
+            self.fill_vendor(rec, done, checks)
+
         # 4. LCRT
         trigger, value = self.find_select(self.sel("LCRT"))
         want = extra.get("LCRT") or t["NA"]
@@ -6380,12 +6439,23 @@ class ConcurBot:
         """리포트 화면(경비 목록)으로 돌아갑니다."""
         page = self.page
         url = getattr(self, "report_url", "")
-        if url:
-            page.goto(url)
-        else:
-            page.get_by_role("link", name=re.compile(re.escape(getattr(self, "report_name", "") or ""), re.I)).first.click()
+        if self._expense_screen_shown():                  # 저장 못 한 경비(필수 칸 비어 있음 등)가 열린 채
+            self.log("   저장하지 못한 경비 화면이 열려 있어 닫고 리포트로 돌아갑니다.")
+        try:
+            if url:
+                page.goto(url)
+            else:
+                page.get_by_role("link", name=re.compile(re.escape(getattr(self, "report_name", "") or ""), re.I)).first.click()
+        except Exception as e:
+            self.log(f"   리포트로 가는 중: {str(e).splitlines()[0][:80]}")
         deadline = time.time() + self.timeout_ms / 1000
         while not self._report_shown():
+            leave = self._first_shown([page.get_by_role("button", name=self._re("저장 안 하고 나가기"))])
+            if leave is not None:                         # Concur 안의 '저장하지 않은 내용' 창
+                try:
+                    leave.click(timeout=3000)
+                except Exception:
+                    pass
             if time.time() >= deadline:
                 raise RuntimeError("리포트 화면으로 돌아가지 못했습니다([Add Expense]를 찾지 못함).")
             time.sleep(0.3)
@@ -6501,9 +6571,7 @@ class ConcurBot:
                 if rec.new_kind == "톨게이트" and not rec.last_use and "날짜" not in rec.edited:
                     checks.append("Transaction Date 확인(마지막 이용일을 못 읽음)")
                 done += [f"새 경비({expense_type})", f"Transaction Date={us}", f"Amount={rec.total:,}"]
-                done += self.fill_expense(rec, None, checks)          # 칸을 채우고
-                if stay:
-                    self.fill_vendor(rec, done, checks)
+                done += self.fill_expense(rec, None, checks)          # 칸을 채우고(Vendor Name도)
                 # 사진은 저장하기 전에 붙임(사용자 요청 2026-11-16). 저장 전 화면에는 [Add]가 없어(사진 아래 [Remove]만)
                 # 경비 칸의 [Upload New Receipt]로 여러 장을 한 번에 올리고, 못 붙인 사진은 저장한 뒤 다시 열어 [Add]로 붙임
                 uploads = upload_files_for(rec, self.cfg, work_dir)
@@ -6599,8 +6667,20 @@ class ConcurBot:
         self.field("경비 금액")
         return True
 
+    def _is_required(self, box) -> bool:
+        """필수 칸인지(required·aria-required, 또는 칸 이름에 *)"""
+        try:
+            return bool(box.evaluate(r"""e => {
+                if (e.required || e.getAttribute('aria-required') === 'true') return true;
+                const l = (e.id && document.querySelector('label[for="' + e.id + '"]')) || e.closest('label');
+                return !!(l && /\*/.test(l.innerText || ''));
+            }"""))
+        except Exception:
+            return False
+
     def fill_vendor(self, rec, done: list, checks: list):
-        """숙박 새 경비의 Enter Vendor Name(필수) 칸: 비어 있으면 영수증·인보이스의 가게 이름을 넣습니다."""
+        """Enter Vendor Name(필수) 칸이 있고 비어 있으면 영수증·인보이스의 가게 이름을 영어로 넣습니다
+        (숙박만 하다가 2026-11-17부터 모든 경비 — 식대·숙박 카드 경비도 비어 있어 저장이 안 됐음)."""
         page = self.page
         box = self._first_shown([page.locator(self.sel("가게 이름 입력")),
                                  page.get_by_label(self._re("가게 이름 입력", exact=False))])
@@ -6611,16 +6691,16 @@ class ConcurBot:
                 return
         except Exception:
             pass
-        name = vendor_english(rec.vendor)                    # Vendor Name은 영어로(사용자 요청)
+        vendor = rec.vendor or find_vendor_name(rec.ocr_text)
+        name = vendor_english(vendor)                        # Vendor Name은 영어로(사용자 요청)
         if not name:
-            checks.append("Vendor Name 직접 넣기")
+            if self._is_required(box):                       # 필수 칸(Enter Vendor Name *)일 때만 알림
+                checks.append("Vendor Name 직접 넣기(영수증에서 가게 이름을 못 읽음)")
             return
         try:
             self.type_text(box, name)
             page.keyboard.press("Escape")                     # 가게 이름 추천 목록이 뜨면 닫음
             done.append(f"Vendor Name={name}")
-            if re.search(r"[가-힣]", rec.vendor):
-                checks.append(f"Vendor Name 확인({name}: 한글 이름을 로마자로 바꿈)")
         except Exception:
             checks.append("Vendor Name 직접 넣기")
 

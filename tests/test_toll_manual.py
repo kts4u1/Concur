@@ -263,7 +263,7 @@ def test_manual_toll_expense(page, tmp_path):
     assert "card icon" not in steps                                                # 'Receipt Image' 창의 [Attach]를 누름
     # 이 가짜 화면은 저장 전 화면에서 올린 사진이 보관함으로만 감 → 저장한 뒤 다시 열어 보관함에서 붙임(2026-11-16)
     assert steps.count("save") == 2 and steps.index("save") < steps.index("edit") < steps.index("attach IMG_5648.jpg")
-    assert saved["vendor"] == ""                                                   # Vendor Name은 숙박만
+    assert saved["vendor"] == ""                       # 영수증 글자가 없으면 비워 둠(필수 칸이 아니면 '확인 필요'도 안 남김)
     assert rows[0]["순번"] == 5 and rows[0]["Concur 날짜"] == "10/22/2026" and rows[0]["확인 필요"] == ""
     assert "영수증 첨부(IMG_5648.jpg, IMG_5651.jpg, IMG_5652.jpg)" in rows[0]["처리"] and rec.used_for
     assert page.inner_text("#count") == "Expenses (1)"
@@ -514,6 +514,18 @@ def test_report_check_does_not_scroll_or_misread_hidden_report(browser, tmp_path
     assert bot._report_shown() is True
 
 
+def test_vendor_name_filled_from_receipt_for_any_expense(browser, tmp_path):
+    """2026-11-17: 식대(Other Staff Expenses)·숙박 경비의 Enter Vendor Name이 비어 저장 오류 → 비어 있으면 영수증의
+    가게 이름을 영어로(숙박만 하던 것을 모든 경비로). 사업자번호 줄로 찾음('상호' 글자가 없는 영수증)."""
+    pytest.importorskip("cv2")
+    pg = open_report(browser)
+    rec = toll_rec(tmp_path)
+    rec.ocr_text = "가나돼지찌개 / 123-45-67891 / 대표자\n2026-09-07 13:34:21\n합계 금액 18,000"
+    rows = make_bot(pg, tmp_path).create_manual_expenses([rec], tmp_path / "w")
+    assert pg.evaluate("saved")["vendor"] == "Ganadwaejijjigae"
+    assert "Vendor Name=Ganadwaejijjigae" in rows[0]["처리"]
+
+
 def test_receipt_stem():
     assert ca.receipt_stem("IMG_5648_업로드용.jpg") == "IMG_5648"
     assert ca.receipt_stem("IMG_5648.HEIC") == "IMG_5648" and ca.receipt_stem("KakaoTalk_1.jpg") == "KakaoTalk_1"
@@ -638,7 +650,7 @@ def test_manual_accommodation_with_vendor(browser, tmp_path):
     rows = bot.create_manual_expenses([rec], tmp_path / "w")
     saved = pg.evaluate("saved")
     assert saved["type"] == "Accommodation" and saved["date"] == "10/20/2026" and saved["vendor"] == "Gana No.1"   # 영어로
-    assert "Vendor Name 확인(Gana No.1: 한글 이름을 로마자로 바꿈)" in rows[0]["확인 필요"]
+    assert "Vendor Name=Gana No.1" in rows[0]["처리"]      # 모든 경비에 넣게 되면서 '로마자로 바꿈' 확인 필요는 뺌(2026-11-17)
     assert saved["uploads"] == ["IMG_5646.jpg", "IMG_5647.jpg"] and rows[0]["오류"] == ""      # 영수증 → 인보이스
 
 
