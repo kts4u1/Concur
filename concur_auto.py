@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 분류·병원·금액 읽기 보강"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-17 하이패스 금액 비우기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -1830,7 +1830,8 @@ def make_enhanced_copy(cfg: dict, original: Path, work_dir: Path, log) -> Path:
 
 def info_score(rec) -> int:
     """읽어 낸 정보가 얼마나 되는지(날짜·금액·분류·병원)"""
-    return ((2 if rec.date_from_ocr else 0) + (2 if rec.total else 0) + (1 if rec.category else 0)
+    # 금액은 읽어 낸 금액이 있는지로(하이패스 인쇄물·총액 못 읽은 사용내역은 금액을 일부러 비워 두므로)
+    return ((2 if rec.date_from_ocr else 0) + (2 if rec.total or find_amounts(rec.ocr_text) else 0) + (1 if rec.category else 0)
             + (1 if rec.hospital_en else 0) + (2 if (toll_statement_info(rec.ocr_text) or {}).get("total") else 0))
 
 
@@ -2427,6 +2428,12 @@ def analyze_receipt(original: Path, ocr_file: Path, ocr_text: str, cfg: dict, ho
     rec.is_receipt = looks_like_receipt(text_c, rec.amounts, rec.date_from_ocr, rec.category,
                                         cfg.get("영수증_판별_단어"))
     rec.use = rec.is_receipt
+    toll = toll_statement_info(ocr_text)
+    if toll:                       # 하이패스 사용내역: 금액은 '총액'만. 못 읽으면 비워 둠(표의 한 줄 금액 8,000 등을 쓰지 않음)
+        rec.total = toll["total"]
+        rec.amounts = [toll["total"]] if toll["total"] else []
+    elif is_hipass_sheet(ocr_text):  # 하이패스 영수증 인쇄물: 작은 글자라 크게 읽어도 금액이 틀려 금액을 넣지 않음(사용자 2026-11-17)
+        rec.total, rec.amounts = 0, []
     rec.biz_no = find_business_number(ocr_text)
     rec.vendor = find_vendor_name(ocr_text)
     return rec
@@ -2616,6 +2623,13 @@ def toll_statement_info(text: str):
     return {"total": int(m.group(1).replace(",", "")) if m else 0, "count": int(n.group(1)) if n else None}
 
 
+def is_hipass_sheet(text: str) -> bool:
+    """하이패스 영수증 여러 장을 A4에 인쇄한 사진('영수증'이 두 번 이상, 영수증마다 '…원(카드)', 또는 아래 '총 N건' 합계).
+    톨게이트에서 받은 영수증 한 장은 아님."""
+    info = hipass_sheet_info(text)
+    return bool(info) and (compact(text).count("영수증") >= 2 or len(info["amounts"]) >= 2 or bool(info["footer"]))
+
+
 def hipass_sheet_info(text: str):
     """하이패스 영수증 인쇄물이면 {'amounts': 영수증마다 금액, 'footer': (건수, 합계) 또는 None}, 아니면 None"""
     t = compact(_fix_amount_text(text))
@@ -2690,9 +2704,11 @@ def group_toll_bundles(receipts: list, tm, keywords=None, priority=None) -> int:
             r.use, r.skip_reason, r.total = False, f"하이패스 사용내역({s.original.name})에 함께 첨부", 0
             r.category = r.category or s.category
         s.bundle_issue = ""
-        s.bundle_note = (f"사용내역 {info['count'] or '?'}건 {total:,}원" + (f", 마지막 이용 {s.last_use}" if s.last_use else "")
+        s.bundle_note = (f"사용내역 {info['count'] or '?'}건 " + (f"{total:,}원" if total else "총액 모름")
+                         + (f", 마지막 이용 {s.last_use}" if s.last_use else "")
                          + (f", 영수증 인쇄물 {len(members)}장 함께 첨부" if members else ", 함께 붙일 영수증 인쇄물을 못 찾음"))
-        if not known:                                    # 사용내역 표의 한 줄 금액(가장 큰 금액)일 수 있음
+        if not known:                                    # 총액을 못 읽으면 금액을 비워 두고 사용자에게 물음
+            s.total, s.amounts = 0, [a for a in s.amounts if a]
             s.bundle_issue = TOLL_TOTAL_UNREAD
     return len(stmts)
 
@@ -3296,7 +3312,8 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             first_is_receipt = first.is_receipt
             others = []                                     # 고르지 않은 다른 읽기(주소처럼 작은 글자는 여기에만 있을 수 있음)
             best = info_score(first)
-            missing = (not first.total or not first.date_from_ocr or toll_total_missing(first)) and orig.name not in early_names
+            missing = ((not first.total and not is_hipass_sheet(text)) or not first.date_from_ocr
+                       or toll_total_missing(first)) and orig.name not in early_names   # 인쇄물은 금액을 안 넣으니 금액 때문에는 안 읽음
             # 날짜나 금액을 못 읽은 영수증(또는 영수증 글자가 보이는 사진)은 줄이지 않고 크게 다시 읽음
             if missing and (first_is_receipt or receipt_word_hits(text, cfg) or is_stay_invoice(text)):
                 counts["크게"] += 1
@@ -3307,7 +3324,8 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
                         others.append(text)
                         text, best = big, info_score(again)
                         first_is_receipt = first_is_receipt or again.is_receipt
-                        missing = not again.total or not again.date_from_ocr or toll_total_missing(again)
+                        missing = ((not again.total and not is_hipass_sheet(big)) or not again.date_from_ocr
+                                   or toll_total_missing(again))
                         counts["크게 나아짐"] += 1
                     else:
                         others.append(big)

@@ -89,7 +89,8 @@ def test_small_text_read_again_bigger(tmp_path, monkeypatch):
     lines = []
     recs = {r.original.name: r for r in ca.build_receipts(cfg, ca.TargetMonth(2026, 10), [], results, tmp_path / "w", lines.append)}
     sheet = recs["IMG_5651.JPG"]
-    assert sheet.use and sheet.main_date == "2026-10-01" and sheet.total == 4700   # 2026-11-15·118,100이 아님
+    assert sheet.use and sheet.main_date == "2026-10-01"                         # 2026-11-15가 아님(크게 읽은 날짜)
+    assert sheet.total == 0 and sheet.amounts == []        # 인쇄물은 금액을 넣지 않음(118,100·4,700 모두, 2026-11-17)
     assert recs["IMG_5652.JPG"].main_date == "2026-10-07"
     assert FakeOcr.zoom_calls == 1                                              # 잘 읽힌 사진은 다시 읽지 않음
     cache = json.loads((results / "ocr_cache.json").read_text(encoding="utf-8"))

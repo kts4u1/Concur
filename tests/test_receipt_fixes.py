@@ -167,3 +167,31 @@ def test_dotted_leader_misread_amount_dropped():
     assert ca.find_amounts("주차요금 ......1,400원") == [1400]          # 점선 바로 뒤 금액도 읽음
     assert ca.find_amounts("합계 11,400\n물 1,400") == [11400, 1400]   # 진짜 합계는 그대로
     assert ca.find_amounts("합계 41,400\n승인금액 41,400\n주차 1,400") == [41400, 1400]   # 두 번 나온 합계도 그대로
+
+
+# ---------- 하이패스 사용내역·인쇄물 금액 (2026-11-17 두 번째 화면) ----------
+
+STATEMENT_SMALL = """기간별 사용내역
+카드구분 전체 카드사 전체 카드번호 0000-00**-****-0000
+조회 구분 사용일 기준 조회 기간 2026년 10월 01일 ~ 2026년 10월 31일
+13 2026/10/01 16:17:55 선불 0000-00**-****-0000 1종 광주 북김제 선불Hi-pass 4,700
+12 2026/10/01 20:43:23 선불 0000-00**-****-0000 1종 북김제 광주 선불Hi-pass 4,700
+4 2026/10/20 15:46:33 선불 0000-00**-****-0000 1종 남광산 유성 선불Hi-pass 8,000"""
+
+
+def test_statement_without_readable_total_has_no_amount():
+    """총액(작은 글자)을 못 읽은 사용내역은 표의 한 줄 금액(8,000)을 쓰지 않고 금액을 비워 둠"""
+    nov = __import__("datetime").datetime(2026, 11, 15)
+    rec = analyze(STATEMENT_SMALL, taken=nov)
+    assert rec.total == 0 and rec.amounts == []
+    read = analyze(STATEMENT_SMALL.replace("기간별 사용내역", "기간별 사용내역 (총 13건 / 총액 61,500원)"), taken=nov)
+    assert read.total == 61500 and read.amounts == [61500]
+
+
+def test_hipass_receipt_sheet_has_no_amount_but_single_toll_receipt_does():
+    sheet = ("하이패스 빠르고 편리합니다 영수증 한국도로공사 북김제영업소 2026년10월01일 16시17분 통행료 4,700원(카드)\n"
+             "하이패스 빠르고 편리합니다 영수증 광주영업소 2026년10월02일 08시05분 통행료 4,300원(카드) 합계 118,100")
+    rec = analyze(sheet, taken=__import__("datetime").datetime(2026, 11, 15))
+    assert rec.total == 0 and rec.amounts == [] and rec.main_date == "2026-10-01"
+    single = analyze("하이패스 영수증 한국도로공사 광주영업소 2026년10월02일 08시05분 통행료 4,300원(카드)")
+    assert single.total == 4300                          # 톨게이트에서 받은 영수증 한 장은 금액을 씀

@@ -163,7 +163,8 @@ def test_statement_total_unread_is_flagged():
     stmt = make("IMG_5648.HEIC", SMALL)
     placed(stmt)
     ca.group_toll_bundles([stmt], OCT, {"톨게이트": ca.TOLL_DEFAULT_WORDS}, ["톨게이트"])
-    assert stmt.total == 4700 and stmt.bundle_issue == ca.TOLL_TOTAL_UNREAD
+    assert stmt.total == 0 and stmt.bundle_issue == ca.TOLL_TOTAL_UNREAD             # 표의 한 줄 금액(4,700)을 쓰지 않음
+    assert "총액 모름" in stmt.bundle_note
     assert ca.TOLL_TOTAL_UNREAD in ca.receipt_issues(stmt, [stmt])
     stmt.edited.append("금액")                                                     # 영수증 확인 창에서 금액을 적으면
     assert ca.TOLL_TOTAL_UNREAD not in ca.receipt_issues(stmt, [stmt])
