@@ -85,7 +85,7 @@ def test_version_1_users_get_only_cafe_parking(tmp_path):
                                   ["카페", "카페", "Cafe", "For wifi", "Other Staff Expenses", ""]])
     ca.upgrade_category_table(table, settings)
     by = {r[ca.C_NAME]: r for r in ca.load_category_rows(table, ca.default_settings())}
-    assert by["식대"][ca.C_KEYWORDS] == "찌개, 김밥"                                       # 지운 식대 글자는 다시 안 넣음
+    assert by["식대"][ca.C_KEYWORDS] == ", ".join(["찌개", "김밥"] + ca.MEAL_V8_WORDS)    # 지운 식대 글자는 다시 안 넣음(판 8 글자만)
     assert "숙박" not in by                                                               # 숙박 넣기도 판 1에서 끝남
     assert "스타벅스" in by["카페"][ca.C_KEYWORDS]
 
@@ -132,9 +132,9 @@ def test_version_3_users_hospital_mark_and_butter(tmp_path):
     ca.save_category_rows(table, rows)
     lines = []
     assert ca.upgrade_category_table(table, settings, lines.append) == (
-        len(ca.TOLL_DEFAULT_WORDS) - 1 + len(ca.ACCOM_PLATFORM_WORDS))                       # 판 5 톨게이트, 판 7 숙박 예약 회사
+        len(ca.TOLL_DEFAULT_WORDS) - 1 + len(ca.ACCOM_PLATFORM_WORDS) + len(ca.MEAL_V8_WORDS))   # 판 5 톨게이트, 판 7 숙박 예약 회사, 판 8 식대
     by = {r[ca.C_NAME]: r for r in ca.load_category_rows(table, ca.default_settings())}
-    assert by["식대"][ca.C_KEYWORDS] == "찌개, 한식, 식권"
+    assert by["식대"][ca.C_KEYWORDS] == ", ".join(["찌개", "한식", "식권"] + ca.MEAL_V8_WORDS)
     assert by["식대"][ca.C_COMMENT] == "Overtime meal fee for service in hospital"
     assert by["식대"][ca.C_NOTE] == ca.CATEGORY_NOTE and "{" not in by["식대"][ca.C_NOTE]
     assert by["톨게이트"][ca.C_KEYWORDS].startswith("통행료, 버터, 톨게이트")       # 다른 항목에 적은 버터는 그대로

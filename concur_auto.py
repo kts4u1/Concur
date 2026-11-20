@@ -48,7 +48,7 @@ if sys.stderr is None:
 # 기본 설정
 # ============================================================
 
-APP_VERSION = "2026-11-17 올릴 사진 이름 새로"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
+APP_VERSION = "2026-11-20 분류 못 찾은 영수증 다시 읽기"     # 고칠 때마다 바꿉니다. ①·② 실행 기록 첫 줄에 나옵니다.
 SETTINGS_FILE_NAME = "concur_settings.json"
 HOSPITAL_FILE_NAME = "병원목록.csv"
 CATEGORY_FILE_NAME = "자동입력표.csv"
@@ -186,7 +186,9 @@ MILEAGE_DEFAULT_WORDS = ["차량유지비", "유지비보조금", "Car Record", 
 MILEAGE_USER_WORDS = ["car record entry", "total km", "total driven distance", "차량유지비", "유지비보조금", "Car Record",
                       "Driven Distance", "마일리지", "mileage"]
 TOLL_USER_WORDS = ["차종", "이용차로", "톨게이트", "톨", "toll", "하이패스", "hi-pass", "통행료", "한국도로공사", "도로공사", "사용내역"]
-DEFAULT_WORDS_VERSION = 7
+# 판 8(2026-11-20 사용자 화면: 돼지찌개·매운탕 식당 영수증이 '분류 없음'). '씨개'는 OCR이 '찌개'를 잘못 읽은 것
+MEAL_V8_WORDS = ["매운탕", "돼지", "전골", "해물", "생선", "한정식", "뷔페", "씨개"]
+DEFAULT_WORDS_VERSION = 8
 DEFAULT_WORDS_BY_VERSION = {
     1: {"식대": MEAL_USER_WORDS + MEAL_MORE_WORDS, "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS},
     2: {"카페": CAFE_WORDS + CAFE_MORE_WORDS, "주차": PARKING_WORDS + PARKING_MORE_WORDS},
@@ -195,6 +197,7 @@ DEFAULT_WORDS_BY_VERSION = {
     5: {"톨게이트": TOLL_DEFAULT_WORDS},                    # 판 5: 사용자가 만든 '톨게이트' 항목에 하이패스 글자
     6: {"마일리지": MILEAGE_DEFAULT_WORDS},                 # 판 6: 사용자가 만든 '마일리지' 항목에 신청서 글자
     7: {"숙박": ACCOM_PLATFORM_WORDS},                      # 판 7: 인터넷 예약 회사(놀유니버스·아고다 등)
+    8: {"식대": MEAL_V8_WORDS},                             # 판 8: 매운탕·돼지 등, OCR이 잘못 읽은 '씨개'
 }
 SPELLING_FIXES = [(re.compile(r"\bAccomodation", re.I), "Accommodation")]
 REMOVED_WORDS = {"식대": ["버터"]}                         # 사용자가 빼 달라고 한 기본 글자(판 4)
@@ -315,7 +318,7 @@ def default_settings():
         "키워드": {
             "주차": PARKING_WORDS + PARKING_MORE_WORDS,
             "카페": CAFE_WORDS + CAFE_MORE_WORDS,
-            "식대": MEAL_USER_WORDS + MEAL_MORE_WORDS,
+            "식대": MEAL_USER_WORDS + MEAL_MORE_WORDS + MEAL_V8_WORDS,
             "숙박": ACCOM_USER_WORDS + ACCOM_MORE_WORDS + ACCOM_PLATFORM_WORDS,
             "마일리지": MILEAGE_USER_WORDS,
             "톨게이트": TOLL_USER_WORDS,
@@ -1945,13 +1948,21 @@ def info_score(rec) -> int:
             + (1 if rec.hospital_en else 0) + (2 if (toll_statement_info(rec.ocr_text) or {}).get("total") else 0))
 
 
+def text_category(text: str, cfg: dict) -> str:
+    """글자에서 찾은 분류(자동 입력표의 찾을 글자 기준)"""
+    return detect_category(compact(text), cfg.get("키워드") or {}, cfg.get("분류_우선순위"))
+
+
 def fill_from_other_reads(rec, texts: list, cfg: dict, hospitals=None):
-    """고르지 않은 다른 읽기(크게 읽기·보정)에서 병원·도시·사업자번호만 채웁니다. 숙박 인보이스의 주소처럼 작은 글자는
+    """고르지 않은 다른 읽기(크게 읽기·보정)에서 분류·병원·도시·사업자번호만 채웁니다. 숙박 인보이스의 주소처럼 작은 글자는
     크게 읽어야 보이는데, 날짜·금액은 원래 읽기가 나아서 크게 읽은 글자를 버리면 도시가 빠졌음(2026-11-16 숙박 도시가 Seoul).
-    병원 이름도 같음(2026-11-17 'SK쉴더스 전주 수병원 주차장' 줄이 원래 읽기에서는 깨짐)."""
+    병원 이름도 같음(2026-11-17 'SK쉴더스 전주 수병원 주차장' 줄이 원래 읽기에서는 깨짐).
+    분류도 같음(2026-11-20 '돼지찌개'가 '지씨개'로 깨져 식당 영수증이 '분류 없음'): 다른 읽기를 모두 합쳐 가장 많이 맞는 항목."""
     cities = cfg.get("도시_목록") or DEFAULT_CITIES
     low_names = cfg.get("도시_낮은_우선순위", ["서울"])
     low = {cities[n] for n in low_names if n in cities}
+    if not rec.category:
+        rec.category = text_category("\n".join(t for t in texts if t), cfg)
     for t in texts:
         if not (t or "").strip():
             continue
@@ -3570,7 +3581,7 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             pass
     memory = load_store_memory(memory_path)
     engine = []
-    counts = {"보정": 0, "나아짐": 0, "크게": 0, "크게 나아짐": 0, "금액 확인": 0}
+    counts = {"보정": 0, "나아짐": 0, "크게": 0, "크게 나아짐": 0, "금액 확인": 0, "분류": 0, "분류 찾음": 0}
     fixed_amounts = set()
     note = old_processed_note(cfg)
     if note:
@@ -3669,8 +3680,16 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
             best = info_score(first)
             missing = ((not first.total and not is_hipass_sheet(text)) or not first.date_from_ocr
                        or toll_total_missing(first)) and orig.name not in early_names   # 인쇄물은 금액을 안 넣으니 금액 때문에는 안 읽음
+            # 분류를 못 찾은 이 달 영수증: 날짜·금액은 읽었어도 작은 글자(가게 이름·메뉴)가 깨졌을 수 있어 크게 다시 읽음
+            # (2026-11-20 사용자 화면: '돼지찌개'·'식당·매운탕' 영수증이 '지씨개'처럼 깨져 '분류 없음')
+            no_cat = (first_is_receipt and not first.category and orig.name not in early_names
+                      and any(d.startswith(tm.prefix) for d in first.ocr_dates))
+            cat_reread = no_cat
+            if no_cat:
+                counts["분류"] += 1
             # 날짜나 금액을 못 읽은 영수증(또는 영수증 글자가 보이는 사진)은 줄이지 않고 크게 다시 읽음
-            if missing and (first_is_receipt or receipt_word_hits(text, cfg) or is_stay_invoice(text)):
+            big_read = missing and (first_is_receipt or receipt_word_hits(text, cfg) or is_stay_invoice(text))
+            if big_read:
                 counts["크게"] += 1
                 big = zoomed_text(orig, st)
                 if big.strip():
@@ -3684,16 +3703,23 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
                         counts["크게 나아짐"] += 1
                     else:
                         others.append(big)
-            elif first_is_receipt and amount_suspect(first, cfg) and orig.name not in early_names:
+            elif no_cat:                                    # 날짜·금액은 원래 읽은 그대로 두고, 분류만 크게 읽은 글자에서 찾음
+                big = zoomed_text(orig, st)
+                if big.strip():
+                    others.append(big)
+            if not big_read and first_is_receipt and amount_suspect(first, cfg) and orig.name not in early_names:
                 counts["금액 확인"] += 1                 # 주차 411,400원처럼 잘못 읽은 듯한 금액은 다시 읽어 맞춰 봄
-                for again_text in (dotless_text(orig, st), zoomed_text(orig, st)):   # 점선을 지운 사진 → 크게
+                again_texts = [dotless_text(orig, st)] + ([] if no_cat else [zoomed_text(orig, st)])   # 점선을 지운 사진 → 크게
+                for again_text in again_texts:
                     if again_text.strip():
                         others.append(again_text)
-            # 그래도 금액이나 날짜를 못 읽었으면 보정(대비·선명하게)해서 한 번 더 읽음
-            if use_pre and first_is_receipt and missing:
+            no_cat = no_cat and not any(text_category(t, cfg) for t in [text] + others)
+            # 그래도 금액이나 날짜(또는 분류)를 못 읽었으면 보정(대비·선명하게)해서 한 번 더 읽음
+            if use_pre and first_is_receipt and (missing or no_cat):
                 counts["보정"] += 1
                 better = enhanced_text(orig, st)
-                if better.strip() and info_score(analyze_receipt(orig, orig, better, cfg, hospitals, taken)) > best:
+                if (better.strip() and missing                # 분류만 찾을 때는 날짜·금액을 원래 읽은 그대로 둠
+                        and info_score(analyze_receipt(orig, orig, better, cfg, hospitals, taken)) > best):
                     others.append(text)
                     text = better
                     counts["나아짐"] += 1
@@ -3713,6 +3739,8 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
 
             auto[orig.name] = analyze()
             receipts.append(analyze())
+            if cat_reread and auto[orig.name].category:
+                counts["분류 찾음"] += 1
     finally:
         _save_json(cache_path, cache)       # 중간에 멈춰도 읽은 결과는 남김
     if counts["크게"]:
@@ -3721,7 +3749,10 @@ def build_receipts(cfg: dict, tm: TargetMonth, hospitals: list, results_dir: Pat
         log(f"   금액이 이상해(주차 금액이 너무 큼 등) 크게 다시 읽어 맞춰 본 사진 {counts['금액 확인']}장, "
             f"점선을 숫자로 읽은 금액을 바로잡은 사진 {len(fixed_amounts)}장")
     if counts["보정"]:
-        log(f"   금액·날짜를 못 읽어 보정해서 다시 읽은 영수증 {counts['보정']}장, 그중 더 잘 읽힌 것 {counts['나아짐']}장")
+        log(f"   금액·날짜(또는 분류)를 못 읽어 보정해서 다시 읽은 영수증 {counts['보정']}장, 그중 더 잘 읽힌 것 {counts['나아짐']}장")
+    if counts["분류"]:
+        log(f"   분류를 못 찾은 이 달 영수증 {counts['분류']}장을 다시 읽어 그중 {counts['분류 찾음']}장의 분류를 찾았습니다"
+            + ("(못 찾은 것은 영수증 확인 창에서 분류를 골라 주세요)" if counts["분류 찾음"] < counts["분류"] else ""))
     remembered = sum(1 for r in receipts if r.remembered)
     if remembered:
         log(f"   기억해 둔 가게의 영수증 {remembered}장은 그때 고른 분류·병원·도시로 맞췄습니다.")
